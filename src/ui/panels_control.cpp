@@ -6,6 +6,7 @@
 #include "core/log.h"
 #include "core/paths.h"
 #include "core/util.h"
+#include "llm/http.h"
 #include "segment/sam.h"
 #include "ui/file_dialog.h"
 #include "ui/widgets.h"
@@ -713,6 +714,96 @@ void panel_profile(AppState& app)
 }
 
 // ---------------------------------------------------------------------------
+// The weights, fetched on request.
+//
+// Nothing is downloaded unless somebody presses the button: it is hundreds of
+// megabytes from a third party, and that is a decision for the person sitting
+// here, not for the application on first run. The licence and the source are on
+// screen next to it for the same reason.
+void draw_checkpoint_download(AppState& app, SegmenterOptions& seg)
+{
+    const Palette&      p  = palette();
+    CheckpointDownload& dl = app.checkpoint_download;
+
+    // A finished download points the settings at what it just wrote.
+    std::string model_type;
+    if (const std::string done = dl.take_finished(&model_type); !done.empty()) {
+        seg.sam.checkpoint = done;
+        if (!model_type.empty()) seg.sam.model_type = model_type;
+        app.notify("Checkpoint ready: " + fs::path(done).filename().string(), 6.0);
+    }
+
+    if (dl.running()) {
+        const float    fraction = dl.fraction();
+        const uint64_t received = dl.received();
+        const uint64_t total    = dl.total();
+
+        const std::string overlay =
+            total ? format("%s  -  %s of %s", dl.label().c_str(),
+                           paths::format_bytes(received).c_str(),
+                           paths::format_bytes(total).c_str())
+                  : format("%s  -  %s", dl.label().c_str(),
+                           paths::format_bytes(received).c_str());
+        progress_bar(fraction < 0.0f ? 0.0f : fraction, overlay.c_str());
+
+        spacer(4.0f);
+        if (ImGui::Button("Cancel download", ImVec2(160, 0))) dl.cancel();
+        return;
+    }
+
+    const std::vector<SamCheckpoint>& table = sam_checkpoints();
+    static int selected = 0;
+    selected = std::clamp(selected, 0, int(table.size()) - 1);
+
+    std::vector<std::string> labels;
+    std::vector<const char*> label_ptrs;
+    labels.reserve(table.size());
+    for (const SamCheckpoint& c : table)
+        labels.push_back(format("%s  -  %s", c.label, paths::format_bytes(c.bytes).c_str()));
+    for (const std::string& l : labels) label_ptrs.push_back(l.c_str());
+
+    ImGui::SetNextItemWidth(-160.0f);
+    ImGui::Combo("##checkpoint_pick", &selected, label_ptrs.data(), int(label_ptrs.size()));
+    ImGui::SameLine();
+
+    const SamCheckpoint& entry = table[size_t(selected)];
+    std::error_code ec;
+    const fs::path  destination = sam_checkpoint_path(entry);
+    const bool      already     = std::filesystem::exists(destination, ec);
+
+    if (already) {
+        if (ImGui::Button("Use it", ImVec2(150, 0))) {
+            seg.sam.checkpoint = destination.string();
+            seg.sam.model_type = entry.model_type;
+            app.notify("Using " + destination.filename().string());
+        }
+    } else {
+        std::string reason;
+        const bool  online = http_available(&reason);
+        ImGui::BeginDisabled(!online);
+        if (ImGui::Button("Download", ImVec2(150, 0))) dl.start(entry);
+        ImGui::EndDisabled();
+        if (!online && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", reason.c_str());
+    }
+
+    spacer(4.0f);
+    ImGui::PushStyleColor(ImGuiCol_Text, p.text_faint);
+    ImGui::TextWrapped("%s", entry.note);
+    ImGui::TextWrapped("Apache-2.0, from Meta's dl.fbaipublicfiles.com, kept beside your "
+                       "settings.");
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s\n%s", entry.url, sam_checkpoint_dir().string().c_str());
+
+    if (const std::string err = dl.error(); !err.empty()) {
+        spacer(4.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, p.danger);
+        ImGui::TextWrapped("%s", err.c_str());
+        ImGui::PopStyleColor();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Director
 // ---------------------------------------------------------------------------
 void panel_director(AppState& app)
@@ -813,6 +904,9 @@ void panel_director(AppState& app)
                        "cleans up whatever the rays miss.");
             slider_int("Timeout", &seg.sam.timeout_seconds, 30, 3600, 900, nullptr);
             end_form();
+
+            spacer(8.0f);
+            draw_checkpoint_download(app, seg);
 
             spacer(8.0f);
             {

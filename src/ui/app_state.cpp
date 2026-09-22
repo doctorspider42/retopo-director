@@ -3,6 +3,7 @@
 #include "core/log.h"
 #include "core/paths.h"
 #include "core/util.h"
+#include "llm/http.h"
 #include "render/gl.h"
 
 #include <stb_image.h>
@@ -210,6 +211,107 @@ void AppState::upload_meshes()
         if (bounds.valid() && !scene_bounds.valid()) camera.frame(bounds);
         if (bounds.valid()) scene_bounds = bounds;
     });
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// CheckpointDownload
+// ---------------------------------------------------------------------------
+CheckpointDownload::~CheckpointDownload() { join(); }
+
+bool CheckpointDownload::start(const SamCheckpoint& entry)
+{
+    if (running_.load()) return false;
+    if (worker_.joinable()) worker_.join();   // a finished one, not yet reaped
+
+    const fs::path destination = sam_checkpoint_path(entry);
+    {
+        std::lock_guard lock(mutex_);
+        label_ = entry.label;
+        error_.clear();
+        finished_.clear();
+        finished_model_type_.clear();
+    }
+    cancel_.store(false);
+    received_.store(0);
+    total_.store(entry.bytes);
+    running_.store(true);
+
+    const std::string url        = entry.url;
+    const std::string model_type = entry.model_type;
+    const std::string path       = destination.string();
+
+    RD_INFO("downloading %s (%s) to %s", entry.label,
+            paths::format_bytes(entry.bytes).c_str(), path.c_str());
+
+    worker_ = std::thread([this, url, path, model_type] {
+        HttpDownloadRequest req;
+        req.url         = url;
+        req.destination = path;
+        req.cancel      = &cancel_;
+        req.progress    = [this](uint64_t received, uint64_t total) {
+            received_.store(received);
+            if (total) total_.store(total);
+        };
+
+        const HttpDownloadResult res = http_download(req);
+
+        {
+            std::lock_guard lock(mutex_);
+            if (res.ok) {
+                finished_            = path;
+                finished_model_type_ = model_type;
+            } else {
+                error_ = res.error;
+            }
+        }
+        if (res.ok)
+            RD_INFO("downloaded %s in %s", path.c_str(), format_duration(res.seconds).c_str());
+        else
+            RD_WARN("download failed: %s", res.error.c_str());
+
+        running_.store(false);
+    });
+    return true;
+}
+
+void CheckpointDownload::cancel() { cancel_.store(true); }
+
+void CheckpointDownload::join()
+{
+    cancel_.store(true);
+    if (worker_.joinable()) worker_.join();
+    running_.store(false);
+}
+
+float CheckpointDownload::fraction() const
+{
+    const uint64_t total = total_.load();
+    if (total == 0) return -1.0f;
+    return std::clamp(float(double(received_.load()) / double(total)), 0.0f, 1.0f);
+}
+
+std::string CheckpointDownload::label() const
+{
+    std::lock_guard lock(mutex_);
+    return label_;
+}
+
+std::string CheckpointDownload::error() const
+{
+    std::lock_guard lock(mutex_);
+    return error_;
+}
+
+std::string CheckpointDownload::take_finished(std::string* model_type)
+{
+    std::lock_guard lock(mutex_);
+    if (finished_.empty()) return {};
+    if (model_type) *model_type = finished_model_type_;
+    std::string out;
+    out.swap(finished_);
+    finished_model_type_.clear();
+    return out;
 }
 
 // ---------------------------------------------------------------------------

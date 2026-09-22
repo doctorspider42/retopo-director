@@ -99,6 +99,7 @@ build.cmd -run --mesh sculpt.glb --run
 | `--segmenter <name>` | region split: `geometric`, `sam` or `auto` |
 | `--sam-checkpoint <file>` | SAM weights the sidecar should load |
 | `--sam-device <name>` | `auto`, `cuda`, `cpu` or `mps` |
+| `--sam-download <name>` | fetch the `vit_b`, `vit_l` or `vit_h` checkpoint, then exit |
 | `--screenshot <file>` | write a png of the window; no focus needed |
 | `--screenshot-delay <sec>` | when to take it; 0 waits for the run to finish |
 | `--exit-after <sec>` | close the window automatically |
@@ -150,8 +151,33 @@ things. It runs out of process, in a Python sidecar that holds the model:
 
 ```bash
 pip install torch torchvision segment-anything pillow numpy
-# then fetch a checkpoint; vit_b is 375 MB and enough for this
-retopo-director --mesh high.obj --segmenter sam --sam-checkpoint sam_vit_b_01ec64.pth
+```
+
+Then get the weights. The **Director → Region split** card has a button for it,
+or on a machine nobody is sitting at:
+
+```bash
+retopo-director --sam-download vit_b
+```
+
+Either way the file is fetched from the address Meta documents, under Apache-2.0
+(the same licence as this project), and kept next to your settings. Nothing is
+downloaded on its own: a checkpoint is hundreds of megabytes from a third party,
+which is a decision for you rather than for the application on first run. The
+file lands as `.part` and is moved into place only once it is complete, so an
+interrupted transfer can never be mistaken for a usable checkpoint.
+
+| | size | VRAM |
+|---|---|---|
+| `vit_b` | 375 MB | ~4 GB |
+| `vit_l` | 1.25 GB | ~6 GB |
+| `vit_h` | 2.56 GB | ~8 GB |
+
+`vit_b` is the one to take: the masks are only a starting point that the
+director merges, so the bigger backbones buy little here.
+
+```bash
+retopo-director --mesh high.obj --segmenter sam
 ```
 
 The reference renders the director is already looking at go to the sidecar, the
@@ -164,9 +190,13 @@ than compete, and the sliver absorption and statistics at the end are shared.
 Nothing about this is required. A missing checkpoint, a machine with no CUDA
 device, a sidecar that falls over or a `--no-gpu` run with no renders to feed it
 all cost a warning in the log, and the run continues on the geometric split.
-`auto` says so quietly, `sam` says so loudly. ViT-H wants roughly 8 GB of VRAM
-and ViT-B fits in 4 GB; MobileSAM and FastSAM are the sensible middle ground at
-a few hundred milliseconds a view.
+`auto` says so quietly, `sam` says so loudly.
+
+The sidecar speaks the `segment_anything` package's API, so it takes that
+project's checkpoints: `vit_b`, `vit_l` and `vit_h`. MobileSAM, FastSAM and
+SAM 2 are all faster and would be a sensible thing to support, but each is a
+different package with a different entry point - perhaps ten lines in
+`tools/sam_server.py`, not a checkpoint you can drop in.
 
 ## What the model is and is not allowed to do
 

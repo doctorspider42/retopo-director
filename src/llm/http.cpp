@@ -6,6 +6,8 @@
 #include "llm/process.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <filesystem>
 
 #if defined(RD_PLATFORM_WINDOWS)
 #  include <windows.h>
@@ -48,6 +50,29 @@ ParsedUrl parse_url(const std::string& url)
     }
     out.ok = !out.host.empty();
     return out;
+}
+
+} // namespace
+
+
+namespace {
+
+namespace fs = std::filesystem;
+
+// The finished transfer replaces whatever was there. Windows will not rename
+// over an existing file, so the old one goes first; by this point the new one
+// is complete, which is the whole reason for the .part dance.
+bool commit_part_file(const fs::path& part, const fs::path& destination, std::string& error)
+{
+    std::error_code ec;
+    fs::remove(destination, ec);
+    fs::rename(part, destination, ec);
+    if (ec) {
+        error = "cannot move the download into place: " + ec.message();
+        fs::remove(part, ec);
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -163,6 +188,142 @@ HttpResponse http_request(const HttpRequest& req)
     return res;
 }
 
+HttpDownloadResult http_download(const HttpDownloadRequest& req)
+{
+    HttpDownloadResult res;
+    Stopwatch watch;
+
+    const ParsedUrl url = parse_url(req.url);
+    if (!url.ok) {
+        res.error = "cannot parse url: " + req.url;
+        return res;
+    }
+
+    const fs::path destination(req.destination);
+    const fs::path part = fs::path(req.destination + ".part");
+    std::error_code ec;
+    fs::create_directories(destination.parent_path(), ec);
+
+    Handle session(WinHttpOpen(L"RetopoDirector/" RD_VERSION_STRING,
+                               WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+    if (!session) {
+        res.error = format("WinHttpOpen failed (%lu)", GetLastError());
+        return res;
+    }
+
+    // Generous: a checkpoint is hundreds of megabytes and the receive timeout
+    // applies per read, not to the transfer as a whole.
+    const DWORD timeout_ms = DWORD(std::max(1, req.timeout_seconds) * 1000);
+    WinHttpSetTimeouts(session, 15000, 15000, 60000, int(timeout_ms));
+
+    Handle connect(WinHttpConnect(session, widen(url.host).c_str(),
+                                  INTERNET_PORT(url.port), 0));
+    if (!connect) {
+        res.error = format("WinHttpConnect failed (%lu)", GetLastError());
+        return res;
+    }
+
+    Handle request(WinHttpOpenRequest(connect, L"GET", widen(url.path).c_str(), nullptr,
+                                      WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                      url.https ? WINHTTP_FLAG_SECURE : 0));
+    if (!request) {
+        res.error = format("WinHttpOpenRequest failed (%lu)", GetLastError());
+        return res;
+    }
+
+    if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+        res.error = format("WinHttpSendRequest failed (%lu)", GetLastError());
+        return res;
+    }
+    if (!WinHttpReceiveResponse(request, nullptr)) {
+        res.error = format("WinHttpReceiveResponse failed (%lu)", GetLastError());
+        return res;
+    }
+
+    DWORD status = 0, status_size = sizeof(status);
+    WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size,
+                        WINHTTP_NO_HEADER_INDEX);
+    res.status = int(status);
+    if (res.status < 200 || res.status >= 300) {
+        res.error = format("http %d", res.status);
+        return res;
+    }
+
+    ULONGLONG length = 0;
+    DWORD     length_size = sizeof(length);
+    if (WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER64,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &length, &length_size,
+                            WINHTTP_NO_HEADER_INDEX))
+        res.expected = uint64_t(length);
+
+    std::FILE* file = std::fopen(part.string().c_str(), "wb");
+    if (!file) {
+        res.error = "cannot write " + part.string();
+        return res;
+    }
+
+    std::vector<char> buffer(256 * 1024);
+    bool              aborted = false;
+
+    for (;;) {
+        if (req.cancel && req.cancel->load()) {
+            res.error = "cancelled";
+            aborted   = true;
+            break;
+        }
+
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request, &available)) {
+            res.error = format("WinHttpQueryDataAvailable failed (%lu)", GetLastError());
+            aborted   = true;
+            break;
+        }
+        if (available == 0) break;      // the body ended
+
+        const DWORD want = std::min<DWORD>(available, DWORD(buffer.size()));
+        DWORD       read = 0;
+        if (!WinHttpReadData(request, buffer.data(), want, &read)) {
+            res.error = format("WinHttpReadData failed (%lu)", GetLastError());
+            aborted   = true;
+            break;
+        }
+        if (read == 0) break;
+
+        if (std::fwrite(buffer.data(), 1, read, file) != read) {
+            res.error = "cannot write " + part.string() + " (disk full?)";
+            aborted   = true;
+            break;
+        }
+        res.bytes += read;
+        if (req.progress) req.progress(res.bytes, res.expected);
+    }
+
+    std::fclose(file);
+
+    if (aborted) {
+        fs::remove(part, ec);
+        res.seconds = watch.seconds();
+        return res;
+    }
+
+    // A transfer that ended early still writes a plausible looking file, and a
+    // truncated checkpoint fails much later and far less clearly.
+    if (res.expected != 0 && res.bytes != res.expected) {
+        fs::remove(part, ec);
+        res.error = format("the transfer ended early: %llu of %llu bytes",
+                           (unsigned long long)res.bytes, (unsigned long long)res.expected);
+        res.seconds = watch.seconds();
+        return res;
+    }
+
+    res.ok      = commit_part_file(part, destination, res.error);
+    res.seconds = watch.seconds();
+    return res;
+}
+
 #else   // POSIX: shell out to curl rather than linking another library.
 
 bool http_available(std::string* reason)
@@ -209,6 +370,57 @@ HttpResponse http_request(const HttpRequest& req)
     res.status = std::atoi(p.out.c_str() + nl + 1);
     res.ok     = res.status >= 200 && res.status < 300;
     if (!res.ok) res.error = format("http %d", res.status);
+    res.seconds = watch.seconds();
+    return res;
+}
+
+
+HttpDownloadResult http_download(const HttpDownloadRequest& req)
+{
+    HttpDownloadResult res;
+    Stopwatch watch;
+
+    std::string reason;
+    if (!http_available(&reason)) {
+        res.error = reason;
+        return res;
+    }
+
+    const fs::path destination(req.destination);
+    const fs::path part = fs::path(req.destination + ".part");
+    std::error_code ec;
+    fs::create_directories(destination.parent_path(), ec);
+
+    // curl writes the file itself, so there is no byte by byte progress to
+    // report here; the caller gets one call at the start and one at the end.
+    if (req.progress) req.progress(0, 0);
+
+    ProcessRequest pr;
+    pr.executable      = "curl";
+    pr.arguments       = {"-sS", "-L", "--fail", "-o", part.string(), req.url};
+    pr.timeout_seconds = req.timeout_seconds;
+    pr.cancel          = req.cancel;
+
+    const ProcessResult p = run_process(pr);
+    if (!p.started)   { res.error = p.error;              fs::remove(part, ec); return res; }
+    if (p.cancelled)  { res.error = "cancelled";          fs::remove(part, ec); return res; }
+    if (p.timed_out)  { res.error = "the download timed out"; fs::remove(part, ec); return res; }
+    if (p.exit_code != 0) {
+        res.error = trim(p.err).empty() ? format("curl exited with %d", p.exit_code)
+                                        : trim(p.err);
+        fs::remove(part, ec);
+        return res;
+    }
+
+    res.bytes = uint64_t(fs::file_size(part, ec));
+    if (ec) {
+        res.error = "the download produced no file";
+        return res;
+    }
+    if (req.progress) req.progress(res.bytes, res.bytes);
+
+    res.status  = 200;
+    res.ok      = commit_part_file(part, destination, res.error);
     res.seconds = watch.seconds();
     return res;
 }

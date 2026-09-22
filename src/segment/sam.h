@@ -16,9 +16,37 @@
 
 #include "segment/segmenter.h"
 
+#include <cstdint>
+#include <filesystem>
 #include <memory>
+#include <vector>
 
 namespace rd {
+
+// The checkpoints the sidecar can load, which is what the `segment_anything`
+// package publishes: one file of trained weights per backbone size. The code is
+// small; everything the model knows lives in these.
+//
+// Apache-2.0, the same licence as this project, downloaded from the address
+// Meta documents in the Segment Anything repository. Nothing here is mirrored
+// or redistributed - the application fetches the file on request, which is the
+// same thing the user would otherwise do with curl. (The SA-1B *dataset* is
+// under a separate research licence; it is not involved.)
+struct SamCheckpoint {
+    const char* model_type;   // what the sidecar passes to sam_model_registry
+    const char* label;
+    const char* file;
+    const char* url;
+    uint64_t    bytes;
+    const char* note;         // what it costs to run
+};
+
+const std::vector<SamCheckpoint>& sam_checkpoints();
+
+// Where a downloaded checkpoint is kept: beside the settings, not in the
+// project, because it belongs to the machine rather than to one asset.
+std::filesystem::path sam_checkpoint_dir();
+std::filesystem::path sam_checkpoint_path(const SamCheckpoint& entry);
 
 // Never null. Reports through ISegmenter::available() when the interpreter,
 // the script or the checkpoint is missing, so the caller can fall back.

@@ -4,7 +4,9 @@
 #include "core/paths.h"
 #include "core/thread_pool.h"
 #include "core/util.h"
+#include "llm/http.h"
 #include "render/gl.h"
+#include "segment/sam.h"
 #include "ui/app_state.h"
 #include "ui/file_dialog.h"
 #include "ui/panels.h"
@@ -249,6 +251,68 @@ GLFWwindow* create_hidden_context()
     return window;
 }
 
+// Fetch a checkpoint and stop. Deliberately its own path: it needs no mesh, no
+// profile, no GL context and no pipeline, and a machine that is only being
+// provisioned should not have to start any of them.
+int run_download(const std::string& model_type)
+{
+    log::set_echo_stderr(true);
+
+    const SamCheckpoint* entry = nullptr;
+    for (const SamCheckpoint& c : sam_checkpoints())
+        if (model_type == c.model_type || iequals(model_type, c.label)) entry = &c;
+
+    if (!entry) {
+        std::fprintf(stderr, "error: unknown checkpoint '%s'; known:", model_type.c_str());
+        for (const SamCheckpoint& c : sam_checkpoints())
+            std::fprintf(stderr, " %s", c.model_type);
+        std::fprintf(stderr, "\n");
+        return 2;
+    }
+
+    std::string reason;
+    if (!http_available(&reason)) {
+        std::fprintf(stderr, "error: %s\n", reason.c_str());
+        return 1;
+    }
+
+    const fs::path destination = sam_checkpoint_path(*entry);
+    std::error_code ec;
+    if (fs::exists(destination, ec)) {
+        std::printf("%s is already there\n", destination.string().c_str());
+        return 0;
+    }
+
+    std::printf("%s (%s), Apache-2.0, from %s\n", entry->label,
+                paths::format_bytes(entry->bytes).c_str(), entry->url);
+
+    HttpDownloadRequest req;
+    req.url         = entry->url;
+    req.destination = destination.string();
+
+    // One line, rewritten in place, so a log file does not fill with progress.
+    int last_percent = -1;
+    req.progress = [&](uint64_t received, uint64_t total) {
+        if (!total) return;
+        const int percent = int(100.0 * double(received) / double(total));
+        if (percent == last_percent) return;
+        last_percent = percent;
+        std::printf("\r  %3d%%  %s", percent, paths::format_bytes(received).c_str());
+        std::fflush(stdout);
+    };
+
+    const HttpDownloadResult res = http_download(req);
+    std::printf("\n");
+
+    if (!res.ok) {
+        std::fprintf(stderr, "error: %s\n", res.error.c_str());
+        return 1;
+    }
+    std::printf("wrote %s in %s\n", destination.string().c_str(),
+                format_duration(res.seconds).c_str());
+    return 0;
+}
+
 int run_headless(const AppOptions& opts, ui::AppState& app)
 {
     // No console panel here, so the ring buffer is mirrored to stderr.
@@ -321,16 +385,24 @@ int run_headless(const AppOptions& opts, ui::AppState& app)
 // ---------------------------------------------------------------------------
 int run_application(const AppOptions& opts)
 {
+    if (!opts.sam_download.empty()) {
+        paths::ensure_dir(paths::config_dir());
+        return run_download(opts.sam_download);
+    }
+
     auto app = std::make_unique<ui::AppState>();
 
     // Before anything that logs: a --verbose run wants the startup diagnostics
     // too, and in headless mode stderr is the only place they can be read.
     if (opts.verbose) log::set_echo_stderr(true);
 
-    if (!opts.project_dir.empty()) paths::set_project_dir(opts.project_dir);
-
     app->settings.profile = TargetProfile::ps2_character_default();
     app->load_settings();
+
+    // After load_settings, not before: the stored project directory is the one
+    // the window was last pointed at, and it would otherwise quietly win over
+    // the one asked for on the command line.
+    if (!opts.project_dir.empty()) paths::set_project_dir(opts.project_dir);
     app->refresh_profiles();
 
     if (!opts.startup_profile.empty()) app->load_profile(opts.startup_profile);
@@ -565,6 +637,11 @@ int run_application(const AppOptions& opts)
     }
 
     // --- shutdown ---------------------------------------------------------------
+    // A download in flight is abandoned rather than waited out: it writes to a
+    // .part file that is removed on the way out, so nothing half written is
+    // left looking like a checkpoint.
+    app->checkpoint_download.join();
+
     app->pipeline.cancel();
     // Keep servicing render requests so a worker blocked on one can finish.
     while (app->pipeline.running()) {

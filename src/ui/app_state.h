@@ -6,10 +6,15 @@
 #include "core/dispatcher.h"
 #include "pipeline/pipeline.h"
 #include "render/renderer.h"
+#include "segment/sam.h"
 
+#include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <map>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 struct GLFWwindow;
@@ -50,6 +55,50 @@ private:
     std::map<std::string, Entry> entries_;
 };
 
+// Fetching a model checkpoint, off the interface thread.
+//
+// Hundreds of megabytes over a network connection cannot happen between two
+// frames, so the work runs on its own thread and the panel reads the atomics
+// every frame. The worker never touches AppState, which is what keeps this
+// free of locks the interface would have to wait on.
+class CheckpointDownload {
+public:
+    ~CheckpointDownload();
+
+    // False when one is already in flight.
+    bool start(const SamCheckpoint& entry);
+    // Asks the transfer to stop; it ends on its own a moment later.
+    void cancel();
+    // Cancels and waits. Called on the way out, so closing the window during a
+    // download does not leave a thread writing to a file nobody owns any more.
+    void join();
+
+    bool     running()  const { return running_.load(); }
+    uint64_t received() const { return received_.load(); }
+    uint64_t total()    const { return total_.load(); }
+    // 0..1, or -1 when the server never said how big the file is.
+    float    fraction() const;
+
+    std::string label() const;
+    std::string error() const;
+    // The path of a download that just finished, returned once and then
+    // forgotten, so the panel applies it exactly one time.
+    std::string take_finished(std::string* model_type = nullptr);
+
+private:
+    std::thread           worker_;
+    std::atomic<bool>     running_{false};
+    std::atomic<bool>     cancel_{false};
+    std::atomic<uint64_t> received_{0};
+    std::atomic<uint64_t> total_{0};
+
+    mutable std::mutex    mutex_;
+    std::string           label_;
+    std::string           error_;
+    std::string           finished_;
+    std::string           finished_model_type_;
+};
+
 struct AppState {
     // --- engine --------------------------------------------------------------
     GLFWwindow*          window = nullptr;
@@ -69,6 +118,7 @@ struct AppState {
     bool        gpu_low_ok    = false;
     Aabb        scene_bounds;
     ImageCache  images;
+    CheckpointDownload checkpoint_download;
 
     // --- viewport ------------------------------------------------------------
     OrbitCamera camera;

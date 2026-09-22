@@ -120,6 +120,34 @@ void split_disconnected(const MeshTopology& topo, std::vector<uint16_t>& tri_reg
 } // namespace
 
 // ---------------------------------------------------------------------------
+const std::vector<SamCheckpoint>& sam_checkpoints()
+{
+    // Sizes are the ones the server actually serves, so a truncated download is
+    // caught rather than handed to Torch.
+    static const std::vector<SamCheckpoint> table = {
+        {"vit_b", "ViT-B", "sam_vit_b_01ec64.pth",
+         "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth",
+         375042383ull, "About 4 GB of VRAM, and enough for this: the masks are only "
+                       "a starting point that the director merges."},
+        {"vit_l", "ViT-L", "sam_vit_l_0b3195.pth",
+         "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth",
+         1249524607ull, "About 6 GB of VRAM."},
+        {"vit_h", "ViT-H", "sam_vit_h_4b8939.pth",
+         "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth",
+         2564550879ull, "About 8 GB of VRAM. Diminishing returns here, because the "
+                        "director merges the patches anyway."},
+    };
+    return table;
+}
+
+std::filesystem::path sam_checkpoint_dir() { return paths::config_dir() / "models"; }
+
+std::filesystem::path sam_checkpoint_path(const SamCheckpoint& entry)
+{
+    return sam_checkpoint_dir() / entry.file;
+}
+
+// ---------------------------------------------------------------------------
 std::string find_sam_script()
 {
     std::error_code ec;

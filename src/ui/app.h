@@ -19,6 +19,9 @@ struct AppOptions {
     std::string segmenter;          // geometric | sam | auto
     std::string sam_checkpoint;
     std::string sam_device;         // auto | cuda | cpu | mps
+    // Fetch a checkpoint and exit. The same download the Director panel offers,
+    // for a machine nobody is sitting at.
+    std::string sam_download;       // vit_b | vit_l | vit_h
 
     // Headless still creates a hidden OpenGL context so the director gets its
     // renders and the silhouette metric means something. --no-gpu forces the

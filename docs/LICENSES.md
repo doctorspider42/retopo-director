@@ -55,10 +55,23 @@ so nobody re-litigates it by accident.
 
 - **Segment Anything** (Apache-2.0, checkpoints Apache-2.0) and **PyTorch**
   (BSD-3) are used by `tools/sam_server.py`, which is a separate process the
-  user installs and points at a checkpoint themselves. Nothing is vendored,
-  nothing is downloaded, nothing links against them, and the product works
-  without them. Keeping the model out of process is what keeps this paragraph
-  short.
+  user installs themselves. Nothing is vendored, nothing links against them, and
+  the product works without them. Keeping the model out of process is what keeps
+  this paragraph short.
+
+  The application can fetch a checkpoint on request, from the **Director →
+  Region split** card or with `--sam-download`. That is a download, not
+  redistribution: the file comes from the address Meta documents in the Segment
+  Anything repository, it is never mirrored, bundled or shipped alongside the
+  executable, and it is only ever fetched when somebody asks for it. The licence
+  and the source are on screen next to the button. Should this project ever want
+  to mirror or bundle the weights, Apache-2.0 attaches the usual conditions -
+  carry the licence and the NOTICE, state what was changed - and that is a
+  decision to make deliberately at the time.
+
+  The **SA-1B dataset** is a separate thing under a research licence, and is not
+  used here: the model is Apache-2.0, the data it was trained on is not ours to
+  pass on.
 
 ## Fonts
 

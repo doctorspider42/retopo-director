@@ -34,6 +34,7 @@ void print_usage()
         "  --segmenter <name>       Region split: geometric | sam | auto\n"
         "  --sam-checkpoint <file>  SAM weights the sidecar should load\n"
         "  --sam-device <name>      auto | cuda | cpu | mps\n"
+        "  --sam-download <name>    Fetch vit_b | vit_l | vit_h, then exit\n"
         "\n"
         "  --screenshot <file>       Write a png of the window (no focus needed)\n"
         "  --screenshot-delay <sec>  When to take it; 0 waits for the run to end\n"
@@ -83,6 +84,8 @@ int main(int argc, char** argv)
             opts.sam_checkpoint = next("--sam-checkpoint");
         } else if (!std::strcmp(a, "--sam-device")) {
             opts.sam_device = next("--sam-device");
+        } else if (!std::strcmp(a, "--sam-download")) {
+            opts.sam_download = next("--sam-download");
         } else if (!std::strcmp(a, "--no-gpu")) {
             opts.no_gpu = true;
         } else if (!std::strcmp(a, "--screenshot")) {
