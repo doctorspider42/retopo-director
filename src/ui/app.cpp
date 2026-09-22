@@ -323,6 +323,10 @@ int run_application(const AppOptions& opts)
 {
     auto app = std::make_unique<ui::AppState>();
 
+    // Before anything that logs: a --verbose run wants the startup diagnostics
+    // too, and in headless mode stderr is the only place they can be read.
+    if (opts.verbose) log::set_echo_stderr(true);
+
     if (!opts.project_dir.empty()) paths::set_project_dir(opts.project_dir);
 
     app->settings.profile = TargetProfile::ps2_character_default();
@@ -343,8 +347,18 @@ int run_application(const AppOptions& opts)
         app->settings.force_backend = true;
         RD_INFO("backend forced to %s", backend_name(app->settings.backend));
     }
-    if (opts.no_llm)  app->settings.use_llm = false;
-    if (opts.verbose) log::set_echo_stderr(true);
+    if (!opts.segmenter.empty()) {
+        if (parse_segmenter_kind(opts.segmenter, app->settings.segmenter.kind))
+            RD_INFO("segmenter forced to %s",
+                    segmenter_kind_name(app->settings.segmenter.kind));
+        else
+            RD_WARN("unknown segmenter '%s', keeping %s", opts.segmenter.c_str(),
+                    segmenter_kind_name(app->settings.segmenter.kind));
+    }
+    if (!opts.sam_checkpoint.empty()) app->settings.segmenter.sam.checkpoint = opts.sam_checkpoint;
+    if (!opts.sam_device.empty())     app->settings.segmenter.sam.device     = opts.sam_device;
+
+    if (opts.no_llm) app->settings.use_llm = false;
 
     app->pipeline.set_dispatcher(&app->dispatcher);
 

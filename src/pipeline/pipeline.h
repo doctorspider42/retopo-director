@@ -15,6 +15,7 @@
 #include "pipeline/director.h"
 #include "render/renderer.h"
 #include "segment/segment.h"
+#include "segment/segmenter.h"
 #include "validate/validator.h"
 
 #include <atomic>
@@ -57,6 +58,7 @@ struct PipelineSettings {
     LlmConfig           llm;
     AnalysisOptions     analysis;
     SegmentationOptions segmentation;
+    SegmenterOptions    segmenter;
     DensityOptions      density;
     RetopoOptions       retopo;
     BakeOptions         bake;

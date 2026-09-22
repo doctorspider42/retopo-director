@@ -14,6 +14,12 @@ struct AppOptions {
     bool        autorun  = false;   // start the pipeline as soon as the window opens
     std::string backend;            // auto | quad_field | quadric, overrides the panel
 
+    // Region split. Empty keeps whatever settings.json holds; the rest override
+    // it for this run only, which is how the two paths get compared on one mesh.
+    std::string segmenter;          // geometric | sam | auto
+    std::string sam_checkpoint;
+    std::string sam_device;         // auto | cuda | cpu | mps
+
     // Headless still creates a hidden OpenGL context so the director gets its
     // renders and the silhouette metric means something. --no-gpu forces the
     // old behaviour, for a machine with no usable driver at all.

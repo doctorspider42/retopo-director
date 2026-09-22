@@ -45,6 +45,15 @@ so nobody re-litigates it by accident.
   not GPL, so it is a perfectly good preview or conversion tool. It is not part
   of this pipeline.
 
+## Optional, at runtime, out of process
+
+- **Segment Anything** (Apache-2.0, checkpoints Apache-2.0) and **PyTorch**
+  (BSD-3) are used by `tools/sam_server.py`, which is a separate process the
+  user installs and points at a checkpoint themselves. Nothing is vendored,
+  nothing is downloaded, nothing links against them, and the product works
+  without them. Keeping the model out of process is what keeps this paragraph
+  short.
+
 ## Fonts
 
 No fonts are bundled. The interface loads whatever the system provides (Segoe UI

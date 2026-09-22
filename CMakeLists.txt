@@ -182,6 +182,13 @@ add_custom_command(TARGET retopo-director POST_BUILD
             ${CMAKE_CURRENT_SOURCE_DIR}/profiles $<TARGET_FILE_DIR:retopo-director>/profiles
     COMMENT "Staging target profiles")
 
+# The SAM sidecar. Optional at runtime, but it has to sit next to the binary for
+# the segmenter to find it without being told where it is.
+add_custom_command(TARGET retopo-director POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools $<TARGET_FILE_DIR:retopo-director>/tools
+    COMMENT "Staging the segmentation sidecar")
+
 message(STATUS "-------------------------------------------------")
 message(STATUS " Retopo Director ${PROJECT_VERSION}")
 message(STATUS "  compiler : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")

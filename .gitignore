@@ -10,3 +10,4 @@ screenshots/
 *.gltf
 *.glb
 !profiles/*.json
+__pycache__/

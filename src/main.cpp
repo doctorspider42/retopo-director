@@ -31,6 +31,10 @@ void print_usage()
         "  --verbose         Mirror the log to stderr\n"
         "  --no-gpu          Do not create a GL context, even in headless mode\n"
         "\n"
+        "  --segmenter <name>       Region split: geometric | sam | auto\n"
+        "  --sam-checkpoint <file>  SAM weights the sidecar should load\n"
+        "  --sam-device <name>      auto | cuda | cpu | mps\n"
+        "\n"
         "  --screenshot <file>       Write a png of the window (no focus needed)\n"
         "  --screenshot-delay <sec>  When to take it; 0 waits for the run to end\n"
         "  --exit-after <sec>        Close the window automatically\n"
@@ -73,6 +77,12 @@ int main(int argc, char** argv)
             opts.autorun = true;
         } else if (!std::strcmp(a, "--backend")) {
             opts.backend = next("--backend");
+        } else if (!std::strcmp(a, "--segmenter")) {
+            opts.segmenter = next("--segmenter");
+        } else if (!std::strcmp(a, "--sam-checkpoint")) {
+            opts.sam_checkpoint = next("--sam-checkpoint");
+        } else if (!std::strcmp(a, "--sam-device")) {
+            opts.sam_device = next("--sam-device");
         } else if (!std::strcmp(a, "--no-gpu")) {
             opts.no_gpu = true;
         } else if (!std::strcmp(a, "--screenshot")) {

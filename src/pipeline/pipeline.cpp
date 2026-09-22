@@ -301,21 +301,60 @@ bool Pipeline::stage_segment(const PipelineSettings& s)
 {
     set_stage(Stage::Segmenting, "splitting into regions");
 
-    Mesh         copy;
-    MeshAnalysis analysis_copy;
+    Mesh                    copy;
+    MeshAnalysis            analysis_copy;
+    ViewSet                 views_copy;
+    std::vector<ViewCamera> cameras_copy;
     {
         std::lock_guard lock(results_mutex_);
         copy          = results_.highpoly;
         analysis_copy = results_.analysis;
+        views_copy    = results_.reference_views;
+        cameras_copy  = results_.cameras;
     }
     // The analysis owns a BVH that points at the mesh it was built from; rebuild
     // it against our local copy so the pointers stay valid.
     analysis_copy.bvh.build(copy);
 
+    SegmenterInput input;
+    input.mesh     = &copy;
+    input.analysis = &analysis_copy;
+    input.views    = &views_copy;
+    input.cameras  = &cameras_copy;
+
+    auto progress = [&](float f, const char* what) { set_progress(f, what); };
+
     Segmentation seg;
-    segment_mesh(copy, analysis_copy, seg, s.segmentation,
-                 [&](float f, const char* what) { set_progress(f, what); });
-    if (cancelled()) return false;
+    bool         done = false;
+
+    // The chosen segmenter first, the geometric split as the floor. A missing
+    // checkpoint, a machine with no CUDA device or a sidecar that falls over
+    // must cost a warning, not the run.
+    if (s.segmenter.kind != SegmenterKind::Geometric) {
+        // Auto was told to use whatever is there, so a missing checkpoint is
+        // news rather than a problem. Sam was asked for by name.
+        const bool asked_for = s.segmenter.kind == SegmenterKind::Sam;
+
+        std::unique_ptr<ISegmenter> chosen = make_segmenter(s.segmenter);
+        std::string                 why;
+        if (!chosen->available(input, why)) {
+            if (asked_for) RD_WARN("%s segmentation unavailable: %s", chosen->name(), why.c_str());
+            else           RD_INFO("%s segmentation unavailable: %s", chosen->name(), why.c_str());
+        } else {
+            set_progress(0.0f, "segmenting with SAM");
+            done = chosen->run(input, s.segmentation, seg, why, progress, &cancel_);
+            if (cancelled()) return false;
+            // A sidecar that answered and then failed is worth a warning either
+            // way: something was configured, and it did not work.
+            if (!done) RD_WARN("%s segmentation failed: %s", chosen->name(), why.c_str());
+        }
+        if (!done && asked_for) RD_WARN("falling back to the geometric split");
+    }
+
+    if (!done) {
+        segment_mesh(copy, analysis_copy, seg, s.segmentation, progress);
+        if (cancelled()) return false;
+    }
     if (!seg.valid()) {
         fail("segmentation produced no regions");
         return false;

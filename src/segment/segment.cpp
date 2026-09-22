@@ -68,6 +68,52 @@ int triangle_dominant_joint(const Mesh& mesh, const MeshAnalysis& analysis, size
     return best;
 }
 
+// Edge weight of the dual graph, shared by the geometric split and by the fill
+// that an alternative segmenter runs over the triangles it could not label.
+// Holds the per triangle attributes the weight needs, so building it once and
+// passing it around costs one pass over the mesh instead of one per query.
+struct DualCost {
+    DualCost(const Mesh& mesh, const MeshAnalysis& analysis, const SegmentationOptions& o)
+        : topo(analysis.topology), analysis_(analysis), opts(o)
+    {
+        const size_t tcount = mesh.triangle_count();
+        centroid.resize(tcount);
+        joint.assign(tcount, -1);
+        for (size_t t = 0; t < tcount; ++t) {
+            centroid[t] = mesh.triangle_centroid(t);
+            if (opts.use_armature) joint[t] = triangle_dominant_joint(mesh, analysis, t);
+        }
+        scale = std::max(analysis.bbox_diagonal, kEps);
+    }
+
+    float operator()(uint32_t a, uint32_t b, uint32_t half_edge) const
+    {
+        float w = length(centroid[b] - centroid[a]) / scale;
+        w = std::max(w, 1e-5f);
+
+        const Vec3  na   = analysis_.tri_normal[a];
+        const Vec3  nb   = analysis_.tri_normal[b];
+        const float bend = 1.0f - saturate(dot(na, nb));
+        w *= 1.0f + opts.normal_weight * bend;
+
+        const uint32_t edge = topo.half_edge_to_edge[half_edge];
+        if (edge < analysis_.edge_sharp.size() && analysis_.edge_sharp[edge])
+            w *= 1.0f + opts.sharp_penalty;
+
+        if (opts.use_armature && joint[a] != joint[b] && joint[a] >= 0 && joint[b] >= 0)
+            w *= 1.0f + opts.joint_penalty;
+
+        return w;
+    }
+
+    const MeshTopology&        topo;
+    const MeshAnalysis&        analysis_;
+    const SegmentationOptions& opts;
+    std::vector<Vec3>          centroid;
+    std::vector<int>           joint;
+    float                      scale = 1.0f;
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -237,33 +283,9 @@ void segment_mesh(const Mesh& mesh, const MeshAnalysis& analysis, Segmentation& 
     }
 
     // --- per triangle attributes used by the cost function ------------------
-    std::vector<Vec3> centroid(tcount);
-    std::vector<int>  joint(tcount, -1);
-    for (size_t t = 0; t < tcount; ++t) {
-        centroid[t] = mesh.triangle_centroid(t);
-        if (opts.use_armature) joint[t] = triangle_dominant_joint(mesh, analysis, t);
-    }
-
-    const float scale = std::max(analysis.bbox_diagonal, kEps);
-
-    auto edge_cost = [&](uint32_t a, uint32_t b, uint32_t half_edge) -> float {
-        float w = length(centroid[b] - centroid[a]) / scale;
-        w = std::max(w, 1e-5f);
-
-        const Vec3 na = analysis.tri_normal[a];
-        const Vec3 nb = analysis.tri_normal[b];
-        const float bend = 1.0f - saturate(dot(na, nb));
-        w *= 1.0f + opts.normal_weight * bend;
-
-        const uint32_t edge = topo.half_edge_to_edge[half_edge];
-        if (edge < analysis.edge_sharp.size() && analysis.edge_sharp[edge])
-            w *= 1.0f + opts.sharp_penalty;
-
-        if (opts.use_armature && joint[a] != joint[b] && joint[a] >= 0 && joint[b] >= 0)
-            w *= 1.0f + opts.joint_penalty;
-
-        return w;
-    };
+    const DualCost           edge_cost(mesh, analysis, opts);
+    const std::vector<Vec3>& centroid = edge_cost.centroid;
+    const std::vector<int>&  joint    = edge_cost.joint;
 
     // --- seeds --------------------------------------------------------------
     const int target = std::clamp(opts.target_regions, 2, 512);
@@ -371,8 +393,69 @@ void segment_mesh(const Mesh& mesh, const MeshAnalysis& analysis, Segmentation& 
     // --- build the region list ---------------------------------------------
     report(0.65f, "collecting regions");
     out.tri_region.assign(owner.begin(), owner.end());
+    report(0.85f, "merging slivers");
+    finalize_segmentation(mesh, analysis, opts, out);
 
-    std::unordered_set<uint16_t> live(owner.begin(), owner.end());
+    out.seconds = watch.seconds();
+    report(1.0f, "done");
+    RD_INFO("segmentation: %zu regions over %zu triangles in %s",
+            out.regions.size(), tcount, format_duration(out.seconds).c_str());
+}
+
+// ---------------------------------------------------------------------------
+void grow_unassigned_regions(const Mesh& mesh, const MeshAnalysis& analysis,
+                             const SegmentationOptions& opts,
+                             std::vector<uint16_t>& tri_region)
+{
+    const size_t tcount = mesh.triangle_count();
+    if (tri_region.size() != tcount || tcount == 0) return;
+
+    const MeshTopology& topo = analysis.topology;
+    if (topo.triangle_count() != tcount) {
+        RD_ERROR("region fill: topology does not match the mesh");
+        return;
+    }
+
+    const DualCost edge_cost(mesh, analysis, opts);
+
+    // Same Dijkstra as the geometric split, except that the seeds are every
+    // triangle that already carries a label rather than a sampled few.
+    std::vector<float> dist(tcount, std::numeric_limits<float>::max());
+    MinQueue queue;
+    for (size_t t = 0; t < tcount; ++t) {
+        if (tri_region[t] == kNoRegion) continue;
+        dist[t] = 0.0f;
+        queue.push({0.0f, static_cast<uint32_t>(t)});
+    }
+    if (queue.empty()) return;
+
+    while (!queue.empty()) {
+        const QueueEntry e = queue.top();
+        queue.pop();
+        if (e.cost > dist[e.triangle]) continue;
+        for (int c = 0; c < 3; ++c) {
+            const uint32_t h = e.triangle * 3 + c;
+            const uint32_t n = topo.neighbour(e.triangle, c);
+            if (n == kInvalidIndex) continue;
+            const float nd = e.cost + edge_cost(e.triangle, n, h);
+            if (nd < dist[n]) {
+                dist[n]        = nd;
+                tri_region[n]  = tri_region[e.triangle];
+                queue.push({nd, n});
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+void finalize_segmentation(const Mesh& mesh, const MeshAnalysis& analysis,
+                           const SegmentationOptions& opts, Segmentation& out,
+                           const char* name_prefix)
+{
+    if (out.tri_region.empty()) return;
+    const char* prefix = name_prefix && *name_prefix ? name_prefix : "region";
+
+    std::unordered_set<uint16_t> live(out.tri_region.begin(), out.tri_region.end());
     live.erase(kNoRegion);
     std::vector<uint16_t> live_sorted(live.begin(), live.end());
     std::sort(live_sorted.begin(), live_sorted.end());
@@ -382,7 +465,7 @@ void segment_mesh(const Mesh& mesh, const MeshAnalysis& analysis, Segmentation& 
     for (size_t i = 0; i < live_sorted.size(); ++i) {
         Region r;
         r.id   = static_cast<uint16_t>(i);
-        r.name = format("region_%02zu", i);
+        r.name = format("%s_%02zu", prefix, i);
         out.regions.push_back(std::move(r));
     }
     // Compact the ids so they run 0..n-1.
@@ -397,7 +480,6 @@ void segment_mesh(const Mesh& mesh, const MeshAnalysis& analysis, Segmentation& 
     out.refresh_statistics(mesh, analysis);
 
     // --- absorb slivers -----------------------------------------------------
-    report(0.85f, "merging slivers");
     bool merged_any = true;
     int  guard      = 0;
     while (merged_any && guard++ < 32) {
@@ -447,15 +529,10 @@ void segment_mesh(const Mesh& mesh, const MeshAnalysis& analysis, Segmentation& 
         }
         for (size_t i = 0; i < out.regions.size(); ++i) {
             out.regions[i].id   = static_cast<uint16_t>(i);
-            out.regions[i].name = format("region_%02zu", i);
+            out.regions[i].name = format("%s_%02zu", prefix, i);
         }
         out.refresh_statistics(mesh, analysis);
     }
-
-    out.seconds = watch.seconds();
-    report(1.0f, "done");
-    RD_INFO("segmentation: %zu regions over %zu triangles in %s",
-            out.regions.size(), tcount, format_duration(out.seconds).c_str());
 }
 
 // ---------------------------------------------------------------------------

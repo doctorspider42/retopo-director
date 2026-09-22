@@ -90,6 +90,27 @@ void segment_mesh(const Mesh& mesh, const MeshAnalysis& analysis, Segmentation& 
                   const SegmentationOptions& opts = {},
                   const std::function<void(float, const char*)>& progress = nullptr);
 
+// --- pieces of the split, reusable by an alternative segmenter --------------
+//
+// A segmenter that labels triangles some other way (SAM, a painted mask, an
+// imported vertex group) only has to produce a `tri_region` array and can then
+// borrow the two steps below, which is what keeps the two paths comparable:
+// whatever labels the triangles, the regions that come out have been through
+// the same fill, the same sliver absorption and the same statistics.
+
+// Grows the labelled triangles over the ones still marked `kNoRegion`, using
+// the same dual graph cost as the geometric split. Triangles in a shell that
+// carries no label at all stay unlabelled.
+void grow_unassigned_regions(const Mesh& mesh, const MeshAnalysis& analysis,
+                             const SegmentationOptions& opts,
+                             std::vector<uint16_t>& tri_region);
+
+// Turns a raw `tri_region` array into a finished Segmentation: dense ids,
+// sliver absorption, statistics. `out.tri_region` must already be filled.
+void finalize_segmentation(const Mesh& mesh, const MeshAnalysis& analysis,
+                           const SegmentationOptions& opts, Segmentation& out,
+                           const char* name_prefix = "region");
+
 // Applies a grouping decided by the model: every inner vector is a set of
 // existing region ids that should become one region with the given name.
 // Ids not mentioned are left alone. Returns the number of merges performed.

@@ -6,10 +6,12 @@
 #include "core/log.h"
 #include "core/paths.h"
 #include "core/util.h"
+#include "segment/sam.h"
 #include "ui/file_dialog.h"
 #include "ui/widgets.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <imgui.h>
 
 namespace rd::ui {
@@ -18,6 +20,7 @@ namespace {
 const char* const kBackendNames[]  = {"Auto", "Quad field", "Quadric"};
 const char* const kFidelityNames[] = {"Geometry", "Balanced", "Texture"};
 const char* const kLlmNames[]      = {"Disabled", "Claude CLI", "Codex CLI", "OpenAI API"};
+const char* const kSegmenterNames[] = {"Geometric", "SAM", "Auto"};
 
 ImVec4 stage_color(Stage s)
 {
@@ -763,6 +766,72 @@ void panel_director(AppState& app)
             if (probe) {
                 ImGui::PushStyleColor(ImGuiCol_Text, p.text_faint);
                 ImGui::TextWrapped("%s", probe->describe().c_str());
+                ImGui::PopStyleColor();
+            }
+        }
+        card_end();
+    }
+
+    spacer(8.0f);
+
+    // --- region split ---------------------------------------------------------
+    // The segmenter decides what the model is asked to name, so it belongs next
+    // to the backend rather than in the knob panel: it makes no geometry
+    // decisions, it only draws the patches.
+    if (card_begin("segmenter_card", "Region split")) {
+        SegmenterOptions& seg = app.settings.segmenter;
+
+        int kind = int(seg.kind);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (segmented("segmenter_kind", &kind, kSegmenterNames, 3))
+            seg.kind = SegmenterKind(kind);
+
+        spacer(8.0f);
+        if (seg.kind == SegmenterKind::Geometric) {
+            ImGui::PushStyleColor(ImGuiCol_Text, p.text_faint);
+            ImGui::TextWrapped(
+                "A multi source Dijkstra over the dual graph. No model, no download, "
+                "single digit milliseconds, and every region maps onto source triangles.");
+            ImGui::PopStyleColor();
+        } else {
+            begin_form("sam_form", 170.0f);
+            text_input("Checkpoint", seg.sam.checkpoint, "sam_vit_b_01ec64.pth",
+                       "The weights file. Nothing is downloaded on your behalf.");
+            text_input("Model type", seg.sam.model_type, "vit_b");
+            text_input("Device", seg.sam.device, "auto",
+                       "auto | cuda | cpu | mps. On the CPU this is roughly "
+                       "fifteen seconds a view.");
+            text_input("Python", seg.sam.python, "empty picks python3 off PATH");
+            slider_int("Sample grid", &seg.sam.points_per_side, 4, 32, 16,
+                       "Points per side the mask generator starts from. "
+                       "Doubling it roughly quadruples the work.");
+            slider_int("Pixel stride", &seg.sam.pixel_stride, 1, 8, 2,
+                       "One projection ray per Nth pixel. The Dijkstra fill "
+                       "cleans up whatever the rays miss.");
+            slider_int("Timeout", &seg.sam.timeout_seconds, 30, 3600, 900, nullptr);
+            end_form();
+
+            spacer(8.0f);
+            {
+                std::error_code ec;
+                std::string reason;
+                if (seg.sam.checkpoint.empty())
+                    reason = "no checkpoint set";
+                else if (!std::filesystem::exists(seg.sam.checkpoint, ec))
+                    reason = "the checkpoint is not there";
+                else if (seg.sam.script.empty() && find_sam_script().empty())
+                    reason = "tools/sam_server.py not found";
+
+                const bool ok = reason.empty();
+                dot(ok ? p.success : p.warning);
+                ImGui::PushStyleColor(ImGuiCol_Text, ok ? p.success : p.warning);
+                ImGui::TextUnformatted(ok ? "sidecar configured" : reason.c_str());
+                ImGui::PopStyleColor();
+                ImGui::PushStyleColor(ImGuiCol_Text, p.text_faint);
+                ImGui::TextWrapped(
+                    "Whatever goes wrong - no checkpoint, no CUDA device, a sidecar "
+                    "that falls over - costs a warning in the log, and the run "
+                    "continues on the geometric split.");
                 ImGui::PopStyleColor();
             }
         }

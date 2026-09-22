@@ -58,6 +58,14 @@ there is an armature and by farthest-point sampling otherwise, then slivers are
 absorbed into whichever neighbour they agree with best. Deterministic, and every
 region maps exactly onto a set of source triangles.
 
+This is one implementation of `ISegmenter`; the other drives Segment Anything in
+a Python sidecar and projects its masks back through the BVH with one ray per
+pixel of the renders from stage 2. Both end in the same fill, sliver absorption
+and statistics, so a region is the same kind of thing whichever produced it, and
+anything the model path cannot do - no checkpoint, no CUDA device, no renders -
+falls back to the deterministic split with a warning. `segment/segmenter.h` has
+the seam, `ROADMAP.md` has what is still missing.
+
 The model does not draw these boundaries. It gets the patches, names them, and
 says which ones are really one part.
 

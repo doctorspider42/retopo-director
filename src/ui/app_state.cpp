@@ -218,6 +218,7 @@ void AppState::save_settings() const
     Json j;
     j["llm"]     = settings.llm.to_json();
     j["profile"] = settings.profile.to_json();
+    j["segmenter"] = settings.segmenter.to_json();
 
     Json ui;
     ui["render_size"]    = settings.render_size;
@@ -251,6 +252,7 @@ void AppState::load_settings()
 
     settings.llm     = LlmConfig::from_json(json_object_or_empty(j, "llm"));
     settings.profile = TargetProfile::from_json(json_object_or_empty(j, "profile"));
+    settings.segmenter = SegmenterOptions::from_json(json_object_or_empty(j, "segmenter"));
 
     const Json& ui = json_object_or_empty(j, "ui");
     settings.render_size    = std::clamp(json_get<int>(ui, "render_size", settings.render_size), 128, 2048);

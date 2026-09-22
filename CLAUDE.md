@@ -72,6 +72,19 @@ against a geometric reference leaves the surface inconsistently wound, which
 makes xatlas shatter the atlas. Propagate across shared edges, then pick one
 global sign per shell.
 
+**A segmenter that only labels triangles is not finished.** `segment_mesh` and
+the SAM path both end in `finalize_segmentation`, which does the dense
+renumbering, the sliver absorption and the statistics, and `refresh_statistics`
+keys off the region ids: renumber the regions without renumbering
+`tri_region` in the same pass and every region silently reports somebody else's
+area. Fill the gaps with `grow_unassigned_regions` before that.
+
+**`std::filesystem::exists` cannot see a Windows app execution alias.** The
+Microsoft Store installs python as a reparse point that only CreateProcess can
+resolve; opening it fails, so `exists()` says no and the interpreter looks
+missing on a machine where typing `python` works. `which()` uses
+GetFileAttributes for exactly this reason.
+
 **MinGW links the runtime dynamically by default**, which makes the executable
 unusable outside a shell that has the toolchain on `PATH`. The build passes
 `-static`.
@@ -87,6 +100,7 @@ a file and run them rather than piping them in.
 | add a knob | `src/knobs/knobs.h`, then read it in `src/geom/density.cpp` |
 | add a hard check | `src/validate/validator.cpp` |
 | add a retopo backend | implement the shape of `quad_field_retopo`, dispatch in `src/geom/retopo.cpp` |
+| add a segmenter | implement `ISegmenter`, dispatch in `make_segmenter` (`src/segment/segmenter.cpp`) |
 | change the look | `src/ui/theme.cpp` for the palette and metrics, `src/ui/widgets.cpp` for the components |
 | add an LLM backend | implement `ILlmBackend`, register in `make_llm_backend` |
 
