@@ -106,9 +106,18 @@ bool card_begin(const char* id, const char* title, const char* subtitle, float h
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, metrics().rounding_frame + 2.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 12));
 
+    // BeginChild has to be closed whether or not it returned true - it pushes a
+    // window either way, and skipping EndChild leaves the window stack and both
+    // style stacks unbalanced for the rest of the frame. The call sites read
+    // `if (card_begin(...)) { ... card_end(); }`, so a card that is culled
+    // (clipped, zero height, collapsed parent) is closed right here instead.
     const bool open = ImGui::BeginChild(id, ImVec2(0, height), ImGuiChildFlags_Borders |
                                         (height <= 0.0f ? ImGuiChildFlags_AutoResizeY : 0));
-    if (open && title) {
+    if (!open) {
+        card_end();
+        return false;
+    }
+    if (title) {
         subheading(title);
         if (subtitle && *subtitle) {
             ImGui::PushStyleColor(ImGuiCol_Text, palette().text_faint);

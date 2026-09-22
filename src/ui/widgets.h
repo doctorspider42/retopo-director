@@ -20,7 +20,9 @@ void mono(const char* fmt, ...);
 void help_marker(const char* text);
 
 // --- structure --------------------------------------------------------------
-// A bordered, padded block. Always pair with card_end().
+// A bordered, padded block: `if (card_begin(...)) { ... card_end(); }`.
+// A false return means the card was culled and has already closed itself, so
+// card_end() is called exactly when the body runs, never otherwise.
 bool card_begin(const char* id, const char* title = nullptr, const char* subtitle = nullptr,
                 float height = 0.0f);
 void card_end();
