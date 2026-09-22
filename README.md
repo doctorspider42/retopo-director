@@ -61,6 +61,16 @@ Presets for MinGW (debug and release) and MSVC are in `CMakePresets.json`. The
 MinGW build links the runtime statically, so the result is a single executable
 you can hand to an artist.
 
+On Windows, `build.cmd` does the same thing in one step, and `-run` starts the
+result when the build succeeds. `-run` and `-help` are the script's own; every
+other argument is passed to the application, whose exit code comes back out:
+
+```bat
+build.cmd
+build.cmd -run
+build.cmd -run --mesh sculpt.glb --run
+```
+
 ## Running
 
 ```bash
