@@ -1,7 +1,10 @@
 #pragma once
 
 // Mesh import/export. OBJ is hand rolled (it is trivial and we want control
-// over triangulation); glTF/GLB goes through cgltf.
+// over triangulation); glTF/GLB goes through cgltf, FBX through ufbx.
+//
+// Import only for FBX: the format is Autodesk's, the writers that matter are
+// theirs, and nothing in this pipeline needs to hand one back.
 
 #include "mesh/mesh.h"
 

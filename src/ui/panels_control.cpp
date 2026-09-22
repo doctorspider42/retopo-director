@@ -43,7 +43,10 @@ void action_open_mesh(AppState& app)
 {
     const fs::path chosen = open_file_dialog(
         "Open a high poly mesh",
-        {{"Meshes", "obj;gltf;glb"}, {"Wavefront OBJ", "obj"}, {"glTF", "gltf;glb"}},
+        {{"Meshes", "obj;gltf;glb;fbx"},
+         {"Wavefront OBJ", "obj"},
+         {"glTF", "gltf;glb"},
+         {"FBX", "fbx"}},
         app.mesh_path.empty() ? fs::path{} : app.mesh_path.parent_path());
     if (chosen.empty()) return;
 

@@ -85,6 +85,12 @@ resolve; opening it fails, so `exists()` says no and the interpreter looks
 missing on a machine where typing `python` works. `which()` uses
 GetFileAttributes for exactly this reason.
 
+**Every loader hands back the same convention.** Y up, right handed, metres,
+one mesh. OBJ and glTF are already there; FBX is converted by ufbx at load
+(`target_axes`, `target_unit_meters`), because it is authored in centimetres as
+often as in metres and Z up as often as Y up. Do not add a second conversion
+downstream - the profile frames its cameras in metres and would move.
+
 **MinGW links the runtime dynamically by default**, which makes the executable
 unusable outside a shell that has the toolchain on `PATH`. The build passes
 `-static`.

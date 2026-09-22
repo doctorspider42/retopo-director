@@ -33,7 +33,12 @@ every engine module, engine modules know only `core` and `mesh`. Nothing in
 
 ## The stages
 
-**1 · Load and analyse.** `meshio::load` normalises the mesh into a unit sphere
+**1 · Load and analyse.** `meshio::load` reads OBJ by hand, glTF/GLB through
+cgltf and FBX through ufbx, and hands the rest of the pipeline one mesh in one
+convention: Y up, right handed, metres. FBX is the reason that sentence is worth
+writing down - it is authored in centimetres as often as in metres and Z up as
+often as Y up, so the conversion happens once, at the loader, and never again.
+It then normalises the mesh into a unit sphere
 so every distance threshold downstream is resolution independent, welds the
 duplicates a DCC left behind, and keeps the inverse transform so exports go back
 into the original space. `analyse_mesh` then computes, once: a half-edge

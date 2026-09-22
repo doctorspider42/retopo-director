@@ -5,6 +5,7 @@
 #include "core/util.h"
 
 #include <cgltf.h>
+#include <ufbx.h>
 
 #include <algorithm>
 #include <charconv>
@@ -431,6 +432,255 @@ LoadReport load_gltf(const fs::path& path, Mesh& out, const LoadOptions& opts)
     return rep;
 }
 
+
+// ---------------------------------------------------------------------------
+// FBX (ufbx)
+// ---------------------------------------------------------------------------
+Mat4 mat4_from_ufbx(const ufbx_matrix& m)
+{
+    // ufbx keeps three basis columns plus a translation; the last row is implicit.
+    Mat4 r = Mat4::identity();
+    r.at(0, 0) = float(m.cols[0].x); r.at(0, 1) = float(m.cols[0].y); r.at(0, 2) = float(m.cols[0].z);
+    r.at(1, 0) = float(m.cols[1].x); r.at(1, 1) = float(m.cols[1].y); r.at(1, 2) = float(m.cols[1].z);
+    r.at(2, 0) = float(m.cols[2].x); r.at(2, 1) = float(m.cols[2].y); r.at(2, 2) = float(m.cols[2].z);
+    r.at(3, 0) = float(m.cols[3].x); r.at(3, 1) = float(m.cols[3].y); r.at(3, 2) = float(m.cols[3].z);
+    return r;
+}
+
+Vec3 vec3_from_ufbx(const ufbx_vec3& v) { return {float(v.x), float(v.y), float(v.z)}; }
+
+std::string string_from_ufbx(const ufbx_string& s)
+{
+    return s.length ? std::string(s.data, s.length) : std::string();
+}
+
+// The bones the file actually uses, in the order the skin clusters name them,
+// so a weight's cluster index maps to a joint index without a second lookup.
+struct FbxSkeleton {
+    std::vector<const ufbx_node*>                 nodes;
+    std::unordered_map<const ufbx_node*, int32_t> index;
+
+    int32_t add(const ufbx_node* node)
+    {
+        if (!node) return -1;
+        const auto it = index.find(node);
+        if (it != index.end()) return it->second;
+        const int32_t id = static_cast<int32_t>(nodes.size());
+        nodes.push_back(node);
+        index.emplace(node, id);
+        return id;
+    }
+
+    // Nearest ancestor that is itself a joint. FBX rigs routinely hang bones off
+    // null nodes, and those must not become gaps in the hierarchy.
+    int32_t parent_of(const ufbx_node* node) const
+    {
+        for (const ufbx_node* p = node ? node->parent : nullptr; p; p = p->parent) {
+            const auto it = index.find(p);
+            if (it != index.end()) return it->second;
+        }
+        return -1;
+    }
+};
+
+LoadReport load_fbx(const fs::path& path, Mesh& out, const LoadOptions& opts)
+{
+    LoadReport rep;
+    rep.format = paths::extension_of(path);
+
+    ufbx_load_opts lo{};
+    // Bring the file into the convention the rest of the pipeline assumes: Y up,
+    // right handed, one unit is one metre. FBX is authored in centimetres about
+    // as often as in metres and in Z up about as often as Y up, and the profile
+    // frames its cameras in metres, so guessing here would move the pictures the
+    // director is shown.
+    lo.target_axes        = ufbx_axes_right_handed_y_up;
+    lo.target_unit_meters = 1.0f;
+    lo.space_conversion   = UFBX_SPACE_CONVERSION_MODIFY_GEOMETRY;
+    // Nothing downstream reads animation, textures or embedded blobs, and a
+    // character file carries megabytes of all three.
+    lo.ignore_animation    = true;
+    lo.ignore_embedded     = true;
+    lo.load_external_files = false;
+    // Missing normals are computed at the end of load(), the same as for OBJ.
+    lo.generate_missing_normals = false;
+
+    ufbx_error  err{};
+    ufbx_scene* scene = ufbx_load_file(path.string().c_str(), &lo, &err);
+    if (!scene) {
+        char buffer[512];
+        ufbx_format_error(buffer, sizeof(buffer), &err);
+        rep.error = "ufbx: " + trim(buffer);
+        return rep;
+    }
+
+    // --- skeleton ----------------------------------------------------------
+    FbxSkeleton skeleton;
+    std::unordered_map<const ufbx_skin_deformer*, std::vector<int32_t>> cluster_to_joint;
+
+    if (opts.load_armature) {
+        // Skinned bones first: those are the ones the weights refer to.
+        for (size_t i = 0; i < scene->skin_deformers.count; ++i) {
+            const ufbx_skin_deformer* skin = scene->skin_deformers.data[i];
+            std::vector<int32_t> mapping(skin->clusters.count, -1);
+            for (size_t c = 0; c < skin->clusters.count; ++c)
+                mapping[c] = skeleton.add(skin->clusters.data[c]->bone_node);
+            cluster_to_joint.emplace(skin, std::move(mapping));
+        }
+        // Then any bone the file declares but never skins with. A rig exported
+        // without weights is still a rig, and the segmenter seeds on the pivots.
+        for (size_t i = 0; i < scene->bones.count; ++i) {
+            const ufbx_bone* bone = scene->bones.data[i];
+            for (size_t n = 0; n < bone->instances.count; ++n)
+                skeleton.add(bone->instances.data[n]);
+        }
+    }
+
+    out.armature.joints.reserve(skeleton.nodes.size());
+    for (const ufbx_node* node : skeleton.nodes) {
+        Joint joint;
+        joint.name = string_from_ufbx(node->name);
+        if (joint.name.empty()) joint.name = format("joint_%zu", out.armature.joints.size());
+        // Animation was never loaded, so node_to_world is the rest pose.
+        joint.bind_position = vec3_from_ufbx(node->node_to_world.cols[3]);
+        out.armature.joints.push_back(std::move(joint));
+    }
+    for (size_t j = 0; j < skeleton.nodes.size(); ++j)
+        out.armature.joints[j].parent = skeleton.parent_of(skeleton.nodes[j]);
+    rep.joints = out.armature.joints.size();
+
+    // --- geometry ----------------------------------------------------------
+    // Which streams exist anywhere in the file, so the merged mesh keeps its
+    // attribute arrays dense instead of ragged.
+    bool any_normals = false, any_uvs = false, any_colors = false, any_skin = false;
+    for (size_t n = 0; n < scene->nodes.count; ++n) {
+        const ufbx_mesh* mesh = scene->nodes.data[n]->mesh;
+        if (!mesh) continue;
+        if (mesh->vertex_normal.exists) any_normals = true;
+        if (mesh->vertex_uv.exists)     any_uvs     = true;
+        if (mesh->vertex_color.exists)  any_colors  = true;
+        if (mesh->skin_deformers.count > 0 && !cluster_to_joint.empty()) any_skin = true;
+    }
+
+    std::vector<uint32_t> fan;   // one face triangulated, reused across faces
+
+    for (size_t n = 0; n < scene->nodes.count; ++n) {
+        const ufbx_node* node = scene->nodes.data[n];
+        const ufbx_mesh* mesh = node->mesh;
+        if (!mesh || mesh->num_faces == 0) continue;
+        ++rep.primitives;
+
+        const Mat4 xform = mat4_from_ufbx(node->geometry_to_world);
+
+        // Weights are per logical vertex and the deformer is shared by every
+        // instance of the mesh, so it is looked up once per node.
+        const ufbx_skin_deformer*   skin    = nullptr;
+        const std::vector<int32_t>* mapping = nullptr;
+        if (any_skin && mesh->skin_deformers.count > 0) {
+            const ufbx_skin_deformer* candidate = mesh->skin_deformers.data[0];
+            const auto it = cluster_to_joint.find(candidate);
+            if (it != cluster_to_joint.end()) {
+                skin    = candidate;
+                mapping = &it->second;
+            }
+        }
+
+        fan.assign(std::max<size_t>(mesh->max_face_triangles, 1) * 3, 0);
+
+        for (size_t f = 0; f < mesh->faces.count; ++f) {
+            const ufbx_face face = mesh->faces.data[f];
+            // Quads and n-gons are the norm in a file out of a DCC. ufbx fans
+            // them, and returns zero triangles for the degenerate ones.
+            const uint32_t tris = ufbx_triangulate_face(fan.data(), fan.size(), mesh, face);
+
+            for (uint32_t t = 0; t < tris * 3; ++t) {
+                const uint32_t ix = fan[t];
+
+                // One vertex per index, the same as the OBJ path: whatever the
+                // file split for shading reasons is put back together by the
+                // weld at the end of load().
+                out.indices.push_back(static_cast<uint32_t>(out.positions.size()));
+                out.positions.push_back(transform_point(
+                    xform, vec3_from_ufbx(ufbx_get_vertex_vec3(&mesh->vertex_position, ix))));
+
+                if (any_normals) {
+                    Vec3 nv{0.0f, 1.0f, 0.0f};
+                    if (mesh->vertex_normal.exists)
+                        nv = normalize(transform_dir(
+                            xform, vec3_from_ufbx(ufbx_get_vertex_vec3(&mesh->vertex_normal, ix))));
+                    out.normals.push_back(nv);
+                }
+                if (any_uvs) {
+                    Vec2 uv{};
+                    if (mesh->vertex_uv.exists) {
+                        const ufbx_vec2 t2 = ufbx_get_vertex_vec2(&mesh->vertex_uv, ix);
+                        uv = {float(t2.x), float(t2.y)};
+                    }
+                    out.uvs.push_back(uv);
+                }
+                if (any_colors) {
+                    Vec4 c{1.0f, 1.0f, 1.0f, 1.0f};
+                    if (mesh->vertex_color.exists) {
+                        const ufbx_vec4 t4 = ufbx_get_vertex_vec4(&mesh->vertex_color, ix);
+                        c = {float(t4.x), float(t4.y), float(t4.z), float(t4.w)};
+                    }
+                    out.colors.push_back(c);
+                }
+                if (any_skin) {
+                    SkinVertex sv;
+                    const uint32_t vid = ix < mesh->vertex_indices.count
+                                             ? mesh->vertex_indices.data[ix] : UINT32_MAX;
+                    if (skin && mapping && vid < skin->vertices.count) {
+                        const ufbx_skin_vertex& sk = skin->vertices.data[vid];
+                        // ufbx sorts a vertex's weights by decreasing weight, so
+                        // the first four are the four that matter. FBX allows any
+                        // number of influences; the rest are dropped here and the
+                        // remainder renormalised, which is what the four-slot
+                        // SkinVertex and every console target want anyway.
+                        int slot = 0;
+                        for (uint32_t w = 0; w < sk.num_weights && slot < 4; ++w) {
+                            const ufbx_skin_weight& sw = skin->weights.data[sk.weight_begin + w];
+                            if (sw.cluster_index >= mapping->size()) continue;
+                            const int32_t joint = (*mapping)[sw.cluster_index];
+                            if (joint < 0) continue;
+                            sv.joints[slot]  = static_cast<uint16_t>(joint);
+                            sv.weights[slot] = float(sw.weight);
+                            ++slot;
+                        }
+                    }
+                    const float sum = sv.weights[0] + sv.weights[1] + sv.weights[2] + sv.weights[3];
+                    if (sum > kEps) for (float& w : sv.weights) w /= sum;
+                    else            sv.weights[0] = 1.0f;
+                    out.skin.push_back(sv);
+                }
+            }
+        }
+
+        if (out.name.empty()) out.name = string_from_ufbx(mesh->name);
+    }
+
+    // Counted before the scene goes away, so a file that holds only curves or
+    // NURBS can say so instead of looking empty. Neither is tessellated here:
+    // this pipeline retopologises dense polygon sculpts.
+    const size_t nurbs  = scene->nurbs_surfaces.count;
+    const size_t curves = scene->line_curves.count + scene->nurbs_curves.count;
+
+    ufbx_free_scene(scene);
+
+    rep.source_vertices  = out.positions.size();
+    rep.source_triangles = out.triangle_count();
+    rep.ok               = !out.empty();
+    if (!rep.ok) {
+        if (nurbs || curves)
+            rep.error = format("no polygon meshes: %zu NURBS surface%s and %zu curve%s, "
+                               "which are not tessellated here", nurbs, nurbs == 1 ? "" : "s",
+                               curves, curves == 1 ? "" : "s");
+        else
+            rep.error = "no triangles found";
+    }
+    return rep;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -444,6 +694,7 @@ LoadReport load(const fs::path& path, Mesh& out, const LoadOptions& opts)
 
     if (ext == "obj")                          rep = load_obj(path, out, opts);
     else if (ext == "gltf" || ext == "glb")    rep = load_gltf(path, out, opts);
+    else if (ext == "fbx")                     rep = load_fbx(path, out, opts);
     else {
         rep.error = "unsupported extension ." + ext;
         return rep;
@@ -720,9 +971,10 @@ bool save(const fs::path& path, const Mesh& mesh, const SaveOptions& opts, std::
 
 bool is_supported_extension(const std::string& ext_lower)
 {
-    return ext_lower == "obj" || ext_lower == "gltf" || ext_lower == "glb";
+    return ext_lower == "obj" || ext_lower == "gltf" || ext_lower == "glb" ||
+           ext_lower == "fbx";
 }
 
-const char* supported_extensions_filter() { return "obj,gltf,glb"; }
+const char* supported_extensions_filter() { return "obj,gltf,glb,fbx"; }
 
 } // namespace rd::meshio

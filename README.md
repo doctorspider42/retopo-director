@@ -87,7 +87,7 @@ build.cmd -run --mesh sculpt.glb --run
 
 | flag | meaning |
 |---|---|
-| `--mesh <file>` | high poly to load (`.obj`, `.gltf`, `.glb`) |
+| `--mesh <file>` | high poly to load (`.obj`, `.gltf`, `.glb`, `.fbx`) |
 | `--profile <file>` | target profile to load |
 | `--project <dir>` | where renders, bakes, reports and exports are written |
 | `--headless` | run the pipeline without a window, then exit |
@@ -205,7 +205,7 @@ the **Target profile** panel and save your own.
 
 All permissive, all compiled from source by the build:
 meshoptimizer (MIT), xatlas (MIT), Dear ImGui (MIT), GLFW (zlib), cgltf (MIT),
-stb (MIT / public domain), nlohmann/json (MIT).
+ufbx (MIT), stb (MIT / public domain), nlohmann/json (MIT).
 
 Nothing copyleft is linked. See [`docs/LICENSES.md`](docs/LICENSES.md).
 

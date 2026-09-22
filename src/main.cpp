@@ -22,7 +22,7 @@ void print_usage()
         "  retopo-director [options]\n"
         "\n"
         "  --project <dir>   Working directory for renders, bakes and reports\n"
-        "  --mesh <file>     Load a high poly mesh on startup (.obj/.gltf/.glb)\n"
+        "  --mesh <file>     Load a high poly mesh on startup (.obj/.gltf/.glb/.fbx)\n"
         "  --profile <file>  Load a target profile on startup (.json)\n"
         "  --headless        Run the pipeline without a window and exit\n"
         "  --no-llm          Skip the director; run the deterministic half only\n"

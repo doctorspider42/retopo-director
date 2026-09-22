@@ -20,6 +20,7 @@ commit in `CMakeLists.txt`.
 | [Dear ImGui](https://github.com/ocornut/imgui) | MIT | v1.92.9b-docking | the interface |
 | [GLFW](https://github.com/glfw/glfw) | zlib | 3.4 | window, context and input |
 | [cgltf](https://github.com/jkuhlmann/cgltf) | MIT | v1.15 | glTF and GLB loading |
+| [ufbx](https://github.com/ufbx/ufbx) | MIT | v0.9.0 | FBX loading, binary and ASCII |
 | [stb_image, stb_image_write, stb_image_resize](https://github.com/nothings/stb) | MIT / public domain | `2c980bb` | PNG in and out |
 | [nlohmann/json](https://github.com/nlohmann/json) | MIT | v3.12.0 | every JSON document in the project |
 
@@ -27,6 +28,11 @@ commit in `CMakeLists.txt`.
 
 These would have saved work. They were not used, and the reason is recorded here
 so nobody re-litigates it by accident.
+
+- **Autodesk FBX SDK** — proprietary, and its licence governs how the binaries
+  may be redistributed, which rules it out of anything shipped. FBX comes in
+  through ufbx instead: one C file, nothing to install, nothing to ship
+  alongside.
 
 - **MeshLab / PyMeshLab** — GPL. Would have covered most of the analysis and
   simplification.

@@ -68,12 +68,18 @@ FetchContent_Declare(nlohmann_json
     GIT_SHALLOW    TRUE
     SOURCE_SUBDIR  rd_no_cmake)
 
+FetchContent_Declare(ufbx
+    GIT_REPOSITORY https://github.com/ufbx/ufbx.git
+    GIT_TAG        v0.9.0
+    GIT_SHALLOW    TRUE
+    SOURCE_SUBDIR  rd_no_cmake)
+
 FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG        2c980bb59875b0d32144a71867fbdebb2f77cd20
     SOURCE_SUBDIR  rd_no_cmake)
 
-FetchContent_MakeAvailable(glfw imgui meshoptimizer xatlas cgltf nlohmann_json stb)
+FetchContent_MakeAvailable(glfw imgui meshoptimizer xatlas cgltf nlohmann_json stb ufbx)
 
 # --- Dear ImGui ------------------------------------------------------------
 add_library(rd_imgui STATIC
@@ -104,6 +110,20 @@ if(NOT MSVC)
         -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-function)
 endif()
 
+# --- ufbx ------------------------------------------------------------------
+# One C file, MIT. The Autodesk FBX SDK is the alternative and it cannot be
+# redistributed, which rules it out for anything shipped. See docs/LICENSES.md.
+add_library(rd_ufbx STATIC ${ufbx_SOURCE_DIR}/ufbx.c)
+target_include_directories(rd_ufbx PUBLIC ${ufbx_SOURCE_DIR})
+if(NOT MSVC)
+    target_compile_options(rd_ufbx PRIVATE -Wno-unused-function -Wno-sign-compare)
+endif()
+find_package(Threads REQUIRED)
+target_link_libraries(rd_ufbx PRIVATE Threads::Threads)
+if(NOT WIN32)
+    target_link_libraries(rd_ufbx PRIVATE m)
+endif()
+
 # --- header-only C deps ----------------------------------------------------
 add_library(rd_extern STATIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/extern_impl.c)
 target_include_directories(rd_extern PUBLIC ${cgltf_SOURCE_DIR} ${stb_SOURCE_DIR})
@@ -125,7 +145,7 @@ file(GLOB_RECURSE RD_HEADERS CONFIGURE_DEPENDS
 add_executable(retopo-director ${RD_SOURCES} ${RD_HEADERS})
 target_include_directories(retopo-director PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(retopo-director PRIVATE
-    rd_imgui rd_meshoptimizer rd_xatlas rd_extern rd_json glfw)
+    rd_imgui rd_meshoptimizer rd_xatlas rd_extern rd_json rd_ufbx glfw)
 
 find_package(OpenGL REQUIRED)
 target_link_libraries(retopo-director PRIVATE OpenGL::GL)
@@ -175,6 +195,7 @@ check_ipo_supported(RESULT RD_IPO_OK OUTPUT RD_IPO_MSG)
 if(RD_LTO AND RD_IPO_OK)
     set_property(TARGET retopo-director  PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET rd_meshoptimizer PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET rd_ufbx          PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
 add_custom_command(TARGET retopo-director POST_BUILD
