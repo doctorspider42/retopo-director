@@ -1,5 +1,7 @@
 # Retopo Director
 
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 High poly in, console-budget low poly out.
 
 Every line of geometry, UV and bake work is done by deterministic code. A
@@ -157,3 +159,11 @@ meshoptimizer (MIT), xatlas (MIT), Dear ImGui (MIT), GLFW (zlib), cgltf (MIT),
 stb (MIT / public domain), nlohmann/json (MIT).
 
 Nothing copyleft is linked. See [`docs/LICENSES.md`](docs/LICENSES.md).
+
+## Licence
+
+Apache License 2.0. See [`LICENSE`](LICENSE).
+
+Apache-2.0 rather than MIT because it comes with an explicit patent grant, which
+matters for a tool built out of mesh processing algorithms, and because it is
+compatible with everything this project links against.

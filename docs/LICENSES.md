@@ -1,4 +1,13 @@
-# Third party licences
+# Licences
+
+## This project
+
+Apache License 2.0, in [`LICENSE`](../LICENSE) at the root. It grants patent
+rights explicitly, which a pile of mesh processing algorithms ought to do, and
+it is compatible with every dependency below — Apache-2.0 can consume MIT, BSD
+and zlib code without friction, and downstream can consume this.
+
+## Third party
 
 Nothing copyleft is linked into the executable. Everything below is permissive
 and is fetched and compiled from source by the build, pinned to an exact tag or
