@@ -95,7 +95,11 @@ void draw_mesh_view(AppState& app, Renderer& renderer, const GpuMesh& mesh, bool
     if (active) {
         const ImVec2 delta = ImGui::GetIO().MouseDelta;
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            app.camera.yaw   -= delta.x * 0.4f;
+            // Drag left, the model turns left: the cursor takes the surface with
+            // it, the way a hand on a turntable would. Increasing yaw walks the
+            // camera toward +X, which sits on the left of the screen, so the
+            // model sweeps right; a leftward drag therefore has to lower it.
+            app.camera.yaw   += delta.x * 0.4f;
             app.camera.pitch  = clampf(app.camera.pitch + delta.y * 0.3f, -89.0f, 89.0f);
         } else if (ImGui::IsMouseDown(ImGuiMouseButton_Middle) ||
                    ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
