@@ -72,18 +72,40 @@ std::string format_command(const std::string& exe, const std::vector<std::string
     return out;
 }
 
+namespace {
+
+// Existence test for something we are about to run.
+//
+// On Windows this cannot be std::filesystem::exists: the Microsoft Store
+// installs python (and a handful of other tools) as an app execution alias,
+// which is a reparse point that resolves only for CreateProcess. Opening it
+// fails with ERROR_CANT_ACCESS_FILE, so exists() says no and the tool looks
+// missing on a machine where typing its name in a shell works fine.
+// GetFileAttributes answers without following the reparse point.
+bool executable_exists(const fs::path& p)
+{
+#if defined(RD_PLATFORM_WINDOWS)
+    const DWORD attrs = GetFileAttributesW(p.wstring().c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    std::error_code ec;
+    return fs::exists(p, ec) && !fs::is_directory(p, ec);
+#endif
+}
+
+} // namespace
+
 std::string which(const std::string& executable)
 {
     if (executable.empty()) return {};
 
-    std::error_code ec;
     const fs::path direct(executable);
     if (direct.has_parent_path()) {
-        if (fs::exists(direct, ec) && !fs::is_directory(direct, ec)) return direct.string();
+        if (executable_exists(direct)) return direct.string();
 #if defined(RD_PLATFORM_WINDOWS)
         for (const char* ext : {".exe", ".cmd", ".bat", ".ps1"}) {
             const fs::path p = direct.string() + ext;
-            if (fs::exists(p, ec)) return p.string();
+            if (executable_exists(p)) return p.string();
         }
 #endif
         return {};
@@ -106,7 +128,7 @@ std::string which(const std::string& executable)
         if (dir.empty()) continue;
         for (const std::string& ext : extensions) {
             const fs::path candidate = fs::path(dir) / (executable + ext);
-            if (fs::exists(candidate, ec) && !fs::is_directory(candidate, ec))
+            if (executable_exists(candidate))
                 return candidate.string();
         }
     }
