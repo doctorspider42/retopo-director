@@ -1,0 +1,967 @@
+#include "pipeline/pipeline.h"
+
+#include "core/log.h"
+#include "core/paths.h"
+#include "core/util.h"
+
+#include <algorithm>
+#include <limits>
+
+namespace rd {
+namespace fs = std::filesystem;
+
+// How many times the engine may shrink its own budget before it gives up and
+// reports the overshoot as a validation failure instead.
+constexpr int kBudgetAttempts = 6;
+
+const char* stage_name(Stage s)
+{
+    switch (s) {
+    case Stage::Loading:          return "Loading";
+    case Stage::Analysing:        return "Analysing";
+    case Stage::ReferenceRenders: return "Reference renders";
+    case Stage::Segmenting:       return "Segmenting";
+    case Stage::NamingRegions:    return "Naming regions";
+    case Stage::AllocatingBudget: return "Allocating budget";
+    case Stage::BuildingDensity:  return "Density field";
+    case Stage::Retopologising:   return "Retopology";
+    case Stage::Baking:           return "Baking";
+    case Stage::Validating:       return "Validating";
+    case Stage::CandidateRenders: return "Candidate renders";
+    case Stage::Reviewing:        return "Director review";
+    case Stage::Exporting:        return "Exporting";
+    case Stage::Reporting:        return "Writing report";
+    case Stage::Done:             return "Done";
+    case Stage::Failed:           return "Failed";
+    case Stage::Cancelled:        return "Cancelled";
+    default:                      return "Idle";
+    }
+}
+
+bool stage_is_terminal(Stage s)
+{
+    return s == Stage::Done || s == Stage::Failed || s == Stage::Cancelled || s == Stage::Idle;
+}
+
+// ---------------------------------------------------------------------------
+Pipeline::Pipeline() = default;
+
+Pipeline::~Pipeline()
+{
+    cancel();
+    join();
+}
+
+void Pipeline::join()
+{
+    if (worker_.joinable()) worker_.join();
+}
+
+void Pipeline::cancel()
+{
+    if (running_.load()) {
+        cancel_.store(true);
+        RD_INFO("cancellation requested");
+    }
+}
+
+void Pipeline::set_stage(Stage s, const std::string& msg)
+{
+    stage_.store(s);
+    progress_.store(0.0f);
+    std::lock_guard lock(status_mutex_);
+    message_ = msg;
+    RD_INFO("stage: %s%s%s", stage_name(s), msg.empty() ? "" : " - ", msg.c_str());
+}
+
+void Pipeline::set_progress(float f, const std::string& msg)
+{
+    progress_.store(clampf(f, 0.0f, 1.0f));
+    if (msg.empty()) return;
+    std::lock_guard lock(status_mutex_);
+    message_ = msg;
+}
+
+void Pipeline::fail(const std::string& msg)
+{
+    stage_.store(Stage::Failed);
+    std::lock_guard lock(status_mutex_);
+    error_   = msg;
+    message_ = msg;
+    RD_ERROR("pipeline failed: %s", msg.c_str());
+}
+
+std::string Pipeline::message() const
+{
+    std::lock_guard lock(status_mutex_);
+    return message_;
+}
+
+std::string Pipeline::error() const
+{
+    std::lock_guard lock(status_mutex_);
+    return error_;
+}
+
+void Pipeline::bump() { version_.fetch_add(1, std::memory_order_release); }
+
+void Pipeline::set_panel(const KnobPanel& panel)
+{
+    if (running_.load()) return;
+    {
+        std::lock_guard lock(results_mutex_);
+        results_.panel = panel;
+    }
+    bump();
+}
+
+bool Pipeline::start(const fs::path& mesh_path, const PipelineSettings& settings)
+{
+    if (running_.load()) return false;
+    join();
+    launch(Entry::Full, mesh_path, settings);
+    return true;
+}
+
+bool Pipeline::rebuild_geometry(const PipelineSettings& settings)
+{
+    if (running_.load()) return false;
+    {
+        std::lock_guard lock(results_mutex_);
+        if (results_.highpoly.empty() || !results_.segmentation.valid()) return false;
+    }
+    join();
+    launch(Entry::GeometryOnly, {}, settings);
+    return true;
+}
+
+void Pipeline::launch(Entry entry, const fs::path& mesh_path, const PipelineSettings& settings)
+{
+    cancel_.store(false);
+    running_.store(true);
+    {
+        std::lock_guard lock(status_mutex_);
+        error_.clear();
+    }
+    worker_ = std::thread(&Pipeline::run, this, entry, mesh_path, settings);
+}
+
+// ---------------------------------------------------------------------------
+ViewSet Pipeline::render_views(const Mesh& mesh, const RenderOptions& opts,
+                               const fs::path& dir, const std::string& prefix,
+                               const std::vector<Vec4>* face_colors, const Texture* diffuse,
+                               bool masks)
+{
+    ViewSet set;
+    if (!renderer_ || !dispatcher_) {
+        set.error = "no renderer available (headless build or GPU init failed)";
+        return set;
+    }
+
+    std::vector<ViewCamera> cameras;
+    {
+        std::lock_guard lock(results_mutex_);
+        cameras = results_.cameras;
+    }
+
+    const bool ran = dispatcher_->run_and_wait([&] {
+        set = render_view_set(*renderer_, mesh, cameras, opts, dir, prefix, face_colors,
+                              diffuse, masks);
+    });
+    if (!ran && set.error.empty()) set.error = "the render was never dispatched";
+    return set;
+}
+
+LlmResponse Pipeline::ask(const LlmRequest& req, const char* stage_label)
+{
+    LlmResponse res;
+    if (!llm_) {
+        res.error = "no LLM backend";
+        return res;
+    }
+
+    // Persist the exact prompt next to the run so a human can audit it.
+    const fs::path dir = paths::reports_dir() / "prompts";
+    paths::ensure_dir(dir);
+    const std::string base = format("%02d_%s", iteration_.load(), slugify(req.label).c_str());
+    paths::write_file(dir / (base + "_prompt.txt"), req.system + "\n\n" + req.user);
+
+    res = llm_->complete(req, &cancel_);
+
+    if (!res.raw.empty()) paths::write_file(dir / (base + "_reply.txt"), res.raw);
+
+    LlmExchange exchange;
+    exchange.stage  = stage_label;
+    exchange.prompt = req.user;
+    exchange.reply  = res.text;
+    exchange.error  = res.error;
+    exchange.ok     = res.ok;
+    exchange.seconds = res.seconds;
+    exchange.prompt_tokens     = res.prompt_tokens;
+    exchange.completion_tokens = res.completion_tokens;
+    for (const LlmImage& img : req.images) exchange.image_labels.push_back(img.label);
+
+    {
+        std::lock_guard lock(results_mutex_);
+        results_.transcript.push_back(std::move(exchange));
+    }
+    bump();
+
+    if (!res.ok) RD_WARN("%s: %s", stage_label, res.error.c_str());
+    return res;
+}
+
+// ---------------------------------------------------------------------------
+bool Pipeline::stage_load(const fs::path& path, const PipelineSettings& s)
+{
+    set_stage(Stage::Loading, path.filename().string());
+
+    Mesh mesh;
+    const meshio::LoadReport rep = meshio::load(path, mesh, s.loading);
+    if (!rep.ok) {
+        fail("cannot load " + path.filename().string() + ": " + rep.error);
+        return false;
+    }
+
+    {
+        std::lock_guard lock(results_mutex_);
+        results_ = PipelineResults{};
+        results_.highpoly    = std::move(mesh);
+        results_.load_report = rep;
+        results_.source_path = path;
+    }
+    bump();
+    return true;
+}
+
+bool Pipeline::stage_analyse(const PipelineSettings& s)
+{
+    set_stage(Stage::Analysing, "curvature, symmetry, armature");
+
+    Mesh copy;
+    {
+        std::lock_guard lock(results_mutex_);
+        copy = results_.highpoly;
+    }
+
+    MeshAnalysis analysis;
+    analyse_mesh(copy, analysis, s.analysis,
+                 [&](float f, const char* what) { set_progress(f, what); });
+    if (cancelled()) return false;
+    if (!analysis.valid()) {
+        fail("mesh analysis produced nothing usable");
+        return false;
+    }
+
+    std::vector<ViewCamera> cameras = build_camera_rig(copy, s.profile);
+    {
+        std::lock_guard lock(results_mutex_);
+        results_.analysis = std::move(analysis);
+        results_.cameras  = std::move(cameras);
+        // The BVH points at the mesh it was built from, so keep that exact copy.
+        results_.highpoly = std::move(copy);
+    }
+    bump();
+    return true;
+}
+
+bool Pipeline::stage_reference_renders(const PipelineSettings& s)
+{
+    set_stage(Stage::ReferenceRenders, "rendering the high poly");
+
+    RenderOptions opts;
+    opts.width   = s.render_size;
+    opts.height  = s.render_size;
+    opts.samples = s.render_samples;
+    opts.mode    = RenderMode::Shaded;
+
+    Mesh copy;
+    {
+        std::lock_guard lock(results_mutex_);
+        copy = results_.highpoly;
+    }
+
+    ViewSet views = render_views(copy, opts, paths::renders_dir(), "highpoly", nullptr,
+                                 nullptr, true);
+    if (!views.ok) {
+        // Renders are how the director sees; without them we can still run the
+        // deterministic half of the pipeline, so warn rather than abort.
+        RD_WARN("reference renders unavailable: %s", views.error.c_str());
+    }
+
+    {
+        std::lock_guard lock(results_mutex_);
+        results_.reference_views = std::move(views);
+    }
+    bump();
+    return true;
+}
+
+bool Pipeline::stage_segment(const PipelineSettings& s)
+{
+    set_stage(Stage::Segmenting, "splitting into regions");
+
+    Mesh         copy;
+    MeshAnalysis analysis_copy;
+    {
+        std::lock_guard lock(results_mutex_);
+        copy          = results_.highpoly;
+        analysis_copy = results_.analysis;
+    }
+    // The analysis owns a BVH that points at the mesh it was built from; rebuild
+    // it against our local copy so the pointers stay valid.
+    analysis_copy.bvh.build(copy);
+
+    Segmentation seg;
+    segment_mesh(copy, analysis_copy, seg, s.segmentation,
+                 [&](float f, const char* what) { set_progress(f, what); });
+    if (cancelled()) return false;
+    if (!seg.valid()) {
+        fail("segmentation produced no regions");
+        return false;
+    }
+
+    // Visibility per region, straight off the reference masks when we have them.
+    {
+        std::lock_guard lock(results_mutex_);
+        results_.segmentation = std::move(seg);
+        results_.highpoly     = std::move(copy);
+        results_.analysis     = std::move(analysis_copy);
+    }
+    bump();
+
+    // Region overlay renders, for the naming step.
+    RenderOptions opts;
+    opts.width   = s.render_size;
+    opts.height  = s.render_size;
+    opts.samples = 0;                     // flat colours, no blending across ids
+    opts.mode    = RenderMode::Regions;
+
+    Mesh                mesh_copy;
+    std::vector<Vec4>   face_colors;
+    {
+        std::lock_guard lock(results_mutex_);
+        mesh_copy = results_.highpoly;
+        region_colors(results_.segmentation, face_colors);
+    }
+    ViewSet region_views = render_views(mesh_copy, opts, paths::renders_dir(), "regions",
+                                        &face_colors, nullptr, false);
+    if (!region_views.ok) RD_WARN("region renders unavailable: %s", region_views.error.c_str());
+
+    {
+        std::lock_guard lock(results_mutex_);
+        results_.region_views = std::move(region_views);
+    }
+    bump();
+    return true;
+}
+
+bool Pipeline::stage_name_regions(const PipelineSettings& s)
+{
+    if (!s.use_llm || !llm_) return true;
+    set_stage(Stage::NamingRegions, "asking the director what these parts are");
+
+    Mesh         mesh_copy;
+    Segmentation seg_copy;
+    ViewSet      regions, shaded;
+    {
+        std::lock_guard lock(results_mutex_);
+        mesh_copy = results_.highpoly;
+        seg_copy  = results_.segmentation;
+        regions   = results_.region_views;
+        shaded    = results_.reference_views;
+    }
+
+    const LlmRequest req = build_naming_request(mesh_copy, seg_copy, s.profile, regions, shaded);
+    const LlmResponse res = ask(req, "name regions");
+    if (cancelled()) return false;
+
+    const RegionNaming naming = parse_naming_response(res, seg_copy);
+    if (!naming.ok) {
+        RD_WARN("region naming skipped: %s", naming.error.c_str());
+        return true;   // automatic names are ugly but perfectly workable
+    }
+
+    MeshAnalysis analysis_copy;
+    {
+        std::lock_guard lock(results_mutex_);
+        analysis_copy = results_.analysis;
+    }
+    analysis_copy.bvh.build(mesh_copy);
+
+    for (const RegionNaming::Named& n : naming.named) {
+        if (Region* r = seg_copy.find(n.id)) {
+            r->name = n.name;
+            if (!n.role.empty()) r->auto_label = n.role;
+        }
+    }
+    if (!naming.merges.empty())
+        merge_regions(seg_copy, mesh_copy, analysis_copy, naming.merges);
+
+    {
+        std::lock_guard lock(results_mutex_);
+        results_.segmentation = std::move(seg_copy);
+    }
+    bump();
+
+    // The overlay is now stale: ids changed when regions merged.
+    RenderOptions opts;
+    opts.width   = s.render_size;
+    opts.height  = s.render_size;
+    opts.samples = 0;
+    opts.mode    = RenderMode::Regions;
+
+    std::vector<Vec4> face_colors;
+    {
+        std::lock_guard lock(results_mutex_);
+        region_colors(results_.segmentation, face_colors);
+    }
+    ViewSet region_views = render_views(mesh_copy, opts, paths::renders_dir(), "regions_named",
+                                        &face_colors, nullptr, false);
+    if (region_views.ok) {
+        std::lock_guard lock(results_mutex_);
+        results_.region_views = std::move(region_views);
+        bump();
+    }
+    return true;
+}
+
+bool Pipeline::stage_allocate_budget(const PipelineSettings& s)
+{
+    set_stage(Stage::AllocatingBudget, "seeding the knob panel");
+
+    Segmentation seg_copy;
+    {
+        std::lock_guard lock(results_mutex_);
+        seg_copy = results_.segmentation;
+    }
+
+    KnobPanel panel = KnobPanel::seed_from_regions(seg_copy.ids(), seg_copy.names(),
+                                                   seg_copy.area_shares());
+    panel.resolve_budgets(s.profile.max_triangles);
+
+    if (s.use_llm && llm_) {
+        Mesh         mesh_copy;
+        MeshAnalysis analysis_copy;
+        ViewSet      shaded, regions;
+        {
+            std::lock_guard lock(results_mutex_);
+            mesh_copy     = results_.highpoly;
+            analysis_copy = results_.analysis;
+            shaded        = results_.reference_views;
+            regions       = results_.region_views;
+        }
+
+        const LlmRequest req = build_budget_request(mesh_copy, analysis_copy, seg_copy,
+                                                    s.profile, panel, shaded, regions);
+        const LlmResponse res = ask(req, "allocate budget");
+        if (cancelled()) return false;
+
+        if (res.ok && res.json_ok) {
+            const KnobPanel::ApplyReport applied = panel.apply_patch(res.json);
+            RD_INFO("director set %d fields across %d regions%s",
+                    applied.fields_changed, applied.regions_touched,
+                    applied.unknown_regions
+                        ? format(" (%d unknown regions ignored)", applied.unknown_regions).c_str()
+                        : "");
+            for (const std::string& k : applied.ignored_keys)
+                RD_DEBUG("ignored unknown key %s", k.c_str());
+        } else {
+            RD_WARN("budget allocation fell back to area proportional defaults: %s",
+                    res.error.c_str());
+        }
+    }
+
+    panel.resolve_budgets(s.profile.max_triangles);
+    {
+        std::lock_guard lock(results_mutex_);
+        results_.panel = std::move(panel);
+    }
+    bump();
+    return true;
+}
+
+bool Pipeline::stage_iterate(const PipelineSettings& s)
+{
+    const int max_iterations = std::max(
+        1, s.max_iterations > 0 ? s.max_iterations : s.profile.max_iterations);
+
+    for (int iteration = 1; iteration <= max_iterations; ++iteration) {
+        if (cancelled()) return false;
+        iteration_.store(iteration);
+        Stopwatch iteration_watch;
+
+        // --- snapshot the inputs -------------------------------------------
+        Mesh         source;
+        MeshAnalysis analysis;
+        Segmentation seg;
+        KnobPanel    panel;
+        {
+            std::lock_guard lock(results_mutex_);
+            source   = results_.highpoly;
+            analysis = results_.analysis;
+            seg      = results_.segmentation;
+            panel    = results_.panel;
+        }
+        analysis.bvh.build(source);
+
+        DensityField     density;
+        RetopoResult     retopo;
+        BakeResult       bake;
+        StripData        strips;
+        ValidationReport validation;
+
+        // Deterministic budget fitting. The unwrap duplicates vertices along
+        // every uv seam, so a triangle count that fits can still blow the vertex
+        // limit, and collapses the link condition refuses leave a few triangles
+        // over. Neither is a question of taste and neither is worth a round trip
+        // to the model, so the engine shrinks its own budget and tries again
+        // before anyone is asked for an opinion.
+        int effective_budget = s.profile.max_triangles;
+
+        DensityField     best_density;
+        RetopoResult     best_retopo;
+        BakeResult       best_bake;
+        StripData        best_strips;
+        ValidationReport best_validation;
+        KnobPanel        best_panel;
+        int              best_score = std::numeric_limits<int>::max();
+        bool             have_best  = false;
+
+        for (int attempt = 0; attempt < kBudgetAttempts; ++attempt) {
+            panel.resolve_budgets(effective_budget);
+
+            // --- density ----------------------------------------------------
+            set_stage(Stage::BuildingDensity, format("iteration %d", iteration));
+            density = DensityField{};
+            build_density_field(source, analysis, seg, panel, s.profile, density, s.density);
+            if (cancelled()) return false;
+
+            // --- retopo -----------------------------------------------------
+            set_stage(Stage::Retopologising, format("iteration %d", iteration));
+            RetopoOptions ropts = s.retopo;
+            if (s.force_backend) {
+                ropts.forced_backend_valid = true;
+                ropts.forced_backend       = s.backend;
+            }
+            retopo = run_retopo(source, analysis, seg, density, panel, s.profile, ropts,
+                                [&](float f, const char* what) { set_progress(f, what); });
+            if (cancelled()) return false;
+            if (!retopo.ok) {
+                fail("retopology failed: " + retopo.error);
+                return false;
+            }
+
+            // --- bake -------------------------------------------------------
+            set_stage(Stage::Baking, format("iteration %d", iteration));
+            bake = bake_all(retopo.mesh, source, analysis.bvh, analysis, s.profile,
+                            panel.global, s.bake,
+                            [&](float f, const char* what) { set_progress(f, what); });
+            if (cancelled()) return false;
+            if (!bake.ok) RD_WARN("bake failed: %s", bake.error.c_str());
+
+            // Unwrapping rebuilt the vertex list, so the region map must follow.
+            transfer_regions(source, seg, analysis.bvh, retopo.mesh);
+            retopo.region_triangles.assign(retopo.region_budgets.size(), 0);
+            for (uint16_t r : retopo.mesh.tri_region)
+                if (r < retopo.region_triangles.size()) ++retopo.region_triangles[r];
+
+            // --- strips, for the validator ----------------------------------
+            strips = StripData{};
+            if (s.profile.require_strips) {
+                Mesh probe = retopo.mesh;
+                optimise_for_target(probe, s.profile);
+                strips = build_strips(probe, s.profile);
+            }
+
+            // --- validate ---------------------------------------------------
+            set_stage(Stage::Validating, format("iteration %d", iteration));
+            ValidationInput vin;
+            vin.mesh             = &retopo.mesh;
+            vin.profile          = &s.profile;
+            vin.segmentation     = &seg;
+            vin.panel            = &panel;
+            vin.strips           = s.profile.require_strips ? &strips : nullptr;
+            vin.bake             = &bake;
+            vin.source_analysis  = &analysis;
+            vin.region_triangles = &retopo.region_triangles;
+            validation = validate(vin);
+
+            const int tris  = int(retopo.mesh.triangle_count());
+            const int verts = int(retopo.mesh.vertex_count());
+            const bool over_tri  = tris  > s.profile.max_triangles;
+            const bool over_vert = verts > s.profile.max_vertices;
+
+            // Score this attempt so the run can fall back to the best one. The
+            // unwrap is not a smooth function of the triangle budget - the seam
+            // count jumps around - so the last attempt is often not the best.
+            const int overshoot = std::max(0, tris - s.profile.max_triangles) +
+                                  std::max(0, verts - s.profile.max_vertices);
+            const int score = overshoot * 10000 - tris;   // legal first, then fullest
+            if (score < best_score) {
+                best_score      = score;
+                best_density    = density;
+                best_retopo     = retopo;
+                best_bake       = bake;
+                best_strips     = strips;
+                best_validation = validation;
+                best_panel      = panel;
+                have_best       = true;
+            }
+
+            if (!over_tri && !over_vert) break;
+
+            if (attempt + 1 >= kBudgetAttempts) {
+                RD_WARN("still over budget after %d attempts (%d tri, %d vtx); keeping the "
+                        "closest attempt and letting validation say so",
+                        kBudgetAttempts, tris, verts);
+                break;
+            }
+
+            float scale = 1.0f;
+            if (over_tri)  scale = std::min(scale, float(s.profile.max_triangles) / float(tris));
+            if (over_vert) scale = std::min(scale, float(s.profile.max_vertices) / float(verts));
+            // Undershoot on purpose: the seam count does not scale linearly with
+            // the triangle count, so aiming exactly at the limit overshoots again.
+            const int next = std::max(16, int(float(effective_budget) * scale * 0.92f));
+            if (next >= effective_budget) break;
+
+            RD_INFO("budget re-fit: %d tri / %d vtx against limits %d / %d, retrying with "
+                    "a %d triangle budget", tris, verts, s.profile.max_triangles,
+                    s.profile.max_vertices, next);
+            effective_budget = next;
+        }
+
+        if (have_best) {
+            density    = std::move(best_density);
+            retopo     = std::move(best_retopo);
+            bake       = std::move(best_bake);
+            strips     = std::move(best_strips);
+            validation = std::move(best_validation);
+            panel      = std::move(best_panel);
+        }
+
+        // --- candidate renders -----------------------------------------------
+        set_stage(Stage::CandidateRenders, format("iteration %d", iteration));
+        RenderOptions opts;
+        opts.width   = s.render_size;
+        opts.height  = s.render_size;
+        opts.samples = s.render_samples;
+        opts.mode    = RenderMode::Shaded;
+        opts.wireframe_overlay = true;
+
+        const fs::path iter_dir = paths::iteration_dir(iteration);
+        ViewSet candidate = render_views(retopo.mesh, opts, iter_dir, "lowpoly", nullptr,
+                                         bake.ok ? &bake.diffuse : nullptr, true);
+        if (!candidate.ok) RD_WARN("candidate renders unavailable: %s", candidate.error.c_str());
+
+        SilhouetteError silhouette;
+        {
+            std::lock_guard lock(results_mutex_);
+            silhouette = compare_silhouettes(results_.reference_views, candidate);
+        }
+
+        if (bake.ok && !bake.diffuse.empty())
+            bake.diffuse.save_png(iter_dir / "diffuse.png");
+        {
+            std::string err;
+            json_save_file((iter_dir / "knobs.json").string(), panel.to_json(), err);
+            json_save_file((iter_dir / "validation.json").string(), validation.to_json(), err);
+        }
+
+        // --- record ----------------------------------------------------------
+        IterationRecord record;
+        record.index      = iteration;
+        record.panel      = panel;
+        record.triangles  = retopo.mesh.triangle_count();
+        record.vertices   = retopo.mesh.vertex_count();
+        record.silhouette = silhouette;
+        record.validation_passed = validation.passed;
+        record.errors     = validation.errors;
+        record.warnings   = validation.warnings;
+        record.backend    = retopo.backend_used;
+        record.seconds    = iteration_watch.seconds();
+        for (const ViewSet::Entry& e : candidate.entries) record.renders.push_back(e.file);
+
+        {
+            std::lock_guard lock(results_mutex_);
+            results_.lowpoly         = retopo.mesh;
+            results_.density         = std::move(density);
+            results_.retopo          = retopo;
+            results_.bake            = bake;
+            results_.validation      = validation;
+            results_.candidate_views = candidate;
+            results_.silhouette      = silhouette;
+            results_.panel           = panel;
+        }
+        bump();
+
+        RD_INFO("iteration %d: %zu tri, silhouette mean %.4f worst %.4f, validation %s",
+                iteration, record.triangles, silhouette.mean, silhouette.worst,
+                validation.passed ? "passed" : "FAILED");
+
+        const bool last_iteration = iteration >= max_iterations;
+        bool stop = last_iteration;
+
+        // --- director review --------------------------------------------------
+        if (s.use_llm && llm_ && !cancelled()) {
+            set_stage(Stage::Reviewing, format("iteration %d", iteration));
+
+            IterationFacts facts;
+            facts.iteration      = iteration;
+            facts.max_iterations = max_iterations;
+            facts.triangles      = record.triangles;
+            facts.vertices       = record.vertices;
+            facts.silhouette     = silhouette;
+            facts.retopo         = &retopo;
+            facts.validation     = &validation;
+            facts.bake           = &bake;
+
+            ViewSet reference;
+            {
+                std::lock_guard lock(results_mutex_);
+                reference = results_.reference_views;
+            }
+
+            const LlmRequest req =
+                validation.passed
+                    ? build_review_request(source, seg, s.profile, panel, facts, reference,
+                                           candidate)
+                    : build_repair_request(seg, s.profile, panel, validation, retopo);
+
+            const LlmResponse res = ask(req, validation.passed ? "review" : "repair");
+            if (cancelled()) return false;
+
+            const ReviewOutcome outcome = parse_review_response(res);
+            if (outcome.ok) {
+                record.verdict  = outcome.verdict;
+                record.critique = outcome.critique;
+
+                KnobPanel next = panel;
+                const KnobPanel::ApplyReport applied = next.apply_patch(outcome.patch);
+                next.resolve_budgets(s.profile.max_triangles);
+                {
+                    std::lock_guard lock(results_mutex_);
+                    results_.panel = next;
+                }
+                bump();
+
+                RD_INFO("director verdict '%s': %s (%d fields changed)",
+                        outcome.verdict.c_str(), outcome.critique.c_str(),
+                        applied.fields_changed);
+
+                const bool accepted = outcome.verdict == "accept" && validation.passed;
+                const bool no_change = applied.fields_changed == 0;
+                stop = last_iteration || accepted ||
+                       (!outcome.wants_another_pass && validation.passed) || no_change;
+                if (no_change && !accepted)
+                    RD_INFO("the patch changed nothing, so another pass would repeat itself");
+            } else {
+                RD_WARN("review skipped: %s", outcome.error.c_str());
+                stop = true;
+            }
+        } else if (!s.use_llm) {
+            stop = true;
+        }
+
+        {
+            std::lock_guard lock(results_mutex_);
+            results_.iterations.push_back(std::move(record));
+        }
+        bump();
+
+        if (stop) break;
+    }
+    return true;
+}
+
+bool Pipeline::stage_export(const PipelineSettings& s)
+{
+    if (!s.auto_export) return true;
+    set_stage(Stage::Exporting, "writing the asset");
+
+    Mesh    mesh;
+    Texture diffuse;
+    Palette palette;
+    {
+        std::lock_guard lock(results_mutex_);
+        mesh    = results_.lowpoly;
+        diffuse = results_.bake.diffuse;
+        palette = results_.bake.palette;
+    }
+    if (mesh.empty()) {
+        RD_WARN("nothing to export");
+        return true;
+    }
+
+    ExportOptions opts = s.exporting;
+    if (opts.base_name.empty() || opts.base_name == "lowpoly") {
+        std::lock_guard lock(results_mutex_);
+        if (!results_.source_path.empty())
+            opts.base_name = slugify(results_.source_path.stem().string()) + "_lowpoly";
+    }
+
+    ExportResult exported = export_asset(mesh, diffuse, palette, s.profile,
+                                         paths::export_dir(), opts);
+    if (!exported.ok) RD_WARN("export incomplete: %s", exported.error.c_str());
+
+    {
+        std::lock_guard lock(results_mutex_);
+        results_.exported = std::move(exported);
+        // The exporter reordered the mesh in place; keep the shipped version.
+        results_.lowpoly = std::move(mesh);
+    }
+    bump();
+    return true;
+}
+
+bool Pipeline::stage_report(const PipelineSettings& s)
+{
+    if (!s.write_report) return true;
+    set_stage(Stage::Reporting, "assembling the report");
+
+    std::lock_guard lock(results_mutex_);
+    const PipelineResults& r = results_;
+
+    // --- machine readable ---------------------------------------------------
+    Json j;
+    j["source"]  = r.source_path.string();
+    j["profile"] = s.profile.to_json();
+    j["panel"]   = r.panel.to_json();
+    j["validation"] = r.validation.to_json();
+    j["silhouette"] = Json{{"mean", r.silhouette.mean},
+                           {"worst", r.silhouette.worst},
+                           {"worst_view", r.silhouette.worst_view}};
+
+    Json iterations = Json::array();
+    for (const IterationRecord& it : r.iterations) {
+        Json e;
+        e["index"]      = it.index;
+        e["triangles"]  = it.triangles;
+        e["vertices"]   = it.vertices;
+        e["backend"]    = backend_name(it.backend);
+        e["silhouette_mean"]  = it.silhouette.mean;
+        e["silhouette_worst"] = it.silhouette.worst;
+        e["validation_passed"] = it.validation_passed;
+        e["errors"]     = it.errors;
+        e["warnings"]   = it.warnings;
+        e["verdict"]    = it.verdict;
+        e["critique"]   = it.critique;
+        e["seconds"]    = it.seconds;
+        iterations.push_back(e);
+    }
+    j["iterations"] = iterations;
+
+    Json files = Json::array();
+    for (const fs::path& f : r.exported.files) files.push_back(f.string());
+    j["exported"] = files;
+
+    std::string err;
+    json_save_file((paths::reports_dir() / "report.json").string(), j, err);
+
+    // --- for a human --------------------------------------------------------
+    std::string md;
+    md += "# Retopo Director report\n\n";
+    md += format("- source: `%s`\n", r.source_path.filename().string().c_str());
+    md += format("- profile: **%s** (%d triangles, %d vertices)\n", s.profile.name.c_str(),
+                 s.profile.max_triangles, s.profile.max_vertices);
+    md += format("- high poly: %zu triangles\n", r.highpoly.triangle_count());
+    md += format("- low poly: %zu triangles, %zu vertices\n", r.lowpoly.triangle_count(),
+                 r.lowpoly.vertex_count());
+    md += format("- silhouette error: mean %.4f, worst %.4f%s%s\n", r.silhouette.mean,
+                 r.silhouette.worst, r.silhouette.worst_view.empty() ? "" : " on ",
+                 r.silhouette.worst_view.c_str());
+    md += format("- validation: **%s** (%d errors, %d warnings)\n\n",
+                 r.validation.passed ? "passed" : "failed", r.validation.errors,
+                 r.validation.warnings);
+
+    md += "## Regions\n\n";
+    md += "| region | budget | actual | fidelity | rationale |\n";
+    md += "|---|---:|---:|---|---|\n";
+    for (const RegionKnobs& k : r.panel.regions) {
+        const int actual = k.id < r.retopo.region_triangles.size()
+                               ? r.retopo.region_triangles[k.id] : 0;
+        md += format("| %s | %d | %d | %s | %s |\n", k.name.c_str(), k.triangle_budget,
+                     actual, fidelity_name(k.fidelity),
+                     k.rationale.empty() ? "-" : k.rationale.c_str());
+    }
+
+    md += "\n## Iterations\n\n";
+    md += "| # | triangles | silhouette mean | validation | verdict |\n";
+    md += "|---:|---:|---:|---|---|\n";
+    for (const IterationRecord& it : r.iterations)
+        md += format("| %d | %zu | %.4f | %s | %s |\n", it.index, it.triangles,
+                     it.silhouette.mean, it.validation_passed ? "passed" : "failed",
+                     it.verdict.empty() ? "-" : it.verdict.c_str());
+
+    for (const IterationRecord& it : r.iterations) {
+        if (it.critique.empty()) continue;
+        md += format("\n**Iteration %d critique.** %s\n", it.index, it.critique.c_str());
+    }
+
+    md += "\n## Validation detail\n\n```\n";
+    md += r.validation.full_text();
+    md += "```\n";
+
+    if (!r.exported.files.empty()) {
+        md += "\n## Exported files\n\n";
+        for (const fs::path& f : r.exported.files)
+            md += format("- `%s`\n", f.filename().string().c_str());
+    }
+
+    paths::write_file(paths::reports_dir() / "report.md", md);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+void Pipeline::run(Entry entry, fs::path mesh_path, PipelineSettings settings)
+{
+    Stopwatch watch;
+    llm_ = settings.use_llm ? make_llm_backend(settings.llm) : nullptr;
+
+    if (llm_) {
+        std::string reason;
+        if (!llm_->available(&reason)) {
+            RD_WARN("%s is unavailable (%s); running without the director",
+                    llm_->name(), reason.c_str());
+            llm_.reset();
+            settings.use_llm = false;
+        } else {
+            RD_INFO("director backend: %s  [%s]", llm_->name(), llm_->describe().c_str());
+        }
+    }
+
+    paths::ensure_dir(paths::renders_dir());
+    paths::ensure_dir(paths::reports_dir());
+
+    bool ok = true;
+    if (entry == Entry::Full) {
+        ok = stage_load(mesh_path, settings) &&
+             stage_analyse(settings) &&
+             stage_reference_renders(settings) &&
+             stage_segment(settings) &&
+             stage_name_regions(settings) &&
+             stage_allocate_budget(settings);
+    }
+
+    if (ok && !cancelled()) ok = stage_iterate(settings);
+    if (ok && !cancelled()) ok = stage_export(settings);
+    if (ok && !cancelled()) ok = stage_report(settings);
+
+    {
+        std::lock_guard lock(results_mutex_);
+        results_.total_seconds = watch.seconds();
+    }
+
+    if (cancelled())      set_stage(Stage::Cancelled, "cancelled by the user");
+    else if (!ok)         { if (stage_.load() != Stage::Failed) fail("the run stopped early"); }
+    else                  set_stage(Stage::Done, format("finished in %s",
+                                                        format_duration(watch.seconds()).c_str()));
+
+    progress_.store(1.0f);
+    bump();
+    llm_.reset();
+    running_.store(false);
+}
+
+} // namespace rd

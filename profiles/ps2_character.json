@@ -1,0 +1,80 @@
+{
+  "name": "ps2_character",
+  "description": "Playable third person character, PlayStation 2 class budget.",
+  "geometry": {
+    "max_triangles": 1400,
+    "max_vertices": 1200,
+    "max_shells": 1,
+    "max_bone_influences": 2,
+    "require_manifold": true,
+    "allow_ngons": false,
+    "require_symmetry": true,
+    "require_strips": true,
+    "min_average_strip_len": 3.5,
+    "vertex_cache_size": 16
+  },
+  "texture": {
+    "width": 256,
+    "height": 256,
+    "palette_colors": 256,
+    "dithering": true,
+    "count": 1,
+    "require_uvs": true,
+    "require_vertex_colors": true,
+    "bake_lighting_to_diffuse": true
+  },
+  "quality": {
+    "target_silhouette_error": 0.02,
+    "max_silhouette_error": 0.05
+  },
+  "framing": {
+    "reference_height_m": 1.8,
+    "turntable_views": 8,
+    "cameras": [
+      {
+        "name": "gameplay",
+        "description": "Third person follow camera, roughly three metres back",
+        "yaw_degrees": 180.0,
+        "pitch_degrees": 12.0,
+        "distance_m": 3.0,
+        "height_m": 1.1,
+        "fov_degrees": 40.0,
+        "primary": true
+      },
+      {
+        "name": "cutscene_face",
+        "description": "Dialogue framing, head and shoulders",
+        "yaw_degrees": 170.0,
+        "pitch_degrees": 2.0,
+        "distance_m": 0.9,
+        "height_m": 1.62,
+        "fov_degrees": 35.0,
+        "primary": true
+      },
+      {
+        "name": "silhouette_side",
+        "description": "Profile read, checks the body outline",
+        "yaw_degrees": 90.0,
+        "pitch_degrees": 0.0,
+        "distance_m": 3.2,
+        "height_m": 1.0,
+        "fov_degrees": 38.0,
+        "primary": false
+      },
+      {
+        "name": "low_hero",
+        "description": "Low hero angle, exaggerates the shoulder line",
+        "yaw_degrees": 200.0,
+        "pitch_degrees": -18.0,
+        "distance_m": 2.4,
+        "height_m": 0.7,
+        "fov_degrees": 45.0,
+        "primary": false
+      }
+    ]
+  },
+  "director": {
+    "art_direction": "Third person playable character. The face is visible in dialogue cutscenes, so the head deserves a disproportionate share of the budget. Hands are seen holding equipment but never in close up. Feet and the back of the legs are almost never framed.",
+    "max_iterations": 4
+  }
+}

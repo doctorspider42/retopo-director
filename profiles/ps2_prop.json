@@ -1,0 +1,50 @@
+{
+  "name": "ps2_prop",
+  "description": "Static world prop, PlayStation 2 class budget.",
+  "geometry": {
+    "max_triangles": 400,
+    "max_vertices": 380,
+    "max_shells": 0,
+    "max_bone_influences": 0,
+    "require_manifold": true,
+    "allow_ngons": false,
+    "require_symmetry": false,
+    "require_strips": true,
+    "min_average_strip_len": 4.0,
+    "vertex_cache_size": 16
+  },
+  "texture": {
+    "width": 128,
+    "height": 128,
+    "palette_colors": 16,
+    "dithering": true,
+    "count": 1,
+    "require_uvs": true,
+    "require_vertex_colors": true,
+    "bake_lighting_to_diffuse": true
+  },
+  "quality": {
+    "target_silhouette_error": 0.025,
+    "max_silhouette_error": 0.06
+  },
+  "framing": {
+    "reference_height_m": 1.0,
+    "turntable_views": 6,
+    "cameras": [
+      {
+        "name": "gameplay",
+        "description": "Standing player looking at the prop",
+        "yaw_degrees": 180.0,
+        "pitch_degrees": 20.0,
+        "distance_m": 2.0,
+        "height_m": 0.5,
+        "fov_degrees": 45.0,
+        "primary": true
+      }
+    ]
+  },
+  "director": {
+    "art_direction": "Static prop seen from walking distance. Never inspected up close. Silhouette matters far more than surface detail.",
+    "max_iterations": 3
+  }
+}

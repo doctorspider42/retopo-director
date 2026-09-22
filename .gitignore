@@ -1,0 +1,12 @@
+build/
+out/
+.cache/
+_deps/
+*.user
+work/
+screenshots/
+*.png
+*.obj
+*.gltf
+*.glb
+!profiles/*.json

@@ -1,0 +1,36 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "mingw-release",
+      "displayName": "MinGW / Ninja / RelWithDebInfo",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/mingw-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "mingw-debug",
+      "inherits": "mingw-release",
+      "displayName": "MinGW / Ninja / Debug",
+      "binaryDir": "${sourceDir}/build/mingw-debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "RD_LTO": "OFF" }
+    },
+    {
+      "name": "msvc-release",
+      "displayName": "MSVC / Ninja / RelWithDebInfo",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/msvc-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "mingw-release", "configurePreset": "mingw-release" },
+    { "name": "mingw-debug", "configurePreset": "mingw-debug" },
+    { "name": "msvc-release", "configurePreset": "msvc-release" }
+  ]
+}
