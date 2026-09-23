@@ -660,6 +660,136 @@ size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& s
 }
 
 // ---------------------------------------------------------------------------
+float fit_to_surface(Mesh& mesh, const Bvh& source_bvh, int passes,
+                     const SymmetryPlane* symmetry, float symmetry_epsilon)
+{
+    if (mesh.empty() || source_bvh.empty() || passes <= 0) return 0.0f;
+
+    const size_t vcount = mesh.vertex_count();
+    const size_t tcount = mesh.triangle_count();
+
+    // Mirror partners, found once: the moves below are computed per vertex and
+    // would drift a symmetric mesh apart by float noise, so each pass averages
+    // a vertex with its partner's reflection and pins plane vertices to it.
+    std::vector<uint32_t> partner(vcount, kInvalidIndex);
+    std::vector<bool>     on_plane(vcount, false);
+    if (symmetry) {
+        std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+        const float cell = std::max(symmetry_epsilon * 2.0f, 1e-7f);
+        auto key = [&](Vec3 p) {
+            const int64_t x = int64_t(std::floor(p.x / cell));
+            const int64_t y = int64_t(std::floor(p.y / cell));
+            const int64_t z = int64_t(std::floor(p.z / cell));
+            return uint64_t(x * 73856093) ^ uint64_t(y * 19349663) ^ uint64_t(z * 83492791);
+        };
+        for (uint32_t v = 0; v < vcount; ++v) grid[key(mesh.positions[v])].push_back(v);
+        for (uint32_t v = 0; v < vcount; ++v) {
+            const Vec3 p = mesh.positions[v];
+            if (std::fabs(dot(symmetry->normal, p) - symmetry->offset) <= symmetry_epsilon) {
+                on_plane[v] = true;
+                continue;
+            }
+            const Vec3 m = symmetry->mirror(p);
+            float best = symmetry_epsilon * symmetry_epsilon;
+            for (int dx = -1; dx <= 1; ++dx)
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        const auto it =
+                            grid.find(key(m + Vec3(float(dx), float(dy), float(dz)) * cell));
+                        if (it == grid.end()) continue;
+                        for (uint32_t w : it->second) {
+                            const float d2 = length2(mesh.positions[w] - m);
+                            if (d2 <= best) { best = d2; partner[v] = w; }
+                        }
+                    }
+        }
+    }
+
+    // Where each face is sampled: the centroid and a point toward each corner,
+    // with the share of each sample that goes to each corner.
+    static const float kSample[4][3] = {{1.f / 3, 1.f / 3, 1.f / 3},
+                                        {4.f / 6, 1.f / 6, 1.f / 6},
+                                        {1.f / 6, 4.f / 6, 1.f / 6},
+                                        {1.f / 6, 1.f / 6, 4.f / 6}};
+
+    float last_move = 0.0f;
+    std::vector<double> push(vcount), weight(vcount), edge_sum(vcount);
+    std::vector<int>    edge_n(vcount);
+
+    for (int pass = 0; pass < passes; ++pass) {
+        mesh.compute_normals();
+        std::fill(push.begin(), push.end(), 0.0);
+        std::fill(weight.begin(), weight.end(), 0.0);
+        std::fill(edge_sum.begin(), edge_sum.end(), 0.0);
+        std::fill(edge_n.begin(), edge_n.end(), 0);
+
+        for (size_t t = 0; t < tcount; ++t) {
+            const uint32_t idx[3] = {mesh.indices[t * 3], mesh.indices[t * 3 + 1],
+                                     mesh.indices[t * 3 + 2]};
+            const Vec3 a = mesh.positions[idx[0]], b = mesh.positions[idx[1]],
+                       c = mesh.positions[idx[2]];
+            const Vec3  cr   = cross(b - a, c - a);
+            const float area = 0.5f * length(cr);
+            if (area < 1e-14f) continue;
+            const Vec3  n    = cr / (2.0f * area);
+            const float edge = (length(b - a) + length(c - b) + length(a - c)) / 3.0f;
+            for (int k = 0; k < 3; ++k) { edge_sum[idx[k]] += edge; ++edge_n[idx[k]]; }
+
+            // Only look as far as a face could plausibly be off its own surface.
+            // Further than that the nearest surface is some other part - the
+            // torso beside an arm, the far side of a thin plate - and pulling
+            // toward it is how faces end up bridging a gap.
+            const float reach = edge * 0.75f;
+            for (const auto& w : kSample) {
+                const Vec3 s = a * w[0] + b * w[1] + c * w[2];
+                const ClosestHit hit = source_bvh.closest_point(s, reach);
+                if (!hit.hit()) continue;
+                // A surface facing the other way is the back of something thin.
+                if (dot(source_bvh.geometric_normal(hit.triangle), n) < 0.3f) continue;
+                const float d = dot(hit.point - s, n);
+                for (int k = 0; k < 3; ++k) {
+                    push[idx[k]]   += double(d) * w[k] * area;
+                    weight[idx[k]] += double(w[k]) * area;
+                }
+            }
+        }
+
+        // Move, damped and capped. The cap is a fraction of the local edge
+        // length, which is what keeps a vertex from stepping past a neighbour
+        // and folding a face over.
+        std::vector<Vec3> moved = mesh.positions;
+        double pass_move = 0.0;
+        for (size_t v = 0; v < vcount; ++v) {
+            if (weight[v] <= 0.0 || edge_n[v] == 0 || !mesh.has_normals()) continue;
+            const float mean_edge = float(edge_sum[v] / edge_n[v]);
+            const float offset = clampf(float(push[v] / weight[v]) * 0.8f,
+                                        -0.2f * mean_edge, 0.2f * mean_edge);
+            moved[v] = mesh.positions[v] + mesh.normals[v] * offset;
+            pass_move += std::fabs(offset);
+        }
+        if (symmetry) {
+            for (size_t v = 0; v < vcount; ++v) {
+                if (on_plane[v]) {
+                    moved[v] = moved[v] - symmetry->normal *
+                                              (dot(symmetry->normal, moved[v]) - symmetry->offset);
+                } else if (partner[v] != kInvalidIndex && partner[partner[v]] == uint32_t(v)) {
+                    const uint32_t w = partner[v];
+                    if (w > v) {
+                        const Vec3 avg = (moved[v] + symmetry->mirror(moved[w])) * 0.5f;
+                        moved[v] = avg;
+                        moved[w] = symmetry->mirror(avg);
+                    }
+                }
+            }
+        }
+        mesh.positions.swap(moved);
+        last_move = float(pass_move / double(std::max<size_t>(1, vcount)));
+    }
+    mesh.compute_normals(60.0f);
+    return last_move;
+}
+
+// ---------------------------------------------------------------------------
 HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                                 const MeshAnalysis& analysis, const TargetProfile& profile,
                                 const GlobalKnobs& knobs, const SymmetryPlane& symmetry,
@@ -740,7 +870,17 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
                             rep.joint_splits));
     }
 
-    // --- 5. final tidy ------------------------------------------------------
+    // --- 5. fit the faces, not just the vertices ------------------------------
+    if (opts.fit_surface_passes > 0) {
+        const float moved = fit_to_surface(mesh, source_bvh, opts.fit_surface_passes,
+                                           rep.symmetry_applied ? &symmetry : nullptr, eps);
+        if (moved > 0.0f)
+            rep.note(format("fitted the faces to the surface, last pass moved %.3f%% of the "
+                            "model's size on average",
+                            100.0f * moved / std::max(analysis.bbox_diagonal, kEps)));
+    }
+
+    // --- 6. final tidy ------------------------------------------------------
     rep.removed_degenerate += mesh.remove_degenerate();
     mesh.compact();
 

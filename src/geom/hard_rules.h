@@ -46,6 +46,8 @@ struct HardRuleOptions {
     bool  enforce_manifold     = true;
     bool  enforce_joint_loops  = true;
     bool  reproject            = true;
+    // Passes of fit_to_surface. 0 leaves the vertices where the backend put them.
+    int   fit_surface_passes   = 4;
 };
 
 // `source` and `source_bvh` are the high poly, used to re-project any vertex
@@ -73,5 +75,15 @@ size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& s
 // inside out; an inverted face bakes to black because its sampling
 // hemisphere points into the model. Returns how many were flipped.
 size_t fix_winding(Mesh& mesh, const Bvh& source_bvh);
+
+// Moves vertices along their normals until the low poly's faces, not just its
+// vertices, sit on the high poly on average. A mesh whose vertices all lie on
+// a convex surface has every face cutting beneath it, so a retopology that
+// only snaps vertices comes out uniformly smaller than its source: thin limbs,
+// a narrower silhouette in every view. `symmetry` keeps a mirrored mesh
+// exactly mirrored; pass null when it is not. Returns the mean absolute
+// offset of the last pass, in model units.
+float fit_to_surface(Mesh& mesh, const Bvh& source_bvh, int passes,
+                     const SymmetryPlane* symmetry, float symmetry_epsilon);
 
 } // namespace rd

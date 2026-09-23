@@ -280,3 +280,73 @@ TEST(obj_round_trip)
     CHECK_EQ(back.triangle_count(), m.triangle_count());
     CHECK_EQ(back.compute_stats().shells, size_t(1));
 }
+
+// An icosahedron inscribed in a sphere has every face beneath the surface and
+// about 60% of its volume. Fitting the faces must win most of that back, keep
+// the shape closed, and not move it off centre.
+TEST(fit_to_surface_undoes_inscribed_shrinkage)
+{
+    const Mesh high = rdtest::icosphere(5);
+    Bvh bvh;
+    bvh.build(high);
+    Mesh low = rdtest::icosphere(1);
+    const double v_high = rdtest::signed_volume(high);
+    const double before = rdtest::signed_volume(low) / v_high;
+
+    fit_to_surface(low, bvh, 6, nullptr, 1e-4f);
+    const double after = rdtest::signed_volume(low) / v_high;
+    CHECK(before < 0.9);
+    CHECK(std::fabs(after - 1.0) < std::fabs(before - 1.0) * 0.5);
+    CHECK(after < 1.1);
+    CHECK(low.compute_stats().closed);
+    Vec3 c{};
+    for (const Vec3& p : low.positions) c = c + p;
+    CHECK(length(c / float(low.vertex_count())) < 1e-3f);
+}
+
+TEST(fit_to_surface_keeps_a_mirrored_mesh_mirrored)
+{
+    Mesh high = rdtest::icosphere(5);
+    for (Vec3& p : high.positions) p = p * (1.0f + 0.2f * std::cos(3 * p.y) * std::fabs(p.x));
+    Bvh bvh;
+    bvh.build(high);
+    Mesh low = rdtest::icosphere(2);
+    for (Vec3& p : low.positions) p = p * (1.0f + 0.2f * std::cos(3 * p.y) * std::fabs(p.x));
+
+    SymmetryPlane plane;
+    plane.normal   = {1, 0, 0};
+    plane.offset   = 0;
+    plane.accepted = true;
+    fit_to_surface(low, bvh, 4, &plane, 1e-4f);
+
+    // Every vertex still has a partner at its reflection.
+    size_t unmatched = 0;
+    for (const Vec3& p : low.positions) {
+        const Vec3 m = plane.mirror(p);
+        float best = 1e30f;
+        for (const Vec3& q : low.positions) best = std::min(best, length2(q - m));
+        unmatched += best > 1e-8f;
+    }
+    CHECK_EQ(unmatched, size_t(0));
+}
+
+// Thickness is the distance through the model, so a capsule-ish tube of radius
+// r reads about 2r along its sides, and a fat sphere reads its diameter.
+TEST(analysis_thickness_measures_the_way_through)
+{
+    Mesh tube = rdtest::icosphere(4);
+    for (Vec3& p : tube.positions) p = Vec3(p.x * 0.1f, p.y * 1.0f, p.z * 0.1f);
+    MeshAnalysis a;
+    AnalysisOptions ao;
+    ao.ambient_rays = 0;
+    analyse_mesh(tube, a, ao);
+    REQUIRE(a.thickness.size() == tube.vertex_count());
+    // Around the middle of the tube, where the sides are straight.
+    double sum = 0;
+    int n = 0;
+    for (size_t v = 0; v < tube.vertex_count(); ++v)
+        if (std::fabs(tube.positions[v].y) < 0.3f) { sum += a.thickness[v]; ++n; }
+    REQUIRE(n > 0);
+    // The radius at |y| < 0.3 is between 0.095 and 0.1.
+    CHECK_NEAR(sum / n, 0.195, 0.02);
+}
