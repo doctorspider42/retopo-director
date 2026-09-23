@@ -31,6 +31,13 @@ struct BakeOptions {
     // Ray offset along the normal, relative to the bbox diagonal, to stop the
     // low poly surface from shadowing itself against the high poly.
     float ray_bias_rel = 3e-4f;
+    // Occluders nearer than this, relative to the bbox diagonal, do not count
+    // towards ambient occlusion. A sculpted source is full of millimetre
+    // grooves - veins, muscle striations - that occlude correctly and read, at
+    // 256 texels for a whole character, as thin black scribbles all over the
+    // skin. The occlusion a low poly texture can use is the armpit and the
+    // crotch, not the pore; this is the line between them.
+    float ao_min_distance_rel = 0.004f;
     // How far to search for the high poly when a texel sits off the surface.
     float projection_distance_rel = 0.05f;
     // Palette size; 0 takes the profile value, negative disables quantisation.

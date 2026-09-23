@@ -926,6 +926,7 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
     const float diag        = std::max(source_analysis.bbox_diagonal, kEps);
     const float bias        = diag * opts.ray_bias_rel;
     const float ao_distance = diag * clampf(opts.ao_distance_rel, 0.01f, 2.0f);
+    const float ao_near     = std::max(bias, diag * opts.ao_min_distance_rel);
     const float search      = diag * clampf(opts.projection_distance_rel, 0.001f, 1.0f);
     const int   ao_rays     = opts.bake_ao && knobs.bake_ambient_occlusion
                                   ? std::max(1, opts.ao_rays) : 0;
@@ -969,11 +970,45 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                     }
                 }
 
-                const RayHit out_hit = source_bvh.intersect(job.position + job.normal * bias,
-                                                            job.normal, bias, search);
-                const RayHit in_hit  = source_bvh.intersect(job.position - job.normal * bias,
-                                                            -job.normal, bias, search);
-                local_rays += 2;
+                // The surface this texel stands for is the one facing the same
+                // way as the low poly, not merely the nearest one. Where a low
+                // poly face cuts across a fold of the source, the nearest hit
+                // along its normal is the back of the fold: its albedo comes
+                // from the wrong place and, with the normal flipped to face
+                // out, its rays start on the inside - black texels traced along
+                // every fold, the scribbles all over the Quaternius bakes. So
+                // each probe walks past surfaces that face away (a few at most)
+                // and stops at the first that faces the low poly.
+                auto front_hit = [&](Vec3 dir) {
+                    RayHit found;
+                    Vec3   from      = job.position + dir * bias;
+                    float  travelled = 0.0f;
+                    for (int step = 0; step < 4 && travelled < search; ++step) {
+                        RayHit h = source_bvh.intersect(from, dir, bias, search - travelled);
+                        ++local_rays;
+                        if (!h.hit()) break;
+                        if (dot(source_bvh.shading_normal(h), job.normal) > 0.0f) {
+                            h.t += travelled;
+                            found = h;
+                            break;
+                        }
+                        travelled += h.t + bias;
+                        from = from + dir * (h.t + bias);
+                    }
+                    return found;
+                };
+                RayHit out_hit = front_hit(job.normal);
+                RayHit in_hit  = front_hit(-job.normal);
+                // Nothing facing the right way in reach: a source wound
+                // inconsistently, or a thin sheet. Take the nearest surface of
+                // any kind, as before.
+                if (!out_hit.hit() && !in_hit.hit()) {
+                    out_hit = source_bvh.intersect(job.position + job.normal * bias, job.normal,
+                                                   bias, search);
+                    in_hit  = source_bvh.intersect(job.position - job.normal * bias, -job.normal,
+                                                   bias, search);
+                    local_rays += 2;
+                }
 
                 const RayHit* best = nullptr;
                 if (out_hit.hit() && in_hit.hit()) best = out_hit.t <= in_hit.t ? &out_hit : &in_hit;
@@ -996,23 +1031,34 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                     }
                 }
 
-                const Vec3 origin = surface + normal * bias;
 
-                // Ambient occlusion.
+                // Occlusion and shadows are traced from the low poly, not from
+                // the point of the source the texel landed on. The low poly is
+                // what gets lit on the console, and it is a clean closed
+                // surface; a sculpted source is not. Where its folds run
+                // through each other the landing point lies inside another
+                // part of the body, every ray from it is blocked, and those
+                // texels came out as black scribbles along every fold of the
+                // Quaternius characters - then as bright ones when the other
+                // side was tried. From a point just off the low poly the rays
+                // see what the low poly sees: armpits and the crotch, not the
+                // inside of a bicep. The albedo still comes from the source.
+                const float cage   = std::max(bias, ao_near);
+                const Vec3  origin = job.position + job.normal * cage;
                 float ao = 1.0f;
                 if (ao_rays > 0) {
                     Vec3 tangent, bitangent;
-                    basis_from_normal(normal, tangent, bitangent);
+                    basis_from_normal(job.normal, tangent, bitangent);
                     int open = 0;
                     for (int r = 0; r < ao_rays; ++r) {
                         const Vec3 local = sample_cosine_hemisphere(rng.next_float(),
                                                                     rng.next_float());
-                        const Vec3 dir = tangent * local.x + bitangent * local.y + normal * local.z;
-                        if (!source_bvh.occluded(origin, dir, bias, ao_distance)) ++open;
+                        const Vec3 dir =
+                            tangent * local.x + bitangent * local.y + job.normal * local.z;
+                        if (!source_bvh.occluded(origin, dir, ao_near, ao_distance)) ++open;
                     }
                     local_rays += uint64_t(ao_rays);
-                    ao = float(open) / float(ao_rays);
-                    ao = lerpf(1.0f, ao, ao_strength);
+                    ao = lerpf(1.0f, float(open) / float(ao_rays), ao_strength);
                 }
 
                 // Direct lighting, flattened into the albedo.
@@ -1022,8 +1068,8 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                         const float ndl = saturate(dot(normal, l.direction));
                         if (ndl <= 0.0f) continue;
                         float shadow = 1.0f;
-                        if (l.casts_shadow) {
-                            shadow = source_bvh.occluded(origin, l.direction, bias, ao_distance * 2.0f)
+                        if (l.casts_shadow && dot(job.normal, l.direction) > 0.0f) {
+                            shadow = source_bvh.occluded(origin, l.direction, ao_near, ao_distance * 2.0f)
                                          ? 0.25f : 1.0f;
                             ++local_rays;
                         }
@@ -1077,14 +1123,14 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
 
                 Vec3 base{1, 1, 1};
                 const ClosestHit hit = source_bvh.closest_point(p, search * 2.0f);
-                Vec3 surface = p;
+                const Vec3 low_n = n;
                 if (hit.hit()) {
-                    surface = hit.point;
                     const Vec3 sn = source_bvh.geometric_normal(hit.triangle);
                     if (dot(sn, n) > 0.0f) n = normalize(n + sn * 0.5f);
                     base = sample_source_color_at(source, hit);
                 }
-                const Vec3 origin = surface + n * bias;
+                // From just off the low poly, as in the texel bake: see the note there.
+                const Vec3 origin = p + low_n * std::max(bias, ao_near);
 
                 float ao = 1.0f;
                 if (rays_per_vertex > 0) {
@@ -1094,8 +1140,10 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                     for (int r = 0; r < rays_per_vertex; ++r) {
                         const Vec3 local = sample_cosine_hemisphere(rng.next_float(),
                                                                     rng.next_float());
-                        const Vec3 dir = tangent * local.x + bitangent * local.y + n * local.z;
-                        if (!source_bvh.occluded(origin, dir, bias, ao_distance)) ++open;
+                        Vec3 dir = tangent * local.x + bitangent * local.y + n * local.z;
+                        const float below = dot(dir, low_n);
+                        if (below < 0.0f) dir = dir - low_n * (2.0f * below);
+                        if (!source_bvh.occluded(origin, dir, ao_near, ao_distance)) ++open;
                     }
                     ao = lerpf(1.0f, float(open) / float(rays_per_vertex), ao_strength);
                 }
