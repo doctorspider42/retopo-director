@@ -6,10 +6,21 @@
 cmake --preset mingw-release
 cmake --build --preset mingw-release
 
-# fast regression: the whole deterministic pipeline, no model, a couple of seconds
-./build/mingw-release/bin/retopo-director.exe --headless --no-llm --verbose \
-    --mesh <high.obj> --project /tmp/run
+# unit tests plus whole runs on the synthetic meshes, ~25 seconds
+ctest --preset mingw-release
+
+# one mesh, the whole deterministic pipeline, no model, a couple of seconds
+./build/mingw-release/bin/retopo-director.exe --headless --no-llm --no-settings \
+    --verbose --mesh <high.obj> --project /tmp/run
+
+# the benchmark: every corpus mesh, compared against a baseline
+python tools/bench.py --root <corpus> --baseline <previous>/metrics.json
 ```
+
+`--no-settings` matters. Without it a headless run reads settings.json, which
+holds whatever the window last had selected - profile, segmenter, director -
+and two runs of the same command stop meaning the same thing. The benchmark
+and the tests always pass it, with an explicit `--profile`.
 
 Exit code 0 means validation passed, 3 means it failed. `--verbose` mirrors the
 log to stderr, which is the only way to see what the engine is doing in headless
@@ -29,9 +40,23 @@ To look at the interface without needing it focused or even visible:
 The capture comes off the back buffer, so it contains the application window and
 nothing else. F12 does the same thing interactively.
 
-There is no test mesh in the repository. Generate one with any subdivided,
-displaced sphere; the pipeline expects a single closed shell and detects
-symmetry automatically.
+There is no test mesh in the repository. `tools/make_test_meshes.py <dir>`
+writes four (sphere, torus, lopsided blob, an A-pose figure with thin limbs),
+and `tools/fetch_corpus.py <corpus>` fetches five CC0 scans from Poly Haven.
+`bench/corpus.json` lists those plus CC0 character packs found under `--root`.
+Judge a change by the benchmark table, not by one mesh: nearly every change in
+the geometry layer helps some assets and hurts others.
+
+The number to read is `px`, the mean outline offset in pixels. The silhouette
+fraction depends on the shape - thin limbs are all perimeter - so 0.06 on a
+figure with its arms out can be a better fit than 0.02 on a bust.
+
+To repeat a run with the director without paying for the model:
+`--replay <that run>/reports/prompts`. Every reply is recorded there as
+`NN_<label>_text.txt`, and the Replay backend hands them back in order.
+
+Sanitizers need Linux: the `linux-asan` and `linux-tsan` presets build GLFW
+with its null platform, so they need no X11, and CI runs both on every PR.
 
 ## Conventions
 
@@ -105,6 +130,27 @@ one mesh. OBJ and glTF are already there; FBX is converted by ufbx at load
 (`target_axes`, `target_unit_meters`), because it is authored in centimetres as
 often as in metres and Z up as often as Y up. Do not add a second conversion
 downstream - the profile frames its cameras in metres and would move.
+
+**Never fill a `std::vector<bool>` from a parallel loop.** It packs 64
+entries into a word, so two lanes writing neighbouring entries lose each
+other's bits. `MeshAnalysis::edge_sharp` was one, and creases came and went
+between runs of the same mesh until TSan named it. Use bytes.
+
+**`normalize()` has an absolute epsilon and the loader works in metres.** A
+small asset's millimetre triangles, and the slivers every scan is full of, have
+cross products below it. Anything that judges a triangle by its normalised
+normal - fold tests above all - must compare raw area vectors against their
+own length instead, or it quietly refuses every operation on small geometry.
+
+**A source's vertex colours are not lighting.** `Mesh::colors_prelit` says
+whether they carry baked light, and only the bake sets it. Assets ship colour
+channels as shader masks (every Quaternius character has COLOR_0 all white),
+and drawing those unlit makes the reference renders a white cut-out.
+
+**The run hands back its best iteration, not its last.** The director's next
+panel is a guess and is often worse. `PipelineResults::kept_iteration` says
+which one is in the results, and the panel restored with it is the one that
+built it.
 
 **MinGW links the runtime dynamically by default**, which makes the executable
 unusable outside a shell that has the toolchain on `PATH`. The build passes
