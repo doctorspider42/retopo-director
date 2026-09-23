@@ -1095,7 +1095,26 @@ bool Pipeline::stage_report(const PipelineSettings& s)
             if (k.id < r.retopo.region_triangles.size())
                 budget_used += r.retopo.region_triangles[k.id];
         }
+        // Triangle shape, which no other number here sees: a fan of slivers can
+        // hold the silhouette perfectly and still look shattered.
+        std::vector<float> shapes;
+        shapes.reserve(r.lowpoly.triangle_count());
+        for (size_t t = 0; t < r.lowpoly.triangle_count(); ++t) {
+            Vec3 a, b, c;
+            r.lowpoly.tri_positions(t, a, b, c);
+            shapes.push_back(triangle_quality(a, b, c));
+        }
+        float median_shape = 0.0f, sliver_share = 0.0f;
+        if (!shapes.empty()) {
+            std::nth_element(shapes.begin(), shapes.begin() + shapes.size() / 2, shapes.end());
+            median_shape = shapes[shapes.size() / 2];
+            sliver_share = float(std::count_if(shapes.begin(), shapes.end(),
+                                               [](float q) { return q < 0.2f; })) /
+                           float(shapes.size());
+        }
         j["summary"] = Json{
+            {"median_triangle_quality", median_shape},
+            {"sliver_share", sliver_share},
             {"highpoly_triangles", r.highpoly.triangle_count()},
             {"highpoly_vertices", r.highpoly.vertex_count()},
             {"lowpoly_triangles", r.lowpoly.triangle_count()},
