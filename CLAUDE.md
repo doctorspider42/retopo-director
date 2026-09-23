@@ -142,6 +142,16 @@ cross products below it. Anything that judges a triangle by its normalised
 normal - fold tests above all - must compare raw area vectors against their
 own length instead, or it quietly refuses every operation on small geometry.
 
+**Inside the pipeline, uv v = 0 is the top row of the image.** That is glTF's
+convention, the bake rasteriser's and the GL upload's. OBJ and FBX put v = 0 at
+the bottom, so their loaders and the OBJ writer convert at the file boundary
+and nothing else may. The sampler used to flip instead, which read every glTF
+texture upside down in the bake.
+
+**Bake occlusion is traced from the low poly, not from the source.** Sculpted
+sources run through themselves at every fold, and a texel that lands on such a
+point sees nothing from there: that drew black scribbles over every character.
+
 **A source's vertex colours are not lighting.** `Mesh::colors_prelit` says
 whether they carry baked light, and only the bake sets it. Assets ship colour
 channels as shader masks (every Quaternius character has COLOR_0 all white),
