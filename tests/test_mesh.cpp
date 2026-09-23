@@ -484,3 +484,40 @@ TEST(bvh_reports_mesh_triangle_indices)
     CHECK_EQ(wrong_ray, 0);
     CHECK_EQ(wrong_closest, 0);
 }
+
+// A hole the low poly has and the source does not is closed without making a
+// non manifold edge; a hole the source itself has stays open.
+TEST(small_holes_are_closed_unless_the_source_has_them)
+{
+    const Mesh src = rdtest::icosphere(4);
+    MeshAnalysis an;
+    AnalysisOptions ao;
+    ao.ambient_rays = 0;
+    ao.visibility_rays = 0;
+    analyse_mesh(src, an, ao);
+
+    // Knock two adjacent triangles out of a coarser sphere: a four edged hole.
+    Mesh low = rdtest::icosphere(2);
+    MeshTopology topo;
+    topo.build(low);
+    const uint32_t other = topo.neighbour(0, 0);
+    REQUIRE(other != kInvalidIndex);
+    std::vector<bool> keep(low.triangle_count(), true);
+    keep[0] = keep[other] = false;
+    Mesh holed = mesh_extract(low, keep);
+    REQUIRE(!holed.compute_stats().closed);
+
+    const size_t added = fill_small_holes(holed, an.bvh, an, 12);
+    CHECK_EQ(added, size_t(2));
+    const Mesh::Stats st = holed.compute_stats();
+    CHECK(st.closed);
+    CHECK(st.manifold);
+
+    // The same hole in a source that is open there too is the source's own.
+    Mesh open_src = low;
+    open_src = mesh_extract(open_src, keep);
+    MeshAnalysis an2;
+    analyse_mesh(open_src, an2, ao);
+    Mesh holed2 = mesh_extract(low, keep);
+    CHECK_EQ(fill_small_holes(holed2, an2.bvh, an2, 12), size_t(0));
+}

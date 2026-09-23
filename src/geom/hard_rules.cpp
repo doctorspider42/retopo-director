@@ -692,6 +692,144 @@ size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& s
 }
 
 // ---------------------------------------------------------------------------
+size_t fill_small_holes(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis& analysis,
+                        int max_edges)
+{
+    if (mesh.empty() || max_edges < 3) return 0;
+
+    // Boundary half edges: a -> b inside a triangle, with no b -> a anywhere.
+    std::unordered_map<uint64_t, int> directed;
+    const size_t tcount = mesh.triangle_count();
+    for (size_t t = 0; t < tcount; ++t)
+        for (int c = 0; c < 3; ++c) {
+            const uint32_t a = mesh.indices[t * 3 + c], b = mesh.indices[t * 3 + (c + 1) % 3];
+            ++directed[(uint64_t(a) << 32) | b];
+        }
+    std::unordered_map<uint32_t, uint32_t> next;   // a -> b along the boundary
+    std::unordered_map<uint32_t, int>      out_degree;
+    for (const auto& [key, n] : directed) {
+        const uint32_t a = uint32_t(key >> 32), b = uint32_t(key & 0xFFFFFFFFu);
+        if (directed.count((uint64_t(b) << 32) | a)) continue;
+        next[a] = b;
+        ++out_degree[a];
+    }
+    if (next.empty()) return 0;
+
+    // Open edges of the source, as points to measure against: a low poly hole
+    // near one is the source's own opening and is left alone.
+    std::vector<Vec3> source_open;
+    if (const Mesh* src = source_bvh.mesh()) {
+        for (const MeshTopology::Edge& e : analysis.topology.edges)
+            if (e.tri1 == kInvalidIndex)
+                source_open.push_back((src->positions[e.v0] + src->positions[e.v1]) * 0.5f);
+    }
+
+    // Every undirected edge already in the mesh. A patch may only add edges
+    // that do not exist yet: a quad's diagonal that already runs elsewhere
+    // would be used by three triangles, which is a non manifold edge the
+    // validator fails - trading a hole for a worse fault.
+    std::unordered_set<uint64_t> edges;
+    auto ekey = [](uint32_t a, uint32_t b) {
+        return a < b ? (uint64_t(a) << 32) | b : (uint64_t(b) << 32) | a;
+    };
+    for (const auto& [key, n] : directed)
+        edges.insert(ekey(uint32_t(key >> 32), uint32_t(key & 0xFFFFFFFFu)));
+
+    std::unordered_set<uint32_t> visited;
+    std::vector<uint32_t> added;
+    std::vector<uint16_t> added_regions;
+    const bool keep_regions = mesh.tri_region.size() == tcount;
+    size_t filled_loops = 0;
+
+    for (const auto& [start, unused] : next) {
+        if (visited.count(start)) continue;
+        // Walk the loop. A vertex with two outgoing boundary edges is a pinch
+        // this cannot resolve cleanly; skip any loop that touches one.
+        std::vector<uint32_t> loop;
+        uint32_t v = start;
+        bool clean = true;
+        while (true) {
+            if (out_degree[v] != 1) clean = false;
+            loop.push_back(v);
+            visited.insert(v);
+            const auto it = next.find(v);
+            if (it == next.end()) { clean = false; break; }
+            v = it->second;
+            if (v == start) break;
+            if (visited.count(v) || int(loop.size()) > max_edges) { clean = false; break; }
+        }
+        if (!clean || loop.size() < 3 || int(loop.size()) > max_edges) continue;
+
+        Vec3 centre{};
+        float perimeter = 0.0f;
+        for (size_t i = 0; i < loop.size(); ++i) {
+            centre = centre + mesh.positions[loop[i]];
+            perimeter += length(mesh.positions[loop[(i + 1) % loop.size()]] -
+                                mesh.positions[loop[i]]);
+        }
+        centre = centre * (1.0f / float(loop.size()));
+        const float reach = perimeter / float(loop.size());
+        bool authored = false;
+        for (const Vec3& p : source_open)
+            if (length2(p - centre) < reach * reach) { authored = true; break; }
+        if (authored) continue;
+
+        const uint16_t region = [&] {
+            if (!keep_regions) return kNoRegion;
+            // Borrow the region of any triangle on the rim.
+            for (size_t t = 0; t < tcount; ++t)
+                for (int c = 0; c < 3; ++c)
+                    if (mesh.indices[t * 3 + c] == loop[0]) return mesh.tri_region[t];
+            return kNoRegion;
+        }();
+        auto emit = [&](uint32_t a, uint32_t b, uint32_t c) {
+            added.insert(added.end(), {a, b, c});
+            if (keep_regions) added_regions.push_back(region);
+        };
+
+        // The loop runs the way the rim triangles do, so the patch runs back.
+        const size_t n = loop.size();
+        const bool free02 = n == 4 && !edges.count(ekey(loop[0], loop[2]));
+        const bool free13 = n == 4 && !edges.count(ekey(loop[1], loop[3]));
+        if (n == 3) {
+            emit(loop[0], loop[2], loop[1]);
+        } else if (n == 4 && (free02 || free13)) {
+            const float d02 = length2(mesh.positions[loop[0]] - mesh.positions[loop[2]]);
+            const float d13 = length2(mesh.positions[loop[1]] - mesh.positions[loop[3]]);
+            const bool use02 = free02 && (!free13 || d02 <= d13);
+            if (use02) {
+                emit(loop[0], loop[2], loop[1]); emit(loop[0], loop[3], loop[2]);
+                edges.insert(ekey(loop[0], loop[2]));
+            } else {
+                emit(loop[1], loop[3], loop[2]); emit(loop[1], loop[0], loop[3]);
+                edges.insert(ekey(loop[1], loop[3]));
+            }
+        } else {
+            // A fan around a new centre adds only new edges, so it is always
+            // safe; it is the fallback for a quad whose diagonals are taken.
+            Vec3 c = centre;
+            const ClosestHit hit = source_bvh.closest_point(centre, reach * 2.0f);
+            if (hit.hit()) c = hit.point;
+            const uint32_t ci = uint32_t(mesh.positions.size());
+            mesh.positions.push_back(c);
+            if (mesh.has_normals() || !mesh.normals.empty()) mesh.normals.push_back(Vec3{0, 1, 0});
+            if (!mesh.uvs.empty())    mesh.uvs.push_back(mesh.uvs[loop[0]]);
+            if (!mesh.colors.empty()) mesh.colors.push_back(mesh.colors[loop[0]]);
+            if (!mesh.skin.empty())   mesh.skin.push_back(mesh.skin[loop[0]]);
+            for (size_t i = 0; i < n; ++i) emit(loop[(i + 1) % n], loop[i], ci);
+        }
+        ++filled_loops;
+    }
+
+    if (added.empty()) return 0;
+    mesh.indices.insert(mesh.indices.end(), added.begin(), added.end());
+    if (keep_regions)
+        mesh.tri_region.insert(mesh.tri_region.end(), added_regions.begin(), added_regions.end());
+    RD_DEBUG("filled %zu holes with %zu triangles", filled_loops, added.size() / 3);
+    return added.size() / 3;
+}
+
+// ---------------------------------------------------------------------------
 bool source_shell_is_droppable(const MeshAnalysis& analysis, uint32_t shell,
                                const HardRuleOptions& opts)
 {
@@ -983,6 +1121,14 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
             rep.note(format("dropped %zu triangles in small pieces that are out of sight or "
                             "lie flat on the surface (eyeballs, brows, straps); the bake "
                             "paints them instead", hidden));
+    }
+
+    // --- 3c. close the holes the steps above opened ---------------------------
+    if (opts.fill_holes_max_edges >= 3) {
+        const size_t added = fill_small_holes(mesh, source_bvh, analysis,
+                                              opts.fill_holes_max_edges);
+        if (added)
+            rep.note(format("closed holes the source does not have with %zu triangles", added));
     }
 
     // --- 4. deformation loops ----------------------------------------------

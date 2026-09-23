@@ -71,6 +71,12 @@ struct HardRuleOptions {
     float hidden_visible_share   = 0.5f;    // of the piece's own area
     float hidden_max_area_share  = 0.02f;   // of the whole surface
     float decal_max_offset_rel   = 0.006f;  // of the bbox diagonal: ~1 cm on a character
+    // Close holes of up to this many edges that the source does not have. The
+    // non manifold repair deletes faces and leaves their outline open - two
+    // four edged holes in the backs of the calves, on the superhero - and a
+    // hole a camera looks straight through is worse than the triangles it
+    // takes to close it. 0 leaves every hole open.
+    int   fill_holes_max_edges = 12;
     // Passes of fit_to_surface. 0 leaves the vertices where the backend put them.
     int   fit_surface_passes   = 4;
 };
@@ -113,6 +119,13 @@ size_t fix_winding(Mesh& mesh, const Bvh& source_bvh);
 // which pieces the retopology really has to build.
 bool source_shell_is_droppable(const MeshAnalysis& analysis, uint32_t shell,
                                const HardRuleOptions& opts);
+
+// Closes boundary loops of up to `max_edges` edges that lie away from any open
+// edge of the source (an authored opening, an eye socket, stays open). Three
+// and four edged loops take one and two triangles; longer ones a fan around a
+// centre projected onto the source. Returns the triangles added.
+size_t fill_small_holes(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis& analysis,
+                        int max_edges);
 
 // See HardRuleOptions::drop_hidden_shells. Returns the triangles removed.
 size_t drop_hidden_shells(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis& analysis,
