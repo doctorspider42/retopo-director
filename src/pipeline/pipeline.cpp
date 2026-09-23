@@ -712,7 +712,10 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         int              previous_over_tris = -1;
         float            shell_cap_share    = s.retopo.hard_rules.secondary_shell_budget_share;
 
-        for (int attempt = 0; attempt < kBudgetAttempts; ++attempt) {
+        // Engaging the shell cap starts the search over, so it earns the
+        // attempts back rather than spending the few that are left.
+        int attempts_allowed = kBudgetAttempts;
+        for (int attempt = 0; attempt < attempts_allowed; ++attempt) {
             panel.resolve_budgets(effective_budget);
 
             // --- density ----------------------------------------------------
@@ -816,13 +819,14 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
                 illegal_budget     = std::numeric_limits<int>::max();
                 previous_over_tris = -1;
                 effective_budget   = s.profile.max_triangles;
-                if (attempt + 1 < kBudgetAttempts) continue;
+                attempts_allowed = attempt + 1 + kBudgetAttempts / 2 + 1;
+                continue;
             }
             if (!legal) previous_over_tris = tris;
 
             if (legal && fill >= kBudgetFillTarget) break;
 
-            if (attempt + 1 >= kBudgetAttempts) {
+            if (attempt + 1 >= attempts_allowed) {
                 if (!legal || !have_best)
                     RD_WARN("still over budget after %d attempts (%d tri, %d vtx); keeping the "
                             "closest attempt and letting validation say so",

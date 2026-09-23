@@ -867,7 +867,14 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
         const size_t before_shell_cull = mesh.triangle_count();
         rep.removed_shells = limit_shells(mesh, profile.max_shells, opts.min_shell_area_share,
                                           rep.symmetry_applied ? &symmetry : nullptr,
-                                          int(profile.max_triangles * opts.secondary_shell_budget_share));
+                                          // A share of this mesh, not of the budget: the
+                                          // re-fit grows and shrinks the budget, every
+                                          // piece grows and shrinks with it, and a fixed
+                                          // count admitted fewer pieces the bigger the
+                                          // budget got - 2428, 2966, 3462 triangles
+                                          // culled on three attempts of one run.
+                                          int(float(mesh.triangle_count()) *
+                                              opts.secondary_shell_budget_share));
         if (rep.removed_shells) {
             rep.note(format("dropped %zu triangles in loose shells (profile allows %d)",
                             rep.removed_shells, profile.max_shells));
