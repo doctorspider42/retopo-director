@@ -83,7 +83,7 @@
     ]
   },
   "director": {
-    "art_direction": "Third person playable character. The face is visible in dialogue cutscenes, so the head deserves a disproportionate share of the budget. Hands are seen holding equipment but never in close up. Feet and the back of the legs are almost never framed.",
+    "art_direction": "Third person playable character. The face is visible in dialogue cutscenes, so the head deserves a disproportionate share of the budget. Hands are seen holding equipment but never in close up. The feet are in every gameplay shot and walk the ground: they need a readable heel, instep and toe box, about a hand's worth of triangles each, but no toes. The back of the legs is rarely framed.",
     "max_iterations": 4
   }
 }
