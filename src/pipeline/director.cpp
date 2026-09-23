@@ -121,6 +121,16 @@ std::string metrics_text(const IterationFacts& facts)
     if (!facts.silhouette.worst_view.empty())
         out += " on view '" + facts.silhouette.worst_view + "'";
     out += "\n";
+    // The fraction punishes thin shapes for being thin: a figure with arms out
+    // cannot reach a sphere's number however well it fits. The offset in pixels
+    // is what says whether there is anything left to win, and without it the
+    // director kept tearing a good panel apart to chase an unreachable target.
+    if (facts.silhouette.outline_px > 0.0f)
+        out += format("outline offset: %.2f px on average at the render size. Under about "
+                      "1 px the outline is as close as these renders can show, and the error "
+                      "fraction that remains is mostly the thin parts' perimeter, not a "
+                      "misfit: prefer small, targeted changes over rebalancing the panel.\n",
+                      facts.silhouette.outline_px);
 
     if (!facts.silhouette.per_view.empty()) {
         out += "per view silhouette error (fraction of the reference footprint that "

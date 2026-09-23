@@ -167,6 +167,12 @@ ViewSet render_view_set(Renderer& renderer, const Mesh& mesh,
 struct SilhouetteError {
     float mean  = 0.0f;
     float worst = 0.0f;
+    // The same disagreement divided by the length of the reference outline:
+    // how far, in pixels, the outline is off on average. The fraction above
+    // depends on the shape as much as on the fit - a one pixel miss is 2% of
+    // a sphere and 15% of a figure with thin arms - while this does not. Below
+    // about a pixel the fit is as close as the render can show.
+    float outline_px = 0.0f;
     std::string worst_view;
     std::vector<std::pair<std::string, float>> per_view;
 };

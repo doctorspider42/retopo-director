@@ -689,7 +689,7 @@ SilhouetteError compare_silhouettes(const ViewSet& reference, const ViewSet& can
     SilhouetteError err;
     if (reference.entries.empty() || candidate.entries.empty()) return err;
 
-    double weighted_sum = 0.0, weight_total = 0.0;
+    double weighted_sum = 0.0, weight_total = 0.0, outline_sum = 0.0;
 
     for (const ViewSet::Entry& ref : reference.entries) {
         const ViewSet::Entry* cand = nullptr;
@@ -708,13 +708,27 @@ SilhouetteError compare_silhouettes(const ViewSet& reference, const ViewSet& can
         const float denom = float(std::max<size_t>(covered, 1));
         const float e = float(disagree) / denom;
 
+        size_t perimeter = 0;
+        const int w = ref.mask_width, h = ref.mask_height;
+        if (w > 1 && h > 1 && size_t(w) * size_t(h) == ref.mask.size()) {
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x) {
+                    const bool here = ref.mask[size_t(y) * w + x] != 0;
+                    if (x + 1 < w && here != (ref.mask[size_t(y) * w + x + 1] != 0)) ++perimeter;
+                    if (y + 1 < h && here != (ref.mask[size_t(y + 1) * w + x] != 0)) ++perimeter;
+                }
+        }
+        const float px = float(disagree) / float(std::max<size_t>(perimeter, 1));
+        outline_sum += double(px) * double(ref.weight);
+
         err.per_view.emplace_back(ref.name, e);
         weighted_sum += double(e) * double(ref.weight);
         weight_total += double(ref.weight);
         if (e > err.worst) { err.worst = e; err.worst_view = ref.name; }
     }
 
-    err.mean = weight_total > 0.0 ? float(weighted_sum / weight_total) : 0.0f;
+    err.mean       = weight_total > 0.0 ? float(weighted_sum / weight_total) : 0.0f;
+    err.outline_px = weight_total > 0.0 ? float(outline_sum / weight_total) : 0.0f;
     return err;
 }
 

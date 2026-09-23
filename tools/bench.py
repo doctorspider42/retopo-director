@@ -41,6 +41,7 @@ DEFAULT_PROFILE = os.path.join("profiles", "ps2_character.json")
 REGRESSION = {
     "silhouette_mean":  ("lower", 0.15, 0.003),
     "silhouette_worst": ("lower", 0.20, 0.005),
+    "outline_px":       ("lower", 0.15, 0.1),
     "budget_use":       ("higher", 0.0, 0.05),
     "uv_stretch":       ("lower", 0.25, 0.25),
     "strip_length":     ("higher", 0.15, 0.3),
@@ -72,6 +73,7 @@ def load_metrics(project):
         "regions": s.get("regions"),
         "silhouette_mean": s.get("silhouette_mean"),
         "silhouette_worst": s.get("silhouette_worst"),
+        "outline_px": s.get("outline_px"),
         "validation_passed": s.get("validation_passed"),
         "errors": s.get("errors"),
         "warnings": s.get("warnings"),
@@ -186,7 +188,7 @@ def main():
     results = {}
     regressions = {}
     header = (f"{'mesh':<24}{'rc':>3}{'hi tris':>9}{'lo tris':>8}{'use':>6}{'regs':>5}"
-              f"{'sil mean':>10}{'sil worst':>10}{'stretch':>8}{'strip':>7}{'secs':>7}  notes")
+              f"{'sil mean':>10}{'sil worst':>10}{'px':>6}{'stretch':>8}{'strip':>7}{'secs':>7}  notes")
     print(header)
     print("-" * len(header))
     for e, path in entries:
@@ -203,6 +205,7 @@ def main():
               f"{fmt(m.get('triangles'), 'd'):>8}{fmt(m.get('budget_use'), '.0%'):>6}"
               f"{fmt(m.get('regions'), 'd'):>5}"
               f"{fmt(m.get('silhouette_mean'), '.4f'):>10}{fmt(m.get('silhouette_worst'), '.4f'):>10}"
+              f"{fmt(m.get('outline_px'), '.2f'):>6}"
               f"{fmt(m.get('uv_stretch'), '.2f'):>8}{fmt(m.get('strip_length'), '.2f'):>7}"
               f"{m['seconds']:>7.1f}  {'; '.join(notes)}", flush=True)
         # A run that did not even produce a report died of something - a

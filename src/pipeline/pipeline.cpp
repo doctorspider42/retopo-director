@@ -1059,6 +1059,7 @@ bool Pipeline::stage_report(const PipelineSettings& s)
     j["validation"] = r.validation.to_json();
     j["silhouette"] = Json{{"mean", r.silhouette.mean},
                            {"worst", r.silhouette.worst},
+                           {"outline_px", r.silhouette.outline_px},
                            {"worst_view", r.silhouette.worst_view}};
     // One flat block with the numbers a run is judged by, so tools/bench.py can
     // compare two runs without knowing the shape of the rest of this file.
@@ -1081,6 +1082,7 @@ bool Pipeline::stage_report(const PipelineSettings& s)
             {"region_triangles_sum", budget_used},
             {"silhouette_mean", r.silhouette.mean},
             {"silhouette_worst", r.silhouette.worst},
+            {"outline_px", r.silhouette.outline_px},
             {"validation_passed", r.validation.passed},
             {"errors", r.validation.errors},
             {"warnings", r.validation.warnings},
@@ -1098,6 +1100,7 @@ bool Pipeline::stage_report(const PipelineSettings& s)
         e["backend"]    = backend_name(it.backend);
         e["silhouette_mean"]  = it.silhouette.mean;
         e["silhouette_worst"] = it.silhouette.worst;
+        e["outline_px"]       = it.silhouette.outline_px;
         e["validation_passed"] = it.validation_passed;
         e["errors"]     = it.errors;
         e["warnings"]   = it.warnings;
@@ -1125,9 +1128,10 @@ bool Pipeline::stage_report(const PipelineSettings& s)
     md += format("- high poly: %zu triangles\n", r.highpoly.triangle_count());
     md += format("- low poly: %zu triangles, %zu vertices\n", r.lowpoly.triangle_count(),
                  r.lowpoly.vertex_count());
-    md += format("- silhouette error: mean %.4f, worst %.4f%s%s\n", r.silhouette.mean,
-                 r.silhouette.worst, r.silhouette.worst_view.empty() ? "" : " on ",
-                 r.silhouette.worst_view.c_str());
+    md += format("- silhouette error: mean %.4f, worst %.4f%s%s; outline off by %.2f px\n",
+                 r.silhouette.mean, r.silhouette.worst,
+                 r.silhouette.worst_view.empty() ? "" : " on ", r.silhouette.worst_view.c_str(),
+                 r.silhouette.outline_px);
     if (r.iterations.size() > 1)
         md += format("- kept iteration %d of %zu\n", r.kept_iteration, r.iterations.size());
     md += format("- validation: **%s** (%d errors, %d warnings)\n\n",
