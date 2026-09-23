@@ -169,21 +169,50 @@ struct Simplifier {
         return common == shared.size();
     }
 
+    // Area vectors (twice the area, along the normal), unnormalised on purpose.
+    // normalize() has an absolute epsilon, and the loader hands over metres: a
+    // 15 cm model's millimetre triangles have cross products below it, so every
+    // normal came back zero, every collapse "flipped", and the simplifier stalled
+    // at 12k triangles against a budget of 400. Comparing the raw vectors against
+    // their own lengths is scale free.
+    Vec3 tri_area_vector(uint32_t t) const
+    {
+        const Vec3 a = pos[tri[t * 3]], b = pos[tri[t * 3 + 1]], c = pos[tri[t * 3 + 2]];
+        return cross(b - a, c - a);
+    }
+
+    Vec3 tri_area_vector_with(uint32_t t, uint32_t replaced, Vec3 np) const
+    {
+        Vec3 p[3];
+        for (int i = 0; i < 3; ++i) {
+            const uint32_t v = tri[t * 3 + i];
+            p[i] = (v == replaced) ? np : pos[v];
+        }
+        return cross(p[1] - p[0], p[2] - p[0]);
+    }
+
+    bool flips(uint32_t t, uint32_t moved, Vec3 np) const
+    {
+        const Vec3  before = tri_area_vector(t);
+        const Vec3  after  = tri_area_vector_with(t, moved, np);
+        const float lb = length2(before), la = length2(after);
+        // A triangle that was already degenerate has no orientation to lose,
+        // and refusing to touch it is how slivers get stuck forever.
+        if (lb <= 0.0f) return false;
+        // Collapsing to (almost) nothing is a fold in all but name.
+        if (la <= lb * 1e-10f) return true;
+        return dot(before, after) < flip_cos * std::sqrt(lb * la);
+    }
+
     bool would_flip(uint32_t u, uint32_t v, Vec3 np) const
     {
         for (uint32_t t : vtri[u]) {
             if (!tri_alive[t] || triangle_has(t, v)) continue;
-            const Vec3 before = tri_normal(t);
-            const Vec3 after  = tri_normal_with(t, u, np);
-            if (length2(after) < 1e-16f) return true;
-            if (dot(before, after) < flip_cos) return true;
+            if (flips(t, u, np)) return true;
         }
         for (uint32_t t : vtri[v]) {
             if (!tri_alive[t] || triangle_has(t, u)) continue;
-            const Vec3 before = tri_normal(t);
-            const Vec3 after  = tri_normal_with(t, v, np);
-            if (length2(after) < 1e-16f) return true;
-            if (dot(before, after) < flip_cos) return true;
+            if (flips(t, v, np)) return true;
         }
         return false;
     }

@@ -105,20 +105,43 @@ struct Dyn {
         return tri[t * 3] == v || tri[t * 3 + 1] == v || tri[t * 3 + 2] == v;
     }
 
-    Vec3 normal_of(uint32_t t) const
+    // Area vectors, unnormalised. normalize() has an absolute epsilon, and the
+    // loader works in metres: on a small asset every millimetre triangle came
+    // back with a zero normal and every collapse and flip was refused as a fold.
+    // The tests below compare these against their own lengths instead.
+    Vec3 area_of(uint32_t t) const
     {
         const Vec3 a = pos[tri[t * 3]], b = pos[tri[t * 3 + 1]], c = pos[tri[t * 3 + 2]];
-        return normalize(cross(b - a, c - a));
+        return cross(b - a, c - a);
     }
 
-    Vec3 normal_with(uint32_t t, uint32_t replaced, Vec3 np) const
+    Vec3 area_with(uint32_t t, uint32_t replaced, Vec3 np) const
     {
         Vec3 p[3];
         for (int i = 0; i < 3; ++i) {
             const uint32_t v = tri[t * 3 + i];
             p[i] = (v == replaced) ? np : pos[v];
         }
-        return normalize(cross(p[1] - p[0], p[2] - p[0]));
+        return cross(p[1] - p[0], p[2] - p[0]);
+    }
+
+    static Vec3 unit(Vec3 v)
+    {
+        const float l = length(v);
+        return l > 1e-30f ? v / l : Vec3{};
+    }
+
+    Vec3 normal_of(uint32_t t) const { return unit(area_of(t)); }
+
+    // True when moving a corner of `t` turns it over, or squashes it to
+    // nothing relative to what it was. A triangle that was already degenerate
+    // has no orientation to lose.
+    bool folds(Vec3 before, Vec3 after) const
+    {
+        const float lb = length2(before), la = length2(after);
+        if (lb <= 0.0f) return false;
+        if (la <= lb * 1e-10f) return true;
+        return dot(before, after) < flip_cos * std::sqrt(lb * la);
     }
 
     void compact_adjacency(uint32_t v)
@@ -247,13 +270,11 @@ struct Dyn {
     {
         for (uint32_t t : vtri[u]) {
             if (!tri_alive[t] || has(t, v)) continue;
-            const Vec3 after = normal_with(t, u, np);
-            if (length2(after) < 1e-16f || dot(normal_of(t), after) < flip_cos) return true;
+            if (folds(area_of(t), area_with(t, u, np))) return true;
         }
         for (uint32_t t : vtri[v]) {
             if (!tri_alive[t] || has(t, u)) continue;
-            const Vec3 after = normal_with(t, v, np);
-            if (length2(after) < 1e-16f || dot(normal_of(t), after) < flip_cos) return true;
+            if (folds(area_of(t), area_with(t, v, np))) return true;
         }
         return false;
     }
@@ -323,12 +344,12 @@ struct Dyn {
 
         // Quad boundary, counter clockwise: u, wb, v, wf.
         const Vec3 pa = pos[u], pb = pos[wb], pc = pos[v], pd = pos[wf];
-        const Vec3 before0 = normal_of(t0), before1 = normal_of(t1);
-        const Vec3 after0  = normalize(cross(pb - pa, pd - pa));   // (u, wb, wf)
-        const Vec3 after1  = normalize(cross(pc - pb, pd - pb));   // (wb, v, wf)
-        if (length2(after0) < 1e-16f || length2(after1) < 1e-16f) return false;
-        const Vec3 avg_before = normalize(before0 + before1);
-        if (dot(avg_before, after0) < flip_cos || dot(avg_before, after1) < flip_cos) return false;
+        const Vec3 before = area_of(t0) + area_of(t1);
+        const Vec3 after0 = cross(pb - pa, pd - pa);   // (u, wb, wf)
+        const Vec3 after1 = cross(pc - pb, pd - pb);   // (wb, v, wf)
+        // Each new face is judged against the pair it replaces, scaled to its
+        // own share, so a flip that leaves one sliver is refused like a fold.
+        if (folds(before * 0.5f, after0) || folds(before * 0.5f, after1)) return false;
 
         const uint16_t region = tri_region[fwd];
         kill_triangle(t0);
