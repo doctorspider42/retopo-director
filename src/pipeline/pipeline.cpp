@@ -10,9 +10,15 @@
 namespace rd {
 namespace fs = std::filesystem;
 
-// How many times the engine may shrink its own budget before it gives up and
-// reports the overshoot as a validation failure instead.
+// How many times the engine may re-fit its own budget before it gives up and
+// keeps the best attempt it has.
 constexpr int kBudgetAttempts = 6;
+// A run that lands below this share of its binding limit tries again with a
+// bigger budget. The backends undershoot on their own - the quad field rarely
+// lands within 20% of its target - and the unwrap's seam vertices eat into
+// the vertex limit unpredictably, so without a second look a quarter of the
+// budget the profile allows is routinely left unspent.
+constexpr float kBudgetFillTarget = 0.93f;
 
 const char* stage_name(Stage s)
 {
@@ -632,6 +638,30 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
     const int max_iterations = std::max(
         1, s.max_iterations > 0 ? s.max_iterations : s.profile.max_iterations);
 
+    // The best iteration so far, which is what the run hands back. The director
+    // steers by taste and its next panel is a guess: a later pass is often worse
+    // than an earlier one (a head it re-budgeted into a bucket, arms it bloated),
+    // and exporting the last pass regardless threw away the good one.
+    struct Kept {
+        int              iteration = 0;
+        Mesh             lowpoly;
+        DensityField     density;
+        RetopoResult     retopo;
+        BakeResult       bake;
+        ValidationReport validation;
+        ViewSet          candidate;
+        SilhouetteError  silhouette;
+        KnobPanel        panel;
+    };
+    Kept kept;
+    // Passing validation first, then the silhouette, then the latest: without
+    // renders every silhouette is zero and the director's latest word stands.
+    auto better = [](const ValidationReport& v, const SilhouetteError& sil, const Kept& than) {
+        if (than.iteration == 0) return true;
+        if (v.passed != than.validation.passed) return v.passed;
+        return sil.mean <= than.silhouette.mean;
+    };
+
     for (int iteration = 1; iteration <= max_iterations; ++iteration) {
         if (cancelled()) return false;
         iteration_.store(iteration);
@@ -673,6 +703,9 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         KnobPanel        best_panel;
         int              best_score = std::numeric_limits<int>::max();
         bool             have_best  = false;
+        // Largest budget known to land legal, smallest known to land over.
+        int              legal_budget   = -1;
+        int              illegal_budget = std::numeric_limits<int>::max();
 
         for (int attempt = 0; attempt < kBudgetAttempts; ++attempt) {
             panel.resolve_budgets(effective_budget);
@@ -755,26 +788,42 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
                 have_best       = true;
             }
 
-            if (!over_tri && !over_vert) break;
+            // How full the tighter of the two limits is. Whichever binds decides.
+            const float fill = std::max(float(tris) / float(std::max(1, s.profile.max_triangles)),
+                                        float(verts) / float(std::max(1, s.profile.max_vertices)));
+            const bool legal = !over_tri && !over_vert;
+            if (legal) legal_budget   = std::max(legal_budget, effective_budget);
+            else       illegal_budget = std::min(illegal_budget, effective_budget);
+
+            if (legal && fill >= kBudgetFillTarget) break;
 
             if (attempt + 1 >= kBudgetAttempts) {
-                RD_WARN("still over budget after %d attempts (%d tri, %d vtx); keeping the "
-                        "closest attempt and letting validation say so",
-                        kBudgetAttempts, tris, verts);
+                if (!legal || !have_best)
+                    RD_WARN("still over budget after %d attempts (%d tri, %d vtx); keeping the "
+                            "closest attempt and letting validation say so",
+                            kBudgetAttempts, tris, verts);
                 break;
             }
 
-            float scale = 1.0f;
-            if (over_tri)  scale = std::min(scale, float(s.profile.max_triangles) / float(tris));
-            if (over_vert) scale = std::min(scale, float(s.profile.max_vertices) / float(verts));
-            // Undershoot on purpose: the seam count does not scale linearly with
-            // the triangle count, so aiming exactly at the limit overshoots again.
-            const int next = std::max(16, int(float(effective_budget) * scale * 0.92f));
-            if (next >= effective_budget) break;
+            // Both directions are a proportional step on the binding limit,
+            // bracketed by what has already been tried: never back up to a
+            // budget known to be over, never down to one known to be legal.
+            // Aim a little short, because the seam count does not scale
+            // linearly with the triangle count and aiming at the limit
+            // overshoots it again.
+            const float scale = std::min(float(s.profile.max_triangles) / float(std::max(1, tris)),
+                                         float(s.profile.max_vertices) / float(std::max(1, verts)));
+            int next = legal ? int(float(effective_budget) * std::min(scale * 0.97f, 2.0f))
+                             : int(float(effective_budget) * scale * 0.92f);
+            if (next >= illegal_budget) next = (std::max(legal_budget, effective_budget) + illegal_budget) / 2;
+            if (next <= legal_budget)   next = (legal_budget + std::min(illegal_budget, effective_budget)) / 2;
+            next = std::max(16, next);
+            // Less than two percent apart is noise in the backend, not a step.
+            if (std::abs(next - effective_budget) * 50 < effective_budget) break;
 
-            RD_INFO("budget re-fit: %d tri / %d vtx against limits %d / %d, retrying with "
-                    "a %d triangle budget", tris, verts, s.profile.max_triangles,
-                    s.profile.max_vertices, next);
+            RD_INFO("budget re-fit: %d tri / %d vtx against limits %d / %d (%.0f%% full), "
+                    "retrying with a %d triangle budget", tris, verts, s.profile.max_triangles,
+                    s.profile.max_vertices, fill * 100.0f, next);
             effective_budget = next;
         }
 
@@ -839,6 +888,17 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             results_.candidate_views = candidate;
             results_.silhouette      = silhouette;
             results_.panel           = panel;
+            if (better(validation, silhouette, kept)) {
+                kept.iteration  = iteration;
+                kept.lowpoly    = results_.lowpoly;
+                kept.density    = results_.density;
+                kept.retopo     = retopo;
+                kept.bake       = bake;
+                kept.validation = validation;
+                kept.candidate  = candidate;
+                kept.silhouette = silhouette;
+                kept.panel      = panel;
+            }
         }
         bump();
 
@@ -919,6 +979,27 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
 
         if (stop) break;
     }
+
+    {
+        std::lock_guard lock(results_mutex_);
+        const int last = results_.iterations.empty() ? 0 : results_.iterations.back().index;
+        results_.kept_iteration = kept.iteration;
+        if (kept.iteration != 0 && kept.iteration != last) {
+            RD_INFO("keeping iteration %d (silhouette %.4f) over the last one, %d (%.4f)",
+                    kept.iteration, kept.silhouette.mean, last, results_.silhouette.mean);
+            results_.lowpoly         = std::move(kept.lowpoly);
+            results_.density         = std::move(kept.density);
+            results_.retopo          = std::move(kept.retopo);
+            results_.bake            = std::move(kept.bake);
+            results_.validation      = std::move(kept.validation);
+            results_.candidate_views = std::move(kept.candidate);
+            results_.silhouette      = kept.silhouette;
+            // The panel that built it, so Rebuild reproduces what is on screen
+            // rather than the director's untried next guess.
+            results_.panel           = std::move(kept.panel);
+        }
+    }
+    bump();
     return true;
 }
 
@@ -1004,6 +1085,7 @@ bool Pipeline::stage_report(const PipelineSettings& s)
             {"errors", r.validation.errors},
             {"warnings", r.validation.warnings},
             {"iterations", r.iterations.size()},
+            {"kept_iteration", r.kept_iteration},
         };
     }
 
@@ -1046,6 +1128,8 @@ bool Pipeline::stage_report(const PipelineSettings& s)
     md += format("- silhouette error: mean %.4f, worst %.4f%s%s\n", r.silhouette.mean,
                  r.silhouette.worst, r.silhouette.worst_view.empty() ? "" : " on ",
                  r.silhouette.worst_view.c_str());
+    if (r.iterations.size() > 1)
+        md += format("- kept iteration %d of %zu\n", r.kept_iteration, r.iterations.size());
     md += format("- validation: **%s** (%d errors, %d warnings)\n\n",
                  r.validation.passed ? "passed" : "failed", r.validation.errors,
                  r.validation.warnings);

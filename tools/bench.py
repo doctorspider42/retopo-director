@@ -150,6 +150,7 @@ def main():
     ap.add_argument("extra", nargs="*", help="passed through to the application")
     args = ap.parse_args()
 
+    args.exe = os.path.abspath(args.exe)
     if not os.path.exists(args.exe):
         print(f"no executable at {args.exe}; build first", file=sys.stderr)
         return 2

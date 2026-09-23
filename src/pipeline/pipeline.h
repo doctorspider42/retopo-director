@@ -130,6 +130,8 @@ struct PipelineResults {
 
     std::vector<LlmExchange>     transcript;
     std::vector<IterationRecord> iterations;
+    // Which of them the results above belong to; the best, not the last.
+    int                          kept_iteration = 0;
 
     std::filesystem::path source_path;
     meshio::LoadReport    load_report;
