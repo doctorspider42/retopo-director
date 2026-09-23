@@ -52,7 +52,11 @@ struct MeshAnalysis {
 
     // --- per edge ----------------------------------------------------------
     std::vector<float> edge_dihedral;    // radians, signed
-    std::vector<bool>  edge_sharp;
+    // Bytes, not std::vector<bool>: it is filled from a parallel loop, and the
+    // packed form puts 64 edges in one word, so two lanes writing neighbouring
+    // edges lose each other's bits. TSan caught it as a race; the symptom was
+    // a crease that came and went between runs of the same mesh.
+    std::vector<uint8_t> edge_sharp;
 
     // --- per joint ---------------------------------------------------------
     // How far the skin reaches from each pivot. The hard rules use it to size

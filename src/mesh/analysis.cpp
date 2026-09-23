@@ -174,7 +174,7 @@ void analyse_mesh(const Mesh& mesh, MeshAnalysis& out, const AnalysisOptions& op
     report(0.30f, "dihedral angles");
     const size_t ecount = out.topology.edges.size();
     out.edge_dihedral.assign(ecount, 0.0f);
-    out.edge_sharp.assign(ecount, false);
+    out.edge_sharp.assign(ecount, 0);
     const float sharp_limit = opts.sharp_angle_degrees * kDeg2Rad;
 
     ThreadPool::shared().parallel_ranges(ecount, 2048, [&](size_t b, size_t e, unsigned) {
