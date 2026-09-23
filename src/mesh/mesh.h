@@ -95,7 +95,7 @@ struct Mesh {
     std::string              name;
     std::vector<Vec3>        positions;
     std::vector<Vec3>        normals;   // empty or positions.size()
-    std::vector<Vec2>        uvs;       // empty or positions.size()
+    std::vector<Vec2>        uvs;       // empty or positions.size(); v = 0 is the image's top row
     std::vector<Vec4>        colors;    // empty or positions.size(), linear RGBA
     // True when `colors` already carry baked lighting - set by the bake, never
     // by a loader. A source's vertex colours are albedo or, as often, a mask

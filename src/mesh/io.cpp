@@ -216,7 +216,8 @@ LoadReport load_obj(const fs::path& path, Mesh& out, const LoadOptions& opts)
                 float u = 0, v = 0;
                 c = parse_float(c, eol, u);
                 c = parse_float(c, eol, v);
-                raw_uv.push_back({u, v});
+                // OBJ puts v = 0 at the bottom of the image; the pipeline at the top.
+                raw_uv.push_back({u, 1.0f - v});
             }
         } else if (opts.load_materials && c + 6 < eol && std::strncmp(c, "mtllib", 6) == 0) {
             mtl_name = trim(std::string(c + 6, eol));
@@ -908,7 +909,8 @@ LoadReport load_fbx(const fs::path& path, Mesh& out, const LoadOptions& opts)
                     Vec2 uv{};
                     if (mesh->vertex_uv.exists) {
                         const ufbx_vec2 t2 = ufbx_get_vertex_vec2(&mesh->vertex_uv, ix);
-                        uv = {float(t2.x), float(t2.y)};
+                        // FBX, like OBJ, has v = 0 at the bottom of the image.
+                        uv = {float(t2.x), 1.0f - float(t2.y)};
                     }
                     out.uvs.push_back(uv);
                 }
@@ -1094,7 +1096,8 @@ bool save_obj(const fs::path& path, const Mesh& mesh, const SaveOptions& opts,
     }
     if (m.has_uvs())
         for (const Vec2& t : m.uvs) {
-            std::snprintf(buf, sizeof(buf), "vt %.6g %.6g\n", t.x, t.y);
+            // Back to OBJ's v = 0 at the bottom of the image.
+            std::snprintf(buf, sizeof(buf), "vt %.6g %.6g\n", t.x, 1.0f - t.y);
             text += buf;
         }
     if (m.has_normals())

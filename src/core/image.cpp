@@ -43,11 +43,14 @@ Vec4 Texture::sample(Vec2 uv) const
 {
     if (empty()) return Vec4{1.0f, 1.0f, 1.0f, 1.0f};
 
-    // v is flipped because image row 0 is the top, while every uv convention
-    // this pipeline sees puts v = 0 at the bottom.
-    float u = uv.x - std::floor(uv.x);
-    float v = 1.0f - (uv.y - std::floor(uv.y));
-    if (v >= 1.0f) v = 0.0f;
+    // Inside the pipeline v = 0 is the top row of the image, the way glTF,
+    // the bake's own rasteriser and the GL upload all see it; the OBJ and FBX
+    // loaders and the OBJ writer convert at the file boundary. This used to
+    // flip v here instead, which was right for OBJ and FBX sources and read
+    // every glTF source's texture upside down: the body sampled the shorts and
+    // the neck band, and the seams sampled whatever lay across the atlas.
+    const float u = uv.x - std::floor(uv.x);
+    const float v = uv.y - std::floor(uv.y);
 
     const float fx = u * float(width) - 0.5f;
     const float fy = v * float(height) - 0.5f;

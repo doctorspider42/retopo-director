@@ -11,7 +11,9 @@
 #include "mesh/visibility.h"
 #include "segment/segment.h"
 
+#include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <random>
 
 using namespace rd;
@@ -398,4 +400,87 @@ TEST(visibility_sees_both_faces_of_a_thin_plate)
     size_t n = 0;
     for (uint8_t h : hidden) n += h;
     CHECK_EQ(n, size_t(0));
+}
+
+// v = 0 is the top row of the image, inside the pipeline. The sampler used to
+// flip v, which read every glTF source's texture upside down in the bake.
+TEST(texture_v_zero_is_the_top_row)
+{
+    Texture t;
+    t.resize(4, 4, 4);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+            t.set(x, y, y < 2 ? Vec4{1, 0, 0, 1} : Vec4{0, 0, 1, 1});
+    const Vec4 top = t.sample({0.5f, 0.2f});
+    const Vec4 bottom = t.sample({0.5f, 0.8f});
+    CHECK(top.x > 0.9f && top.z < 0.1f);
+    CHECK(bottom.z > 0.9f && bottom.x < 0.1f);
+}
+
+// OBJ keeps v = 0 at the bottom: what goes out converted comes back the same.
+TEST(obj_uvs_round_trip_through_the_convention)
+{
+    Mesh m = rdtest::icosphere(1);
+    m.uvs.resize(m.vertex_count());
+    for (size_t v = 0; v < m.vertex_count(); ++v)
+        m.uvs[v] = {0.1f + 0.8f * float(v) / float(m.vertex_count()), 0.2f + 0.05f * float(v % 7)};
+    const auto path = std::filesystem::temp_directory_path() / "rd_test_uv.obj";
+    meshio::SaveOptions so;
+    so.restore_import_transform = false;
+    REQUIRE(meshio::save_obj(path, m, so));
+    // The file itself says v = 1 - ours.
+    {
+        std::ifstream f(path);
+        std::string line;
+        while (std::getline(f, line))
+            if (line.rfind("vt ", 0) == 0) {
+                float u = 0, v = 0;
+                std::sscanf(line.c_str(), "vt %f %f", &u, &v);
+                CHECK_NEAR(v, 1.0f - m.uvs[0].y, 1e-4);
+                break;
+            }
+    }
+    Mesh back;
+    meshio::LoadOptions lo;
+    lo.weld = false;
+    lo.normalise = false;
+    REQUIRE(meshio::load(path, back, lo).ok);
+    std::filesystem::remove(path);
+    REQUIRE(back.has_uvs());
+    // Vertex order survives a load without welding.
+    CHECK_NEAR(back.uvs[0].y, m.uvs[0].y, 1e-4);
+    CHECK_NEAR(back.uvs[5].x, m.uvs[5].x, 1e-4);
+}
+
+// The triangle a query reports must be the triangle of the mesh that was hit,
+// by index: the bake reads that triangle's uvs and material, so a BVH that
+// hands back its own sorted order paints every texel from the wrong place.
+TEST(bvh_reports_mesh_triangle_indices)
+{
+    const Mesh m = bumpy_sphere();
+    Bvh bvh;
+    bvh.build(m);
+    std::mt19937 rng(99);
+    std::uniform_real_distribution<float> U(-1.0f, 1.0f);
+    int wrong_ray = 0, wrong_closest = 0;
+    for (int i = 0; i < 300; ++i) {
+        const Vec3 o{U(rng) * 3, U(rng) * 3, U(rng) * 3};
+        const Vec3 d = normalize(Vec3(0.3f, -0.2f, 0.1f) - o);
+        const RayHit h = bvh.intersect(o, d);
+        if (h.hit()) {
+            Vec3 a, b, c;
+            m.tri_positions(h.triangle, a, b, c);
+            float t;
+            if (!ray_triangle(o, d, a, b, c, t) || std::fabs(t - h.t) > 1e-3f) ++wrong_ray;
+        }
+        const Vec3 p{U(rng), U(rng), U(rng)};
+        const ClosestHit ch = bvh.closest_point(p);
+        if (ch.hit()) {
+            Vec3 a, b, c;
+            m.tri_positions(ch.triangle, a, b, c);
+            if (length(closest_on_triangle(p, a, b, c) - ch.point) > 1e-4f) ++wrong_closest;
+        }
+    }
+    CHECK_EQ(wrong_ray, 0);
+    CHECK_EQ(wrong_closest, 0);
 }
