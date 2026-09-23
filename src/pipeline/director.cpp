@@ -333,6 +333,17 @@ LlmRequest build_budget_request(const Mesh& mesh, const MeshAnalysis& analysis,
                 mesh.triangle_count(),
                 analysis.symmetry.accepted ? "usable" : "no usable",
                 analysis.symmetry.axis_name(), analysis.symmetry.score);
+
+    u += format("It is built from %zu connected piece%s and has %zu open boundary "
+                "edge%s, so it is %s. The profile allows %s piece%s to survive.\n",
+                analysis.stats.shells, analysis.stats.shells == 1 ? "" : "s",
+                analysis.stats.boundary_edges, analysis.stats.boundary_edges == 1 ? "" : "s",
+                analysis.stats.closed ? "watertight"
+                                      : "not watertight, which is normal for an asset "
+                                        "assembled from separate costume and prop pieces",
+                profile.max_shells > 0 ? std::to_string(profile.max_shells).c_str()
+                                       : "any number of",
+                profile.max_shells == 1 ? "" : "s");
     if (profile.require_symmetry && analysis.symmetry.accepted)
         u += "Symmetry will be enforced, so half the budget effectively covers both "
              "sides. Do not try to spend differently on left and right.\n";
@@ -362,8 +373,27 @@ Rules for this step:
     hardware the bake is genuinely good, so "texture" is not a defeat.
   - Set "preserve_silhouette" false only where the outline genuinely does not
     matter, for example a surface that is always against the body.
-  - Pick "backend": "quad_field" for organic, deforming shapes; "quadric" for
-    hard surface props; "auto" if you are unsure.
+  - Pick "backend". The axis is not organic versus hard surface, whatever that
+    would mean for a hooded archer. It is whether the source is one closed
+    surface or an assembly of pieces:
+
+      "quad_field"  walks an isotropic field over the surface and pairs the
+                    result into quads. It needs a single closed watertight
+                    shell to walk over. Given one, it beats quadric on evenness
+                    and deforms better. Given an assembly with open borders it
+                    starves: regions come back with a fraction of the triangles
+                    they were allocated, and the budget goes unspent.
+      "quadric"     collapses edges by quadric error, per region, and does not
+                    care how many pieces there are or whether they are closed.
+                    Slightly less even topology on a clean shell.
+
+    Measured across four sources, quad_field won only on the one that was a
+    single closed shell; on a costumed character, a creature and a building it
+    lost, twice by enough to fail validation. Use the topology line above rather
+    than the word "organic": one watertight shell and no open edges makes
+    quad_field worth trying, anything assembled says quadric. "auto" decides by
+    counting creases, which is the rule that got this wrong, so prefer naming
+    the backend yourself.
   - Write one sentence of "rationale" per region. It goes in the report a human
     will read when they wonder why the elbow looks like that.
   - Allocate the budget you were given, in full, whatever you think of it. If you
@@ -450,6 +480,10 @@ Rules for this step:
     distance it will be seen from, say "accept" and stop. Chasing the last
     percent of silhouette error costs a human their afternoon.
   - If validation failed, fixing that comes first; taste is secondary.
+  - If regions came back far under the budget they were allocated and the total
+    is well short of the profile, look at the backend before the shares. A
+    starving quad_field on an assembled source produces exactly that pattern,
+    and "backend": "quadric" in the global patch is one key rather than twenty.
   - "patch" cannot raise the total. The budget is fixed for this run: inside it
     you move triangles, you do not add them. If moving them is no longer enough
     and the renders show you why, that belongs in "profile_advice", where a human

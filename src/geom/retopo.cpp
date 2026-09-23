@@ -70,10 +70,33 @@ RetopoResult run_retopo(const Mesh& source, const MeshAnalysis& analysis,
         // Quadric still wins on hard surface, where those creases are the shape
         // and an isotropic remesh would round them off.
         const bool organic = skinned || crease_ratio < opts.hard_surface_crease_ratio;
-        backend = organic ? RetopoBackend::QuadField : RetopoBackend::Quadric;
 
-        RD_INFO("auto backend: %.1f%% of edges are creases, treating this as %s",
-                crease_ratio * 100.0f, organic ? "organic" : "hard surface");
+        // None of which matters if there is no surface to walk over. The quad
+        // field is an isotropic remesh: it needs one closed manifold shell. Give
+        // it an asset assembled from separate pieces with open borders - which
+        // is every character wearing anything - and it starves, returning a
+        // fraction of the budget and leaving whole regions at zero. Measured on
+        // four sources against quadric, by mean silhouette error:
+        //
+        //   one closed shell (subdivided sphere)   0.067 vs 0.120   quad field
+        //   costumed character, 65 pieces          0.390 vs 0.102   quadric
+        //   creature, assembled                    0.381 vs 0.0003  quadric
+        //   building, assembled                    0.546 vs 0.116   quadric
+        //
+        // The two losses on assembled organic sources were bad enough to fail
+        // validation, so the shell test comes first and the crease ratio only
+        // decides between them once the surface is actually walkable.
+        const bool walkable = analysis.stats.shells == 1 && analysis.stats.closed;
+        backend = (walkable && organic) ? RetopoBackend::QuadField : RetopoBackend::Quadric;
+
+        RD_INFO("auto backend: %zu shell%s, %s, %.1f%% of edges are creases: %s",
+                analysis.stats.shells, analysis.stats.shells == 1 ? "" : "s",
+                analysis.stats.closed ? "watertight" : "not watertight",
+                crease_ratio * 100.0f,
+                backend == RetopoBackend::QuadField
+                    ? "one walkable shell and organic, using the quad field"
+                    : (!walkable ? "assembled from pieces, so the quad field would starve"
+                                 : "hard surface, keeping the creases"));
     }
     result.backend_used = backend;
     RD_INFO("retopo backend: %s", backend_name(backend));
