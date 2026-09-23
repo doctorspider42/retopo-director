@@ -23,6 +23,102 @@ const char* const kFidelityNames[] = {"Geometry", "Balanced", "Texture"};
 const char* const kLlmNames[]      = {"Disabled", "Claude CLI", "Codex CLI", "OpenAI API"};
 const char* const kSegmenterNames[] = {"Geometric", "SAM", "Auto"};
 
+ImVec4 feasibility_color(Feasibility f)
+{
+    const Palette& p = palette();
+    switch (f) {
+    case Feasibility::Comfortable: return p.success;
+    case Feasibility::Tight:       return p.accent;
+    case Feasibility::Strained:    return p.warning;
+    case Feasibility::Impossible:  return p.danger;
+    default:                       return p.text_faint;
+    }
+}
+
+// The director arguing with the brief. It is shown here, next to the sliders it
+// is talking about, and every change still costs a human one click: the profile
+// is a promise about hardware, and nothing that has only seen one mesh gets to
+// make that promise on somebody's behalf.
+bool draw_profile_advice(AppState& app, TargetProfile& profile)
+{
+    const ProfileAdvice& advice = app.advice;
+    if (advice.empty() || app.advice_dismissed) return false;
+
+    bool changed = false;
+    if (card_begin("advice_card", "The director on this brief")) {
+        badge(feasibility_name(advice.feasibility), feasibility_color(advice.feasibility));
+        ImGui::SameLine();
+        muted("advisory - nothing here has been applied");
+
+        if (!advice.headline.empty()) {
+            spacer(4.0f);
+            ImGui::TextWrapped("%s", advice.headline.c_str());
+        }
+
+        const int applicable = advice.applicable_count();
+        if (applicable > 0) {
+            spacer(6.0f);
+            for (size_t i = 0; i < advice.proposals.size(); ++i) {
+                const ProfileProposal& prop = advice.proposals[i];
+                if (!prop.applicable) continue;
+
+                ImGui::PushID(int(i));
+                if (secondary_button("Apply")) {
+                    if (apply_proposal(profile, prop)) {
+                        changed = true;
+                        app.notify(prop.field + " set to " + prop.change_text());
+                    }
+                }
+                ImGui::SameLine();
+                mono("%-24s %s", prop.field.c_str(), prop.change_text().c_str());
+                if (!prop.reason.empty() || !prop.note.empty()) {
+                    ImGui::Indent(76.0f);
+                    muted("%s%s%s", prop.reason.c_str(),
+                          prop.reason.empty() || prop.note.empty() ? "" : " - ",
+                          prop.note.c_str());
+                    ImGui::Unindent(76.0f);
+                }
+                ImGui::PopID();
+            }
+
+            spacer(6.0f);
+            if (primary_button(applicable > 1 ? "Apply all" : "Apply")) {
+                for (const ProfileProposal& prop : advice.proposals)
+                    changed |= apply_proposal(profile, prop);
+                if (changed) {
+                    app.advice_dismissed = true;
+                    app.notify("Profile updated. Run again to build against it.", 5.0);
+                }
+            }
+            ImGui::SameLine();
+        } else {
+            spacer(6.0f);
+            muted("No changes proposed.");
+            spacer(4.0f);
+        }
+
+        if (secondary_button("Dismiss")) app.advice_dismissed = true;
+
+        // A proposal the director was not allowed to make is still worth
+        // reading: it is usually the clearest statement of what it wanted.
+        const int ignored = int(advice.proposals.size()) - applicable;
+        if (ignored > 0) {
+            spacer(4.0f);
+            if (ImGui::TreeNode("ignored_proposals", "%d proposal%s could not be applied",
+                                ignored, ignored == 1 ? "" : "s")) {
+                for (const ProfileProposal& prop : advice.proposals) {
+                    if (prop.applicable) continue;
+                    muted("%s - %s", prop.field.c_str(),
+                          prop.note.empty() ? "unusable" : prop.note.c_str());
+                }
+                ImGui::TreePop();
+            }
+        }
+        card_end();
+    }
+    return changed;
+}
+
 ImVec4 stage_color(Stage s)
 {
     const Palette& p = palette();
@@ -540,6 +636,10 @@ void panel_regions(AppState& app)
 void panel_profile(AppState& app)
 {
     if (!app.show_profile) return;
+    if (app.advice_wants_attention && !app.advice_dismissed) {
+        app.advice_wants_attention = false;
+        ImGui::SetNextWindowFocus();     // brings the tab forward when docked
+    }
     if (!ImGui::Begin("Target profile", &app.show_profile)) {
         ImGui::End();
         return;
@@ -589,7 +689,7 @@ void panel_profile(AppState& app)
 
     divider();
 
-    bool changed = false;
+    bool changed = draw_profile_advice(app, profile);
 
     if (card_begin("geometry_limits", "Geometry limits",
                    "Hard. The validator rejects anything past these.")) {

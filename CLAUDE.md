@@ -104,6 +104,7 @@ a file and run them rather than piping them in.
 |---|---|
 | change what the model is told | `src/pipeline/director.cpp` — all prompt text is there |
 | add a knob | `src/knobs/knobs.h`, then read it in `src/geom/density.cpp` |
+| change what the model may argue about | `src/knobs/advice.h` |
 | add a hard check | `src/validate/validator.cpp` |
 | add a retopo backend | implement the shape of `quad_field_retopo`, dispatch in `src/geom/retopo.cpp` |
 | add a segmenter | implement `ISegmenter`, dispatch in `make_segmenter` (`src/segment/segmenter.cpp`) |
@@ -111,4 +112,8 @@ a file and run them rather than piping them in.
 | add an LLM backend | implement `ILlmBackend`, register in `make_llm_backend` |
 
 Do not add geometry decisions to the prompt layer, and do not let the geometry
-layer learn that a language model exists. The knob panel is the only interface.
+layer learn that a language model exists. The knob panel is the only interface
+the model can move. The one thing it can do besides filling knobs is object to
+the brief through `profile_advice`, and that is advisory by construction: the
+pipeline records proposals and a human applies them from the profile panel.
+Nothing in the run ever reads them back.

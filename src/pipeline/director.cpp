@@ -50,6 +50,10 @@ Rules you must follow:
   - Never ask for geometry that the hard rules forbid; they will override you and
     the report will say you were overruled.
   - When you are unsure, say so in the notes field and pick the conservative option.
+  - You may argue with the brief, in the one place provided for it. If the budget
+    cannot carry this model, saying so is part of the job; quietly dividing an
+    impossible budget into impossible pieces is not. You never change the brief
+    yourself: a human reads your proposal and decides.
   - Be specific in rationale fields. "Important" is useless. "Read in every
     cutscene close-up" is useful.)";
 }
@@ -143,6 +147,60 @@ std::string metrics_text(const IterationFacts& facts)
                       facts.bake->uv_max_stretch);
     }
     return out;
+}
+
+std::string profile_advice_prompt_text(const TargetProfile& profile)
+{
+    std::string out;
+    out += R"(
+THE BRIEF ITSELF
+
+Everything above is what a human decided before seeing this model. They may have
+been right. They may have picked round numbers for a placeholder and never come
+back to them. You are the first thing in this pipeline that has looked at the
+model and the brief at the same time, so you are the only one who can tell.
+
+If, and only if, the brief is the problem, fill in "profile_advice". These are
+proposals to a human, not settings: nothing you put here changes this run. They
+cost somebody money and memory on a real console, so propose the smallest change
+that makes the asset work and say what it buys.
+
+  "profile_advice": {
+    "feasibility": "comfortable" | "tight" | "strained" | "impossible",
+    "headline": "one sentence a human reads before deciding whether to care",
+    "propose": [
+      { "field": "max_triangles", "value": 2400,
+        "reason": "what specifically fails at the current value" }
+    ]
+  }
+
+What "feasibility" means:
+  comfortable  the budget has room; you could spend less than you were given.
+  tight        achievable, but something visible has to be given up. Normal.
+  strained     you can produce it and it will read poorly, and the budget is why.
+  impossible   no way of spending this budget yields a usable asset.
+
+Fields you may propose, with their current values and the range you may ask for:
+)";
+    out += proposable_fields_text(profile);
+    out += R"(
+Rules for this block:
+  - Leave "propose" empty when the brief is fine. "tight" with nothing proposed
+    is a perfectly good answer, and the most common correct one.
+  - One field per entry, a number in "value", no ranges and no prose in there.
+  - Never propose a change to buy yourself an easier job. Propose it when the
+    asset is worse than the target hardware could carry.
+  - "reason" names what breaks: which part, seen from where, at what distance.
+    "more triangles would look better" is always true and therefore useless.
+  - Proposing nothing is not modesty, and proposing everything is not thorough.
+)";
+    return out;
+}
+
+ProfileAdvice parse_advice_response(const LlmResponse& res, const TargetProfile& profile)
+{
+    if (!res.ok || !res.json_ok) return {};
+    return parse_profile_advice(res.json, profile);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,11 +337,18 @@ LlmRequest build_budget_request(const Mesh& mesh, const MeshAnalysis& analysis,
         u += "Symmetry will be enforced, so half the budget effectively covers both "
              "sides. Do not try to spend differently on left and right.\n";
 
+    u += "\n";
+    u += budget_pressure_text(budget_pressure(mesh.triangle_count(), int(seg.ids().size()),
+                                              profile,
+                                              profile.require_symmetry &&
+                                                  analysis.symmetry.accepted));
+
     u += "\nCURRENT PANEL (defaults, area proportional)\n";
     u += knob_panel_summary_text(current, seg);
 
     u += "\nSCHEMA\n";
     u += KnobPanel::json_schema_text();
+    u += profile_advice_prompt_text(profile);
 
     u += R"(
 Rules for this step:
@@ -301,6 +366,10 @@ Rules for this step:
     hard surface props; "auto" if you are unsure.
   - Write one sentence of "rationale" per region. It goes in the report a human
     will read when they wonder why the elbow looks like that.
+  - Allocate the budget you were given, in full, whatever you think of it. If you
+    also think it is wrong, say so in "profile_advice" and allocate anyway: this
+    run produces the best asset the current brief allows, and a human decides
+    afterwards whether to change the brief and run it again.
 )";
 
     req.user = u;
@@ -370,7 +439,8 @@ Produce this JSON:
     "global":  { "only the keys you want to change": 0 },
     "regions": [ { "id": 3, "share": 2.5, "rationale": "why" } ]
   },
-  "another_pass": true or false
+  "another_pass": true or false,
+  "profile_advice": { ... only when the brief, not the panel, is the problem ... }
 }
 
 Rules for this step:
@@ -380,8 +450,14 @@ Rules for this step:
     distance it will be seen from, say "accept" and stop. Chasing the last
     percent of silhouette error costs a human their afternoon.
   - If validation failed, fixing that comes first; taste is secondary.
-  - Do not ask for more triangles overall. The total is fixed. Move them.
+  - "patch" cannot raise the total. The budget is fixed for this run: inside it
+    you move triangles, you do not add them. If moving them is no longer enough
+    and the renders show you why, that belongs in "profile_advice", where a human
+    will read it. You have something now that you did not have at step 2. You
+    have seen the result.
 )", facts.iteration, facts.max_iterations);
+
+    u += profile_advice_prompt_text(profile);
 
     req.user = u;
     attach(req, reference_views, "HIGH POLY", 6);
@@ -460,7 +536,12 @@ Practical fixes, in rough order of how often they work:
     "symmetry_lock" on the regions that drifted.
   - Atlas needs more pages: lower "uv_padding_texels", or move budget away from
     regions with large surface area that do not need the resolution.
+
+If you have been round this loop before and the same check keeps failing, the
+panel is probably not what is wrong. Say so in "profile_advice" rather than
+moving the same triangles a fourth time.
 )";
+    u += profile_advice_prompt_text(profile);
 
     req.user = u;
     return req;

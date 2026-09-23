@@ -92,6 +92,7 @@ struct IterationRecord {
     int        errors = 0, warnings = 0;
     std::string verdict;
     std::string critique;
+    ProfileAdvice advice;
     std::vector<std::filesystem::path> renders;
     double     seconds = 0.0;
     RetopoBackend backend = RetopoBackend::Auto;
@@ -103,6 +104,9 @@ struct PipelineResults {
     MeshAnalysis     analysis;
     Segmentation     segmentation;
     KnobPanel        panel;
+    // The director's standing objection to the brief, latest wins. Advisory:
+    // the pipeline reads it only to write it down.
+    ProfileAdvice    advice;
     DensityField     density;
     RetopoResult     retopo;
     BakeResult       bake;
@@ -189,6 +193,7 @@ private:
                          bool masks);
 
     LlmResponse ask(const LlmRequest& req, const char* stage_label);
+    void        note_advice(const ProfileAdvice& advice, IterationRecord* record);
 
     MainThreadDispatcher* dispatcher_ = nullptr;
     Renderer*             renderer_   = nullptr;

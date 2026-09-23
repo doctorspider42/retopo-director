@@ -172,6 +172,34 @@ ViewSet Pipeline::render_views(const Mesh& mesh, const RenderOptions& opts,
     return set;
 }
 
+// Records what the director said about the brief. Nothing is applied: a profile
+// is a promise about what the hardware can run, and a model that has seen one
+// mesh is not the thing that gets to renegotiate it. The loudest this ever gets
+// is a warning in the log and a card in the interface.
+void Pipeline::note_advice(const ProfileAdvice& advice, IterationRecord* record)
+{
+    if (advice.empty()) return;
+
+    if (feasibility_is_alarming(advice.feasibility))
+        RD_WARN("the director calls this brief %s: %s",
+                feasibility_name(advice.feasibility), advice.headline.c_str());
+    else
+        RD_INFO("the director calls this brief %s%s%s", feasibility_name(advice.feasibility),
+                advice.headline.empty() ? "" : ": ", advice.headline.c_str());
+
+    for (const ProfileProposal& prop : advice.proposals) {
+        if (prop.applicable)
+            RD_INFO("  proposes %s %s - %s", prop.field.c_str(),
+                    prop.change_text().c_str(), prop.reason.c_str());
+        else
+            RD_DEBUG("  proposal on %s ignored (%s)", prop.field.c_str(), prop.note.c_str());
+    }
+
+    if (record) record->advice = advice;
+    std::lock_guard lock(results_mutex_);
+    merge_advice(results_.advice, advice);
+}
+
 LlmResponse Pipeline::ask(const LlmRequest& req, const char* stage_label)
 {
     LlmResponse res;
@@ -505,6 +533,7 @@ bool Pipeline::stage_allocate_budget(const PipelineSettings& s)
                         : "");
             for (const std::string& k : applied.ignored_keys)
                 RD_DEBUG("ignored unknown key %s", k.c_str());
+            note_advice(parse_advice_response(res, s.profile), nullptr);
         } else {
             RD_WARN("budget allocation fell back to area proportional defaults: %s",
                     res.error.c_str());
@@ -772,6 +801,7 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             if (cancelled()) return false;
 
             const ReviewOutcome outcome = parse_review_response(res);
+            note_advice(parse_advice_response(res, s.profile), &record);
             if (outcome.ok) {
                 record.verdict  = outcome.verdict;
                 record.critique = outcome.critique;
@@ -890,6 +920,7 @@ bool Pipeline::stage_report(const PipelineSettings& s)
         iterations.push_back(e);
     }
     j["iterations"] = iterations;
+    if (!r.advice.empty()) j["profile_advice"] = r.advice.to_json();
 
     Json files = Json::array();
     for (const fs::path& f : r.exported.files) files.push_back(f.string());
@@ -936,6 +967,23 @@ bool Pipeline::stage_report(const PipelineSettings& s)
     for (const IterationRecord& it : r.iterations) {
         if (it.critique.empty()) continue;
         md += format("\n**Iteration %d critique.** %s\n", it.index, it.critique.c_str());
+    }
+
+    if (!r.advice.empty()) {
+        md += "\n## What the director thinks of the brief\n\n";
+        md += format("Feasibility: **%s**. %s\n\n",
+                     feasibility_name(r.advice.feasibility), r.advice.headline.c_str());
+        if (!r.advice.proposals.empty()) {
+            md += "These are proposals, not changes. Nothing below was applied to "
+                  "this run.\n\n";
+            md += "| field | change | reason |\n|---|---|---|\n";
+            for (const ProfileProposal& prop : r.advice.proposals)
+                md += format("| `%s` | %s | %s%s |\n", prop.field.c_str(),
+                             prop.applicable ? prop.change_text().c_str() : "-",
+                             prop.reason.c_str(),
+                             prop.note.empty() ? ""
+                                               : format(" _(%s)_", prop.note.c_str()).c_str());
+        }
     }
 
     md += "\n## Validation detail\n\n```\n";

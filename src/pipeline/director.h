@@ -5,6 +5,7 @@
 // pipeline so it can be read, reviewed and diffed as one artefact.
 
 #include "geom/retopo.h"
+#include "knobs/advice.h"
 #include "knobs/knobs.h"
 #include "knobs/profile.h"
 #include "llm/backend.h"
@@ -46,6 +47,11 @@ LlmRequest build_budget_request(const Mesh& mesh, const MeshAnalysis& analysis,
                                 const KnobPanel& current, const ViewSet& shaded_views,
                                 const ViewSet& region_views);
 
+// Every reply may carry an "profile_advice" block arguing that the brief itself
+// is wrong. Reading it is separate from reading the knobs because the two go to
+// different places: knobs to the engine, advice to a human.
+ProfileAdvice parse_advice_response(const LlmResponse& res, const TargetProfile& profile);
+
 // --- stage 3: review an iteration ------------------------------------------
 struct ReviewOutcome {
     Json        patch;              // knob panel patch, applied through apply_patch
@@ -83,5 +89,8 @@ LlmRequest build_repair_request(const Segmentation& seg, const TargetProfile& pr
 std::string profile_summary_text(const TargetProfile& profile);
 std::string knob_panel_summary_text(const KnobPanel& panel, const Segmentation& seg);
 std::string metrics_text(const IterationFacts& facts);
+// The advice section of the prompt: the field catalogue and the rules for using
+// it. Exposed so the prompt preview panel shows the same text the model gets.
+std::string profile_advice_prompt_text(const TargetProfile& profile);
 
 } // namespace rd
