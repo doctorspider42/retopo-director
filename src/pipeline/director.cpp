@@ -514,6 +514,16 @@ Rules for this step:
     is well short of the profile, look at the backend before the shares. A
     starving quad_field on an assembled source produces exactly that pattern,
     and "backend": "quadric" in the global patch is one key rather than twenty.
+    If the total is close to the budget, it is not starving: quad_field treats
+    region budgets as a density, not a quota, and moves triangles between
+    neighbours. Switching backend then trades even, clean topology for the
+    fans and slivers the quadric leaves on limbs and hands.
+  - Small pieces that are mostly hidden or lie flat on the surface - eyeballs,
+    brows, straps - are removed from the low poly on purpose and painted by the
+    bake (a "hard rule" line says so). Judge how they read in the texture; do
+    not treat their missing geometry as a failure or spend shares on them.
+  - Dark specks and blotches inside the silhouette are texture, not holes,
+    unless the validation reports open boundary edges.
   - "patch" cannot raise the total. The budget is fixed for this run: inside it
     you move triangles, you do not add them. If moving them is no longer enough
     and the renders show you why, that belongs in "profile_advice", where a human
