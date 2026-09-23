@@ -4,9 +4,11 @@
 // speaks this type: the loader fills it, the retopo engines rewrite it, the
 // baker decorates it, the exporter serialises it.
 
+#include "core/image.h"
 #include "core/math.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -56,6 +58,37 @@ struct SkinVertex {
 };
 
 // ---------------------------------------------------------------------------
+// Source materials
+// ---------------------------------------------------------------------------
+// What the asset was authored with, carried only so the bake can read the
+// original artwork back out. Nothing in the geometry path looks at these: they
+// exist to be sampled through a uv, and the low poly the pipeline produces has
+// one material of its own.
+struct SourceMaterial {
+    std::string name;
+    Texture     base_color;                     // empty when the material had none
+    Vec4        base_factor{1.0f, 1.0f, 1.0f, 1.0f};  // multiplied onto the texture
+};
+
+// Held behind a shared_ptr on the Mesh because a Mesh is copied at nearly every
+// stage of the pipeline and a character's material set is tens of megabytes.
+// Nothing mutates a material set after load, so sharing is free.
+struct MaterialSet {
+    std::vector<SourceMaterial> materials;
+
+    const SourceMaterial* find(uint16_t index) const
+    {
+        return index < materials.size() ? &materials[index] : nullptr;
+    }
+    size_t textured_count() const
+    {
+        size_t n = 0;
+        for (const SourceMaterial& m : materials) n += m.base_color.empty() ? 0 : 1;
+        return n;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Mesh
 // ---------------------------------------------------------------------------
 struct Mesh {
@@ -69,6 +102,25 @@ struct Mesh {
 
     // Optional per triangle region assignment produced by the segmenter.
     std::vector<uint16_t>    tri_region;
+
+    // Optional per triangle material index into `materials`, filled by the
+    // loader. Kept per triangle rather than per vertex because that is how
+    // every source format expresses it, and because a vertex on a material
+    // border belongs to both.
+    std::vector<uint16_t>    tri_material;
+    std::shared_ptr<const MaterialSet> materials;
+
+    // Texture coordinates per corner rather than per vertex, snapshotted by the
+    // loader before welding.
+    //
+    // The weld merges by position alone, deliberately: shell count, symmetry
+    // and watertightness all have to see the surface the way the modeller built
+    // it, not the way the uv layout cuts it up. But a uv seam is exactly a
+    // vertex the modeller split for uv reasons, so welding it throws one of the
+    // two coordinates away, and a triangle on the far side of the seam ends up
+    // reading from the wrong place in the map. Keeping both here costs one
+    // Vec2 per corner and leaves the topology untouched.
+    std::vector<Vec2>        corner_uvs;   // empty or 3 * triangle_count()
 
     Armature                 armature;
 
@@ -85,6 +137,30 @@ struct Mesh {
     bool has_uvs()     const { return uvs.size()     == positions.size() && !uvs.empty(); }
     bool has_colors()  const { return colors.size()  == positions.size() && !colors.empty(); }
     bool has_skin()    const { return skin.size()    == positions.size() && !skin.empty(); }
+    bool has_corner_uvs() const
+    {
+        return corner_uvs.size() == indices.size() && !corner_uvs.empty();
+    }
+    // The uv of corner `c` of triangle `t`, from the per corner snapshot when
+    // there is one and from the welded vertex otherwise.
+    Vec2 corner_uv(size_t t, int c) const
+    {
+        if (has_corner_uvs()) return corner_uvs[t * 3 + size_t(c)];
+        const uint32_t v = indices[t * 3 + size_t(c)];
+        return v < uvs.size() ? uvs[v] : Vec2{};
+    }
+    bool has_materials() const
+    {
+        return materials && !materials->materials.empty() &&
+               tri_material.size() == triangle_count();
+    }
+    // The material a triangle was authored with, or null when the mesh carries
+    // no material set - which is every mesh this pipeline generates itself.
+    const SourceMaterial* material_for(size_t tri) const
+    {
+        if (!has_materials() || tri >= tri_material.size()) return nullptr;
+        return materials->find(tri_material[tri]);
+    }
 
     void clear();
 

@@ -127,6 +127,7 @@ Json GlobalKnobs::to_json() const
     j["silhouette_weight"]         = silhouette_weight;
     j["smoothing_iterations"]      = smoothing_iterations;
     j["quad_dominance"]            = quad_dominance;
+    j["reuse_source_uvs"]          = reuse_source_uvs;
     j["bake_ambient_occlusion"]    = bake_ambient_occlusion;
     j["ao_intensity"]              = ao_intensity;
     j["bake_vertex_colors"]        = bake_vertex_colors;
@@ -148,6 +149,7 @@ GlobalKnobs GlobalKnobs::from_json(const Json& j)
     g.silhouette_weight         = json_get<float>(j, "silhouette_weight", g.silhouette_weight);
     g.smoothing_iterations      = json_get<int>(j, "smoothing_iterations", g.smoothing_iterations);
     g.quad_dominance            = json_get<float>(j, "quad_dominance", g.quad_dominance);
+    g.reuse_source_uvs          = json_get<bool>(j, "reuse_source_uvs", g.reuse_source_uvs);
     g.bake_ambient_occlusion    = json_get<bool>(j, "bake_ambient_occlusion", g.bake_ambient_occlusion);
     g.ao_intensity              = json_get<float>(j, "ao_intensity", g.ao_intensity);
     g.bake_vertex_colors        = json_get<bool>(j, "bake_vertex_colors", g.bake_vertex_colors);
@@ -370,6 +372,7 @@ std::string KnobPanel::json_schema_text()
     "silhouette_weight":         "0.0 .. 1.0 - protection for outline forming triangles",
     "smoothing_iterations":      "0 .. 32 - tangential relaxation passes",
     "quad_dominance":            "0.0 .. 1.0 - how hard to pair triangles into quads",
+    "reuse_source_uvs":          "bool, keep the source uv layout instead of unwrapping fresh",
     "bake_ambient_occlusion":    "bool",
     "ao_intensity":              "0.0 .. 1.0",
     "bake_vertex_colors":        "bool",
