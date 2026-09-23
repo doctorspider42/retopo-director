@@ -228,13 +228,29 @@ ValidationReport validate(const ValidationInput& in)
         rep.symmetry_score = measure_symmetry(mesh, plane, tolerance);
 
         const bool ok = rep.symmetry_score >= 0.97f;
-        check("geometry.symmetry", "Symmetry", ok, Severity::Error,
+        // The profile asks for a symmetric asset, but a retopology can only be
+        // as symmetric as what it was given. A scan, a posed statue or a
+        // character carrying a sword in one hand has no mirror plane, and
+        // mirroring one half over the other would be destroying the asset to
+        // pass a check. So when the analysis already rejected the source's
+        // symmetry, the shortfall is reported, not failed.
+        const bool source_asymmetric =
+            in.source_analysis && in.source_analysis->valid() &&
+            !in.source_analysis->symmetry.accepted;
+        check("geometry.symmetry", "Symmetry", ok,
+              source_asymmetric ? Severity::Warning : Severity::Error,
               rep.symmetry_score, 0.97,
               ok ? format("%.1f%% of vertices mirror across %s",
                           rep.symmetry_score * 100.0f, plane.axis_name())
-                 : format("only %.1f%% of vertices mirror across %s; the profile "
-                          "requires a symmetric asset",
-                          rep.symmetry_score * 100.0f, plane.axis_name()));
+              : source_asymmetric
+                  ? format("only %.1f%% of vertices mirror across %s, but the source "
+                           "itself is not symmetric (best plane scored %.0f%%), so the "
+                           "shape was kept as authored",
+                           rep.symmetry_score * 100.0f, plane.axis_name(),
+                           in.source_analysis->symmetry.score * 100.0f)
+                  : format("only %.1f%% of vertices mirror across %s; the profile "
+                           "requires a symmetric asset",
+                           rep.symmetry_score * 100.0f, plane.axis_name()));
     }
 
     // --- skinning -----------------------------------------------------------
