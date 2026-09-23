@@ -90,8 +90,10 @@ TargetProfile TargetProfile::ps2_character_default()
     p.art_direction =
         "Third person playable character. The face is visible in dialogue "
         "cutscenes, so the head deserves a disproportionate share of the budget. "
-        "Hands are seen holding equipment but never in close up. Feet and the "
-        "back of the legs are almost never framed.";
+        "Hands are seen holding equipment but never in close up. The feet are in "
+        "every gameplay shot and walk the ground: they need a readable heel, instep "
+        "and toe box, about a hand's worth of triangles each, but no toes. The back "
+        "of the legs is rarely framed.";
     p.max_iterations = 4;
     return p;
 }
@@ -168,6 +170,7 @@ Json TargetProfile::to_json() const
                                  {"camera", pg.camera}});
         t["pages"] = pages;
     }
+    t["filtering"] = texture.bilinear ? "bilinear" : "nearest";
     j["texture"] = t;
 
     Json q;
@@ -178,6 +181,7 @@ Json TargetProfile::to_json() const
     Json f;
     f["reference_height_m"] = reference_height_m;
     f["turntable_views"]    = turntable_views;
+    f["turntable_pitches"]  = turntable_pitches;
     Json cams = Json::array();
     for (const ProfileCamera& c : cameras) cams.push_back(camera_to_json(c));
     f["cameras"] = cams;
@@ -220,6 +224,7 @@ TargetProfile TargetProfile::from_json(const Json& j, std::string* error)
     p.texture.height         = json_get<int>(t, "height", p.texture.height);
     p.texture.palette_colors = json_get<int>(t, "palette_colors", p.texture.palette_colors);
     p.texture.dithering      = json_get<bool>(t, "dithering", p.texture.dithering);
+    p.texture.bilinear       = json_get<std::string>(t, "filtering", "bilinear") != "nearest";
     p.texture.count          = json_get<int>(t, "count", p.texture.count);
     p.texture.extra_pages.clear();
     for (const Json& pg : json_array_or_empty(t, "pages")) {
@@ -242,6 +247,12 @@ TargetProfile TargetProfile::from_json(const Json& j, std::string* error)
     const Json& f = json_object_or_empty(j, "framing");
     p.reference_height_m = json_get<float>(f, "reference_height_m", p.reference_height_m);
     p.turntable_views    = json_get<int>(f, "turntable_views", p.turntable_views);
+    {
+        std::vector<float> pitches;
+        for (const Json& v : json_array_or_empty(f, "turntable_pitches"))
+            if (v.is_number()) pitches.push_back(std::clamp(v.get<float>(), -80.0f, 80.0f));
+        if (!pitches.empty()) p.turntable_pitches = pitches;
+    }
     const Json& cams = json_array_or_empty(f, "cameras");
     if (!cams.empty()) {
         p.cameras.clear();

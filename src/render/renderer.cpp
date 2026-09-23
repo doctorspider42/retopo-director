@@ -284,7 +284,7 @@ void GpuMesh::upload_face_attribute(const Mesh& mesh, const std::vector<Vec4>& f
     upload_attribute(per_vertex);
 }
 
-void GpuMesh::set_texture(const Texture& tex)
+void GpuMesh::set_texture(const Texture& tex, bool bilinear)
 {
     if (!gl::loaded() || tex.empty()) return;
     if (!texture_) glGenTextures(1, &texture_);
@@ -295,7 +295,7 @@ void GpuMesh::set_texture(const Texture& tex)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, tex.width, tex.height, 0, format,
                  GL_UNSIGNED_BYTE, tex.pixels.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, bilinear ? GL_LINEAR : GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -652,7 +652,7 @@ ViewSet render_view_set(Renderer& renderer, const Mesh& mesh,
     gpu.upload(mesh);
     if (!gpu.valid()) { set.error = "mesh upload failed"; return set; }
     if (per_face_color) gpu.upload_face_attribute(mesh, *per_face_color);
-    if (diffuse && !diffuse->empty()) gpu.set_texture(*diffuse);
+    if (diffuse && !diffuse->empty()) gpu.set_texture(*diffuse, opts.bilinear_texture);
 
     for (const ViewCamera& cam : cameras) {
         ViewSet::Entry entry;

@@ -789,6 +789,9 @@ void draw_profile_settings(AppState& app)
                               "0 keeps truecolor. 16 is a 4 bit CLUT, 256 an 8 bit one.");
         changed |= slider_int("Pages", &profile.texture.count, 1, 8, 1);
         changed |= toggle("Dither", &profile.texture.dithering);
+        changed |= toggle("Bilinear filtering", &profile.texture.bilinear,
+                          "How the target magnifies the texture. The PS2 filters "
+                          "bilinearly; off shows every texel as a hard square.");
         changed |= toggle("Require UVs", &profile.require_uvs);
         changed |= toggle("Require vertex colours", &profile.require_vertex_colors);
         changed |= toggle("Bake lighting in", &profile.bake_lighting_to_diffuse,

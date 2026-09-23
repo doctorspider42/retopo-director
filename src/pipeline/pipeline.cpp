@@ -890,6 +890,7 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         opts.samples = s.render_samples;
         opts.mode    = RenderMode::Shaded;
         opts.wireframe_overlay = true;
+        opts.bilinear_texture  = s.profile.texture.bilinear;
 
         const fs::path iter_dir = paths::iteration_dir(iteration);
         // One texture for the renderer: the pages laid side by side.
@@ -923,6 +924,7 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         record.triangles  = retopo.mesh.triangle_count();
         record.vertices   = retopo.mesh.vertex_count();
         record.silhouette = silhouette;
+        record.surface    = measure_surface_error(source, analysis.bvh, retopo.mesh);
         record.validation_passed = validation.passed;
         record.errors     = validation.errors;
         record.warnings   = validation.warnings;
@@ -1036,6 +1038,8 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         std::lock_guard lock(results_mutex_);
         const int last = results_.iterations.empty() ? 0 : results_.iterations.back().index;
         results_.kept_iteration = kept.iteration;
+        for (const IterationRecord& it : results_.iterations)
+            if (it.index == kept.iteration) results_.surface = it.surface;
         if (kept.iteration != 0 && kept.iteration != last) {
             RD_INFO("keeping iteration %d (silhouette %.4f) over the last one, %d (%.4f)",
                     kept.iteration, kept.silhouette.mean, last, results_.silhouette.mean);
@@ -1156,6 +1160,8 @@ bool Pipeline::stage_report(const PipelineSettings& s)
             {"silhouette_mean", r.silhouette.mean},
             {"silhouette_worst", r.silhouette.worst},
             {"outline_px", r.silhouette.outline_px},
+            {"surface_error_mean", r.surface.mean},
+            {"surface_error_p95", r.surface.p95},
             {"validation_passed", r.validation.passed},
             {"errors", r.validation.errors},
             {"warnings", r.validation.warnings},

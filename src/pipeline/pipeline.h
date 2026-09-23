@@ -97,6 +97,7 @@ struct IterationRecord {
     size_t     triangles = 0;
     size_t     vertices  = 0;
     SilhouetteError silhouette;
+    SurfaceError    surface;
     bool       validation_passed = false;
     int        errors = 0, warnings = 0;
     std::string verdict;
@@ -130,6 +131,7 @@ struct PipelineResults {
 
     std::vector<LlmExchange>     transcript;
     std::vector<IterationRecord> iterations;
+    SurfaceError                 surface;
     // Which of them the results above belong to; the best, not the last.
     int                          kept_iteration = 0;
 

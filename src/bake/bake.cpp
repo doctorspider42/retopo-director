@@ -1522,9 +1522,13 @@ Texture display_atlas(const Mesh& mesh, const BakeResult& bake, Mesh& display_me
     for (size_t i = 0; i < tex.size(); ++i) {
         const Texture& t = *tex[i];
         if (t.empty()) continue;
+        // Scaled by sampling, not by repeating texels: a 256 page shown at 512
+        // by duplication is a checkerboard of 2x2 blocks before the renderer
+        // even gets to filter it.
         for (int y = 0; y < height; ++y)
             for (int x = 0; x < w[i]; ++x)
-                out.set(x0[i] + x, y, t.get(x * t.width / w[i], y * t.height / height));
+                out.set(x0[i] + x, y, t.sample({(float(x) + 0.5f) / float(w[i]),
+                                                (float(y) + 0.5f) / float(height)}));
     }
 
     // A vertex belongs to the page of any triangle using it; the bake gave

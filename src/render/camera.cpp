@@ -78,13 +78,26 @@ std::vector<ViewCamera> build_camera_rig(const Mesh& mesh, const TargetProfile& 
     }
 
     const int turns = std::max(0, profile.turntable_views);
-    for (int i = 0; i < turns; ++i) {
-        const float yaw = 360.0f * float(i) / float(turns);
-        ViewCamera cam = fit_camera(bounds, yaw, 12.0f, 40.0f, 0.88f);
-        cam.name        = format("turntable_%02d", i);
-        cam.description = format("Orbit view at %.0f degrees", yaw);
-        cam.weight      = 1.0f;
-        out.push_back(std::move(cam));
+    std::vector<float> pitches = profile.turntable_pitches;
+    if (pitches.empty()) pitches.push_back(12.0f);
+    for (size_t ring = 0; ring < pitches.size(); ++ring) {
+        const float pitch = pitches[ring];
+        // Each further ring is turned half a step, so its views fall between
+        // the first ring's instead of straight above or below them.
+        const float offset = ring == 0 ? 0.0f : 180.0f / float(std::max(1, turns));
+        for (int i = 0; i < turns; ++i) {
+            const float yaw = 360.0f * float(i) / float(turns) + offset;
+            ViewCamera cam = fit_camera(bounds, yaw, pitch, 40.0f, 0.88f);
+            // The first ring keeps its old names: reports, the report
+            // viewer and anything comparing runs refer to turntable_00.
+            cam.name = ring == 0 ? format("turntable_%02d", i)
+                                 : format("turntable_%c%02d_%02d", pitch < 0 ? 'm' : 'p',
+                                          int(std::lround(std::fabs(pitch))), i);
+            cam.description = format("Orbit view at %.0f degrees, %.0f above the horizon",
+                                     yaw, pitch);
+            cam.weight = 1.0f;
+            out.push_back(std::move(cam));
+        }
     }
 
     if (out.empty()) {

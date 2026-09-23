@@ -318,7 +318,7 @@ void AppState::upload_meshes()
             gpu_low.upload(display);
             gpu_low_ok = gpu_low.valid();
             if (r.bake.ok && !atlas.empty() && show_baked_texture)
-                gpu_low.set_texture(atlas);
+                gpu_low.set_texture(atlas, settings.profile.texture.bilinear);
             if (!r.lowpoly.tri_region.empty() &&
                 r.lowpoly.tri_region.size() == r.lowpoly.triangle_count()) {
                 // Region colours for the low poly come from its own map.

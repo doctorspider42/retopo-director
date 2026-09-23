@@ -111,6 +111,19 @@ struct AnalysisOptions {
     float curvature_percentile    = 0.97f;
 };
 
+// How far one surface is from another, independent of any camera: points
+// sampled over each by area, measured to the nearest point of the other, both
+// ways, as a share of the source's height. The silhouette metric moves with
+// the set of views it is measured from; this does not, which is what makes it
+// the number to compare runs that were rendered from different angles.
+struct SurfaceError {
+    float mean = 0.0f;   // mean of both directions
+    float p95  = 0.0f;   // 95th percentile of both directions
+    bool  valid = false;
+};
+SurfaceError measure_surface_error(const Mesh& source, const Bvh& source_bvh, const Mesh& low,
+                                   int samples = 20000);
+
 // Runs the full analysis. `progress` is called with 0..1 and may be null.
 void analyse_mesh(const Mesh& mesh, MeshAnalysis& out,
                   const AnalysisOptions& opts = {},

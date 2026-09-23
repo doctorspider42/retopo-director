@@ -466,4 +466,54 @@ void analyse_mesh(const Mesh& mesh, MeshAnalysis& out, const AnalysisOptions& op
                 out.stats.nonmanifold_edges);
 }
 
+SurfaceError measure_surface_error(const Mesh& source, const Bvh& source_bvh, const Mesh& low,
+                                   int samples)
+{
+    SurfaceError out;
+    if (source.empty() || low.empty() || source_bvh.empty()) return out;
+    Bvh low_bvh;
+    low_bvh.build(low);
+    const float height = std::max(source.bounds().extent().y, 1e-6f);
+
+    // Area weighted points on `m`, from a fixed seed so the number repeats.
+    auto sample = [&](const Mesh& m, int n, std::vector<Vec3>& pts) {
+        const size_t tcount = m.triangle_count();
+        std::vector<double> cdf(tcount);
+        double acc = 0.0;
+        for (size_t t = 0; t < tcount; ++t) { acc += m.triangle_area(t); cdf[t] = acc; }
+        if (acc <= 0.0) return;
+        Rng rng(0x5A11u);
+        for (int i = 0; i < n; ++i) {
+            const double r = double(rng.next_float()) * acc;
+            const size_t t = size_t(std::lower_bound(cdf.begin(), cdf.end(), r) - cdf.begin());
+            float u = rng.next_float(), v = rng.next_float();
+            if (u + v > 1.0f) { u = 1.0f - u; v = 1.0f - v; }
+            Vec3 a, b, c;
+            m.tri_positions(std::min(t, tcount - 1), a, b, c);
+            pts.push_back(a + (b - a) * u + (c - a) * v);
+        }
+    };
+    std::vector<Vec3> from_source, from_low;
+    sample(source, samples, from_source);
+    sample(low, samples / 2, from_low);
+
+    std::vector<float> d(from_source.size() + from_low.size());
+    ThreadPool::shared().parallel_for(from_source.size(), 256, [&](size_t i, unsigned) {
+        const ClosestHit h = low_bvh.closest_point(from_source[i]);
+        d[i] = h.hit() ? std::sqrt(h.distance2) : height;
+    });
+    ThreadPool::shared().parallel_for(from_low.size(), 256, [&](size_t i, unsigned) {
+        const ClosestHit h = source_bvh.closest_point(from_low[i]);
+        d[from_source.size() + i] = h.hit() ? std::sqrt(h.distance2) : height;
+    });
+    if (d.empty()) return out;
+    double sum = 0.0;
+    for (float x : d) sum += x;
+    std::sort(d.begin(), d.end());
+    out.mean  = float(sum / double(d.size())) / height;
+    out.p95   = d[size_t(0.95 * double(d.size() - 1))] / height;
+    out.valid = true;
+    return out;
+}
+
 } // namespace rd

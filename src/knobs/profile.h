@@ -44,6 +44,11 @@ struct TextureBudget {
     int  height         = 256;
     int  palette_colors = 256;   // 256 = 8 bit CLUT, 16 = 4 bit CLUT, 0 = truecolor
     bool dithering      = true;
+    // How the target samples the texture when a texel covers more than a
+    // pixel. The PS2's GS filters bilinearly, and the renders the director and
+    // the viewport show used nearest, which drew every texel as a hard square
+    // and made a 256 atlas look far coarser than it would on the console.
+    bool bilinear       = true;
     int  count          = 1;     // how many pages the target allows
     // Pages after the first. The first page is width x height and takes
     // everything no extra page claims.
@@ -91,6 +96,12 @@ struct TargetProfile {
     float                      reference_height_m = 1.8f;
     std::vector<ProfileCamera> cameras;
     int                        turntable_views = 8;
+    // Elevation of each ring of turntable views, degrees, positive looking
+    // down. One ring at 12 is what every profile had; more rings put more of
+    // the model under the silhouette metric, the director's renders and the
+    // density field's silhouette term - the underside of a prop, the top of a
+    // head - at the cost of more renders per iteration.
+    std::vector<float>         turntable_pitches{12.0f};
 
     // --- director guidance -------------------------------------------------
     // Free text handed to the model verbatim. This is where "3rd person, face

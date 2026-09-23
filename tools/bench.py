@@ -42,6 +42,7 @@ REGRESSION = {
     "silhouette_mean":  ("lower", 0.15, 0.003),
     "silhouette_worst": ("lower", 0.20, 0.005),
     "outline_px":       ("lower", 0.15, 0.1),
+    "surface_pct":      ("lower", 0.15, 0.03),
     "sliver_share":     ("lower", 0.25, 0.03),
     "budget_use":       ("higher", 0.0, 0.05),
     "uv_stretch":       ("lower", 0.25, 0.25),
@@ -75,6 +76,8 @@ def load_metrics(project):
         "silhouette_mean": s.get("silhouette_mean"),
         "silhouette_worst": s.get("silhouette_worst"),
         "outline_px": s.get("outline_px"),
+        "surface_pct": (100.0 * s["surface_error_mean"]) if s.get("surface_error_mean") is not None else None,
+        "surface_p95_pct": (100.0 * s["surface_error_p95"]) if s.get("surface_error_p95") is not None else None,
         "median_quality": s.get("median_triangle_quality"),
         "sliver_share": s.get("sliver_share"),
         "validation_passed": s.get("validation_passed"),
@@ -191,7 +194,7 @@ def main():
     results = {}
     regressions = {}
     header = (f"{'mesh':<24}{'rc':>3}{'hi tris':>9}{'lo tris':>8}{'use':>6}{'regs':>5}"
-              f"{'sil mean':>10}{'sil worst':>10}{'px':>6}{'q med':>6}{'sliv':>6}{'stretch':>8}{'strip':>7}{'secs':>7}  notes")
+              f"{'sil mean':>10}{'sil worst':>10}{'px':>6}{'surf%':>7}{'q med':>6}{'sliv':>6}{'stretch':>8}{'strip':>7}{'secs':>7}  notes")
     print(header)
     print("-" * len(header))
     for e, path in entries:
@@ -208,7 +211,7 @@ def main():
               f"{fmt(m.get('triangles'), 'd'):>8}{fmt(m.get('budget_use'), '.0%'):>6}"
               f"{fmt(m.get('regions'), 'd'):>5}"
               f"{fmt(m.get('silhouette_mean'), '.4f'):>10}{fmt(m.get('silhouette_worst'), '.4f'):>10}"
-              f"{fmt(m.get('outline_px'), '.2f'):>6}"
+              f"{fmt(m.get('outline_px'), '.2f'):>6}{fmt(m.get('surface_pct'), '.3f'):>7}"
               f"{fmt(m.get('median_quality'), '.2f'):>6}{fmt(m.get('sliver_share'), '.0%'):>6}"
               f"{fmt(m.get('uv_stretch'), '.2f'):>8}{fmt(m.get('strip_length'), '.2f'):>7}"
               f"{m['seconds']:>7.1f}  {'; '.join(notes)}", flush=True)

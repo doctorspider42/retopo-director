@@ -44,7 +44,8 @@ public:
     void upload_attribute(const std::vector<Vec4>& per_vertex_color);
     // Convenience: expands per triangle colours (region overlay) onto vertices.
     void upload_face_attribute(const Mesh& mesh, const std::vector<Vec4>& per_face_color);
-    void set_texture(const Texture& tex);
+    // `bilinear` false samples nearest, the way a target without filtering would.
+    void set_texture(const Texture& tex, bool bilinear = true);
     void clear_texture();
     void release();
 
@@ -86,6 +87,8 @@ struct RenderOptions {
     bool       flip_y          = true;   // PNG rows run top down
     // Silhouette mode renders white on black regardless of the background.
     bool       backface_cull   = true;
+    // Texture magnification, as the target does it (TextureBudget::bilinear).
+    bool       bilinear_texture = true;
 };
 
 class Renderer {
