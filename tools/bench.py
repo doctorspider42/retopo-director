@@ -205,6 +205,16 @@ def main():
               f"{fmt(m.get('silhouette_mean'), '.4f'):>10}{fmt(m.get('silhouette_worst'), '.4f'):>10}"
               f"{fmt(m.get('uv_stretch'), '.2f'):>8}{fmt(m.get('strip_length'), '.2f'):>7}"
               f"{m['seconds']:>7.1f}  {'; '.join(notes)}", flush=True)
+        # A run that did not even produce a report died of something - a
+        # sanitizer, an assert, a crash - and on CI the log is the only witness.
+        if m["rc"] not in (0, 3):
+            log_path = os.path.join(args.out, "runs", e["name"], "run.log")
+            try:
+                with open(log_path, encoding="utf-8", errors="replace") as f:
+                    tail = f.readlines()[-60:]
+                print("    | " + "    | ".join(tail), flush=True)
+            except OSError:
+                pass
 
     os.makedirs(args.out, exist_ok=True)
     doc = {"meshes": results}
