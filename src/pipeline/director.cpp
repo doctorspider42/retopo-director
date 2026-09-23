@@ -1,5 +1,7 @@
 #include "pipeline/director.h"
 
+#include "geom/hard_rules.h"
+
 #include "core/log.h"
 #include "core/util.h"
 
@@ -354,6 +356,24 @@ LlmRequest build_budget_request(const Mesh& mesh, const MeshAnalysis& analysis,
                 profile.max_shells > 0 ? std::to_string(profile.max_shells).c_str()
                                        : "any number of",
                 profile.max_shells == 1 ? "" : "s");
+    // The pieces the low poly will actually have. Eyeballs, brows and straps
+    // lying on the skin are dropped by the hard rules and painted by the bake,
+    // and until the director was told so it read "7 pieces" as an assembled
+    // costume and forced the quadric onto a clean body.
+    {
+        const HardRuleOptions rules;
+        size_t kept = 0, dropped = 0;
+        for (uint32_t s = 0; s < analysis.shell_area_share.size(); ++s) {
+            if (source_shell_is_droppable(analysis, s, rules)) ++dropped;
+            else ++kept;
+        }
+        if (dropped > 0)
+            u += format("Of those pieces, %zu are small and either hidden (eyeballs behind "
+                        "lids) or lying flat on the surface (brows, straps, patches): the "
+                        "engine drops them from the low poly and the bake paints them, so the "
+                        "surface to retopologise is %zu piece%s.\n",
+                        dropped, kept, kept == 1 ? "" : "s");
+    }
     if (profile.require_symmetry && analysis.symmetry.accepted)
         u += "Symmetry will be enforced, so half the budget effectively covers both "
              "sides. Do not try to spend differently on left and right.\n";
@@ -399,11 +419,11 @@ Rules for this step:
 
     Measured across four sources, quad_field won only on the one that was a
     single closed shell; on a costumed character, a creature and a building it
-    lost, twice by enough to fail validation. Use the topology line above rather
-    than the word "organic": one watertight shell and no open edges makes
-    quad_field worth trying, anything assembled says quadric. "auto" decides by
-    counting creases, which is the rule that got this wrong, so prefer naming
-    the backend yourself.
+    lost, twice by enough to fail validation. Use the topology lines above rather
+    than the word "organic": count the pieces that will survive, not the ones
+    that will be dropped, and a few open edges round an eye socket do not make
+    a body an assembly. "auto" applies exactly that rule, so leave it on "auto"
+    unless you can see something in the renders it cannot.
   - Write one sentence of "rationale" per region. It goes in the report a human
     will read when they wonder why the elbow looks like that.
   - Allocate the budget you were given, in full, whatever you think of it. If you

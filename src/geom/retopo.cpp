@@ -86,12 +86,36 @@ RetopoResult run_retopo(const Mesh& source, const MeshAnalysis& analysis,
         // The two losses on assembled organic sources were bad enough to fail
         // validation, so the shell test comes first and the crease ratio only
         // decides between them once the surface is actually walkable.
-        const bool walkable = analysis.stats.shells == 1 && analysis.stats.closed;
+        //
+        // What counts is the surface the low poly will actually have. Pieces
+        // the hard rules are going to drop - eyeballs, brows, straps lying on
+        // the skin - do not make a character "assembled", and a handful of
+        // open edges round an eye socket do not make its body unwalkable. On
+        // the superhero those two together sent a clean body to the quadric,
+        // which is what fanned its hands into slivers.
+        size_t kept_shells = 0;
+        for (uint32_t s = 0; s < analysis.shell_area_share.size(); ++s)
+            if (!source_shell_is_droppable(analysis, s, opts.hard_rules)) ++kept_shells;
+        if (analysis.shell_area_share.empty()) kept_shells = analysis.stats.shells;
+
+        size_t main_edges = 0, main_boundary = 0;
+        for (const MeshTopology::Edge& e : analysis.topology.edges) {
+            if (e.tri0 >= analysis.tri_shell.size() ||
+                analysis.tri_shell[e.tri0] != analysis.largest_shell)
+                continue;
+            ++main_edges;
+            if (e.tri1 == kInvalidIndex) ++main_boundary;
+        }
+        // Half a percent of open edges is a few small holes, not a costume.
+        const bool main_closed = analysis.stats.closed ||
+                                 (main_edges > 0 && main_boundary * 200 <= main_edges);
+        const bool walkable = kept_shells == 1 && main_closed;
         backend = (walkable && organic) ? RetopoBackend::QuadField : RetopoBackend::Quadric;
 
-        RD_INFO("auto backend: %zu shell%s, %s, %.1f%% of edges are creases: %s",
-                analysis.stats.shells, analysis.stats.shells == 1 ? "" : "s",
-                analysis.stats.closed ? "watertight" : "not watertight",
+        RD_INFO("auto backend: %zu shell%s (%zu kept), %s, %.1f%% of edges are creases: %s",
+                analysis.stats.shells, analysis.stats.shells == 1 ? "" : "s", kept_shells,
+                analysis.stats.closed ? "watertight"
+                                      : (main_closed ? "main piece nearly closed" : "not watertight"),
                 crease_ratio * 100.0f,
                 backend == RetopoBackend::QuadField
                     ? "one walkable shell and organic, using the quad field"
