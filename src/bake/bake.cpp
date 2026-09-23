@@ -2,6 +2,7 @@
 
 #include "core/log.h"
 #include "mesh/topology.h"
+#include "render/camera.h"
 #include "core/thread_pool.h"
 #include "core/util.h"
 
@@ -11,6 +12,7 @@
 #include <functional>
 #include <atomic>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 
@@ -678,6 +680,7 @@ UnwrapResult unwrap_uvs(Mesh& mesh, int width, int height, int padding,
     rebuilt.indices.assign(out.indexArray, out.indexArray + out.indexCount);
     if (mesh.tri_region.size() == mesh.triangle_count())
         rebuilt.tri_region = mesh.tri_region;   // face order is preserved by xatlas
+    if (mesh.has_pages()) rebuilt.tri_page = mesh.tri_page;
 
     // xatlas splits a vertex per chart it belongs to, but a vertex interior to
     // one chart can still come back duplicated. Every duplicate is a vertex the
@@ -755,10 +758,14 @@ UnwrapResult unwrap_uvs(Mesh& mesh, int width, int height, int padding,
 }
 
 // ---------------------------------------------------------------------------
-BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
-                    const MeshAnalysis& source_analysis, const TargetProfile& profile,
-                    const GlobalKnobs& knobs, const BakeOptions& opts,
-                    const std::function<void(float, const char*)>& progress)
+namespace {
+
+// One page: unwrap `mesh` into a width x height atlas and bake it. bake_all
+// calls this once per page with that page's triangles.
+BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
+                       const MeshAnalysis& source_analysis, const TargetProfile& profile,
+                       const GlobalKnobs& knobs, const BakeOptions& opts,
+                       const std::function<void(float, const char*)>& progress)
 {
     Stopwatch watch;
     BakeResult result;
@@ -817,11 +824,13 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
             // vertex count has spent the vertex limit on seams, and the budget
             // re-fit then stops with two thirds of the triangle budget unused,
             // because the vertex limit is the one that binds. A fresh unwrap
-            // costs 30 to 45 per cent; twice the welded count is as much as
-            // keeping the artist's layout is worth.
+            // costs 30 to 45 per cent; 1.6 times the welded count is as much as
+            // keeping the artist's layout is worth. At 2.0 a character's body,
+            // once its head went to a page of its own, slipped under the line
+            // at 1.9 and came back as 209 charts with strips half as long.
             const float overhead =
                 float(candidate.vertex_count()) / float(std::max<size_t>(1, mesh.vertex_count()));
-            constexpr float kMaxCarriedOverhead = 2.0f;
+            constexpr float kMaxCarriedOverhead = 1.6f;
             const bool affordable =
                 packed.ok && profile.max_vertices > 0 &&
                 candidate.vertex_count() <= size_t(profile.max_vertices) &&
@@ -1225,6 +1234,310 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
             width, height, result.texels_baked, result.rays_cast, result.charts,
             result.uv_utilisation * 100.0f, format_duration(result.seconds).c_str());
     return result;
+}
+
+// Appends a baked part to the whole, carrying every stream the parts share.
+void append_part(Mesh& dst, const Mesh& src, uint8_t page)
+{
+    const uint32_t offset = uint32_t(dst.positions.size());
+    const bool first = dst.positions.empty();
+    auto join = [&](auto& d, const auto& s, bool has) {
+        if (has && (first || !d.empty())) d.insert(d.end(), s.begin(), s.end());
+        else d.clear();
+    };
+    dst.positions.insert(dst.positions.end(), src.positions.begin(), src.positions.end());
+    join(dst.normals, src.normals, src.has_normals());
+    join(dst.uvs,     src.uvs,     src.has_uvs());
+    join(dst.colors,  src.colors,  src.has_colors());
+    join(dst.skin,    src.skin,    src.has_skin());
+    for (uint32_t i : src.indices) dst.indices.push_back(i + offset);
+    const size_t tris = src.triangle_count();
+    if (src.tri_region.size() == tris && (first || !dst.tri_region.empty()))
+        dst.tri_region.insert(dst.tri_region.end(), src.tri_region.begin(), src.tri_region.end());
+    else
+        dst.tri_region.clear();
+    dst.tri_page.insert(dst.tri_page.end(), tris, page);
+    dst.colors_prelit = src.colors_prelit;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> assign_texture_pages(const Mesh& mesh, const TargetProfile& profile)
+{
+    std::vector<uint8_t> page;
+    if (profile.texture.extra_pages.empty() || mesh.empty()) return page;
+    const size_t tcount = mesh.triangle_count();
+    page.assign(tcount, 0);
+
+    const std::vector<ViewCamera> rig = build_camera_rig(mesh, profile);
+    Bvh bvh;
+    bvh.build(mesh);
+    const float diag = std::max(mesh.bounds().diagonal(), 1e-6f);
+    const bool  by_region = mesh.tri_region.size() == tcount;
+
+    bool any = false;
+    for (size_t pi = 0; pi < profile.texture.extra_pages.size() && pi < 254; ++pi) {
+        const TexturePage& spec = profile.texture.extra_pages[pi];
+        const ViewCamera* cam = nullptr;
+        for (const ViewCamera& c : rig)
+            if (c.name == spec.camera) { cam = &c; break; }
+        if (!cam) {
+            RD_WARN("texture page '%s' names camera '%s', which the profile does not have",
+                    spec.name.c_str(), spec.camera.c_str());
+            continue;
+        }
+
+        // What the camera sees: facing it, inside the middle of its frame, and
+        // not behind anything else of the model.
+        const Mat4 vp = cam->view_proj(1.0f);
+        std::vector<uint8_t> seen(tcount, 0);
+        for (size_t t = 0; t < tcount; ++t) {
+            if (page[t] != 0) continue;
+            const Vec3 c = mesh.triangle_centroid(t);
+            const Vec3 n = mesh.triangle_normal(t);
+            const Vec3 to_eye = cam->eye - c;
+            const float dist = length(to_eye);
+            if (dist <= 0.0f || dot(n, to_eye) <= 0.0f) continue;
+            const Vec4 h = vp * Vec4{c.x, c.y, c.z, 1.0f};
+            if (h.w <= 0.0f) continue;
+            const float x = h.x / h.w, y = h.y / h.w;
+            // The middle half of the frame is what the shot is of; its edges
+            // are where a face shot cuts through the neck and shoulders.
+            if (std::fabs(x) > 0.5f || std::fabs(y) > 0.5f) continue;
+            const Vec3 dir = to_eye / dist;
+            if (bvh.occluded(c + n * (diag * 1e-4f), dir, diag * 1e-4f, dist)) continue;
+            seen[t] = 1;
+        }
+
+        // The page takes everything within reach of what the camera sees, back
+        // included, so a head is one piece on one page rather than a face with
+        // a seam round its ears. Reach is the seen core's own extent: the ball
+        // round a face holds the head and stops at the collar. This used to go
+        // by segmentation region, which changes with every budget attempt, so
+        // the same head came out as 3% of the surface on one attempt and 15%
+        // - half a chest - on the next.
+        std::vector<uint8_t> claim(tcount, 0);
+        {
+            Vec3   centre{};
+            double weight = 0.0;
+            for (size_t t = 0; t < tcount; ++t)
+                if (seen[t]) {
+                    const double w = mesh.triangle_area(t);
+                    centre = centre + mesh.triangle_centroid(t) * float(w);
+                    weight += w;
+                }
+            if (weight > 0.0) {
+                centre = centre * float(1.0 / weight);
+                std::vector<float> reach;
+                for (size_t t = 0; t < tcount; ++t)
+                    if (seen[t]) reach.push_back(length(mesh.triangle_centroid(t) - centre));
+                std::sort(reach.begin(), reach.end());
+                const float radius = reach[size_t(0.90 * double(reach.size() - 1))] * 1.1f;
+                for (size_t t = 0; t < tcount; ++t)
+                    if (length(mesh.triangle_centroid(t) - centre) <= radius) claim[t] = 1;
+            }
+
+            // A ball cuts through triangles wherever it happens to, leaving a
+            // ragged edge and single triangles stranded on the wrong side, and
+            // every stranded triangle is a chart of its own in one atlas or
+            // the other: the body page went from 60 charts to 190. So the edge
+            // is smoothed by majority - a triangle goes with two of its three
+            // neighbours - and only the piece holding the face is kept.
+            MeshTopology topo;
+            topo.build(mesh);
+            for (int pass = 0; pass < 3; ++pass) {
+                std::vector<uint8_t> next_claim = claim;
+                for (size_t t = 0; t < tcount; ++t) {
+                    int votes = 0, known = 0;
+                    for (int c = 0; c < 3; ++c) {
+                        const uint32_t nb = topo.neighbour(uint32_t(t), c);
+                        if (nb == kInvalidIndex) continue;
+                        ++known;
+                        votes += claim[nb];
+                    }
+                    if (known == 3 && votes >= 2) next_claim[t] = 1;
+                    if (known == 3 && votes <= 1) next_claim[t] = 0;
+                }
+                claim.swap(next_claim);
+            }
+            // Flood from the most central seen triangle.
+            size_t seed = tcount;
+            float  best = std::numeric_limits<float>::max();
+            for (size_t t = 0; t < tcount; ++t)
+                if (seen[t] && claim[t]) {
+                    const float d = length(mesh.triangle_centroid(t) - centre);
+                    if (d < best) { best = d; seed = t; }
+                }
+            std::vector<uint8_t> kept(tcount, 0);
+            if (seed < tcount) {
+                std::vector<uint32_t> stack{uint32_t(seed)};
+                kept[seed] = 1;
+                while (!stack.empty()) {
+                    const uint32_t t = stack.back();
+                    stack.pop_back();
+                    for (int c = 0; c < 3; ++c) {
+                        const uint32_t nb = topo.neighbour(t, c);
+                        if (nb != kInvalidIndex && claim[nb] && !kept[nb]) {
+                            kept[nb] = 1;
+                            stack.push_back(nb);
+                        }
+                    }
+                }
+            }
+            claim.swap(kept);
+        }
+        (void)by_region;
+
+        double claimed = 0.0, total = 0.0;
+        for (size_t t = 0; t < tcount; ++t) {
+            total += mesh.triangle_area(t);
+            if (claim[t] && page[t] == 0) claimed += mesh.triangle_area(t);
+        }
+        size_t claimed_tris = 0;
+        for (size_t t = 0; t < tcount; ++t) claimed_tris += claim[t] && page[t] == 0;
+        // A page that would take most of the model is not a close up of a
+        // part; the camera frames everything and the split buys nothing. One
+        // that takes a sliver - a statue under a face camera meant for a
+        // person - is an atlas for a dozen texels' worth of surface.
+        if (claimed <= 0.01 * total || claimed_tris < 12 || claimed > 0.5 * total) {
+            RD_INFO("texture page '%s': camera '%s' claims %.0f%% of the surface; not split",
+                    spec.name.c_str(), spec.camera.c_str(), total > 0.0 ? 100.0 * claimed / total : 0.0);
+            continue;
+        }
+        for (size_t t = 0; t < tcount; ++t)
+            if (claim[t] && page[t] == 0) page[t] = uint8_t(pi + 1);
+        any = true;
+        RD_INFO("texture page '%s' (%dx%d): %.0f%% of the surface, from camera '%s'",
+                spec.name.c_str(), spec.width, spec.height, 100.0 * claimed / total,
+                spec.camera.c_str());
+    }
+    if (!any) page.clear();
+    return page;
+}
+
+BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
+                    const MeshAnalysis& source_analysis, const TargetProfile& profile,
+                    const GlobalKnobs& knobs, const BakeOptions& opts,
+                    const std::function<void(float, const char*)>& progress)
+{
+    const std::vector<uint8_t> page = assign_texture_pages(mesh, profile);
+    if (page.empty()) {
+        mesh.tri_page.clear();
+        BakeResult r = bake_single(mesh, source, source_bvh, source_analysis, profile, knobs,
+                                   opts, progress);
+        r.page0_triangles = mesh.triangle_count();
+        return r;
+    }
+
+    // Each page is its own unwrap and its own bake: a separate atlas, packed
+    // for its own size, with its own palette. The parts are then put back
+    // together with every triangle knowing its page.
+    const size_t pages = profile.texture.extra_pages.size() + 1;
+    Mesh merged;
+    merged.name             = mesh.name;
+    merged.armature         = mesh.armature;
+    merged.import_transform = mesh.import_transform;
+    merged.import_scale     = mesh.import_scale;
+
+    BakeResult total;
+    Stopwatch watch;
+    float worst_stretch = 0.0f;
+    for (size_t p = 0; p < pages; ++p) {
+        std::vector<bool> mask(page.size());
+        size_t count = 0;
+        for (size_t t = 0; t < page.size(); ++t) { mask[t] = page[t] == p; count += mask[t]; }
+        if (count == 0) {
+            if (p > 0) total.extra_pages.push_back({profile.texture.extra_pages[p - 1].name});
+            continue;
+        }
+        Mesh part = mesh_extract(mesh, mask);
+        part.tri_page.clear();
+
+        BakeOptions po = opts;
+        if (p > 0) {
+            po.texture_width  = profile.texture.extra_pages[p - 1].width;
+            po.texture_height = profile.texture.extra_pages[p - 1].height;
+        }
+        const float lo = float(p) / float(pages), hi = float(p + 1) / float(pages);
+        BakeResult r = bake_single(part, source, source_bvh, source_analysis, profile, knobs,
+                                   po, [&](float f, const char* what) {
+                                       if (progress) progress(lo + (hi - lo) * f, what);
+                                   });
+        if (!r.ok) return r;
+        append_part(merged, part, uint8_t(p));
+
+        worst_stretch = std::max(worst_stretch, r.uv_max_stretch);
+        total.charts       += r.charts;
+        total.texels_baked += r.texels_baked;
+        total.rays_cast    += r.rays_cast;
+        total.atlas_count  += r.atlas_count;
+        for (std::string& m : r.messages) total.messages.push_back(std::move(m));
+        if (p == 0) {
+            total.diffuse        = std::move(r.diffuse);
+            total.coverage       = std::move(r.coverage);
+            total.palette        = std::move(r.palette);
+            total.uv_utilisation = r.uv_utilisation;
+            total.page0_triangles = count;
+        } else {
+            BakeResult::Page pg;
+            pg.name      = profile.texture.extra_pages[p - 1].name;
+            pg.diffuse   = std::move(r.diffuse);
+            pg.coverage  = std::move(r.coverage);
+            pg.palette   = std::move(r.palette);
+            pg.triangles = count;
+            total.extra_pages.push_back(std::move(pg));
+        }
+    }
+
+    mesh = std::move(merged);
+    total.uv_max_stretch = worst_stretch;
+    total.ok      = true;
+    total.seconds = watch.seconds();
+    total.messages.push_back(format("%zu texture pages", pages));
+    return total;
+}
+
+Texture display_atlas(const Mesh& mesh, const BakeResult& bake, Mesh& display_mesh)
+{
+    display_mesh = mesh;
+    if (bake.extra_pages.empty() || !mesh.has_pages() || !mesh.has_uvs()) return bake.diffuse;
+
+    // Every page scaled to the tallest page's height, side by side.
+    std::vector<const Texture*> tex{&bake.diffuse};
+    for (const BakeResult::Page& p : bake.extra_pages) tex.push_back(&p.diffuse);
+    int height = 0;
+    for (const Texture* t : tex) height = std::max(height, t->height);
+    if (height <= 0) return bake.diffuse;
+    std::vector<int> x0, w;
+    int width = 0;
+    for (const Texture* t : tex) {
+        const int ww = t->empty() ? 0 : int(std::lround(float(t->width) * float(height) / float(t->height)));
+        x0.push_back(width);
+        w.push_back(ww);
+        width += ww;
+    }
+    Texture out;
+    out.resize(width, height, 4);
+    for (size_t i = 0; i < tex.size(); ++i) {
+        const Texture& t = *tex[i];
+        if (t.empty()) continue;
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < w[i]; ++x)
+                out.set(x0[i] + x, y, t.get(x * t.width / w[i], y * t.height / height));
+    }
+
+    // A vertex belongs to the page of any triangle using it; the bake gave
+    // each page its own vertices, so they never disagree.
+    std::vector<int> vpage(mesh.vertex_count(), 0);
+    for (size_t t = 0; t < mesh.triangle_count(); ++t)
+        for (int c = 0; c < 3; ++c) vpage[mesh.indices[t * 3 + c]] = mesh.tri_page[t];
+    for (size_t v = 0; v < mesh.vertex_count(); ++v) {
+        const int p = std::min<int>(vpage[v], int(tex.size()) - 1);
+        display_mesh.uvs[v] = {(float(x0[p]) + mesh.uvs[v].x * float(w[p])) / float(width),
+                               mesh.uvs[v].y};
+    }
+    return out;
 }
 
 } // namespace rd

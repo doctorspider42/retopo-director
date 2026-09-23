@@ -47,9 +47,22 @@ struct BakeOptions {
 };
 
 struct BakeResult {
+    // Page 0: the profile's main atlas.
     Texture      diffuse;
     CoverageMask coverage;
     Palette      palette;
+
+    // The profile's extra pages, in order; page i + 1 of the mesh's tri_page.
+    // Each has its own palette, as each would have its own CLUT on the target.
+    struct Page {
+        std::string  name;
+        Texture      diffuse;
+        CoverageMask coverage;
+        Palette      palette;
+        size_t       triangles = 0;
+    };
+    std::vector<Page> extra_pages;
+    size_t page0_triangles = 0;
 
     bool   ok = false;
     int    charts = 0;
@@ -69,6 +82,18 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                     const MeshAnalysis& source_analysis, const TargetProfile& profile,
                     const GlobalKnobs& knobs, const BakeOptions& opts = {},
                     const std::function<void(float, const char*)>& progress = nullptr);
+
+// Which page each triangle of `mesh` belongs on, from the profile's extra
+// pages: the regions a page's camera sees most of go to that page, whole, so
+// the back of the head travels with the face rather than being cut off by a
+// seam. Empty when the profile has no extra page or nothing qualifies.
+std::vector<uint8_t> assign_texture_pages(const Mesh& mesh, const TargetProfile& profile);
+
+// Everything the viewport and the candidate renders need to show a multi page
+// bake with one texture: the pages side by side at the height of the tallest,
+// and a copy of the mesh with its uvs moved into that layout. With one page it
+// is the diffuse and the mesh as they are. Display only - nothing ships this.
+Texture display_atlas(const Mesh& mesh, const BakeResult& bake, Mesh& display_mesh);
 
 // Unwrap on its own, for the UV preview in the viewport.
 struct UnwrapResult {

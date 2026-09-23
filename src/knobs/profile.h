@@ -28,12 +28,26 @@ struct ProfileCamera {
     bool        primary       = false;   // weighted higher in silhouette scoring
 };
 
+// A texture page beyond the first: a named part of the model that gets an atlas
+// of its own. The part is whatever the named camera frames - a face camera's
+// page is the head - so a cutscene close up can have the texels it needs
+// without the whole body's atlas growing to match.
+struct TexturePage {
+    std::string name   = "face";
+    int         width  = 512;
+    int         height = 512;
+    std::string camera = "cutscene_face";
+};
+
 struct TextureBudget {
     int  width          = 256;
     int  height         = 256;
     int  palette_colors = 256;   // 256 = 8 bit CLUT, 16 = 4 bit CLUT, 0 = truecolor
     bool dithering      = true;
     int  count          = 1;     // how many pages the target allows
+    // Pages after the first. The first page is width x height and takes
+    // everything no extra page claims.
+    std::vector<TexturePage> extra_pages;
 };
 
 struct TargetProfile {

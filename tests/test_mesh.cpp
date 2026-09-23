@@ -3,6 +3,8 @@
 
 #include "test.h"
 
+#include "bake/bake.h"
+#include "export/exporter.h"
 #include "geom/hard_rules.h"
 #include "mesh/analysis.h"
 #include "mesh/bvh.h"
@@ -520,4 +522,58 @@ TEST(small_holes_are_closed_unless_the_source_has_them)
     analyse_mesh(open_src, an2, ao);
     Mesh holed2 = mesh_extract(low, keep);
     CHECK_EQ(fill_small_holes(holed2, an2.bvh, an2, 12), size_t(0));
+}
+
+// Two texture pages: the display atlas puts them side by side and moves each
+// page's uvs into its half, and the export writes a material per page that
+// the loader reads back.
+TEST(texture_pages_display_and_export)
+{
+    Mesh m;
+    m.positions = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {2, 0, 0}, {3, 0, 0}, {2, 1, 0}};
+    m.indices   = {0, 1, 2, 3, 4, 5};
+    m.uvs       = {{0, 0}, {1, 0}, {0, 1}, {0, 0}, {1, 0}, {0, 1}};
+    m.tri_page  = {0, 1};
+
+    BakeResult bake;
+    bake.ok = true;
+    bake.diffuse.resize(256, 256, 4);
+    BakeResult::Page face;
+    face.name = "face";
+    face.diffuse.resize(512, 512, 4);
+    for (int y = 0; y < 512; ++y)
+        for (int x = 0; x < 512; ++x) face.diffuse.set(x, y, {1, 0, 0, 1});
+    bake.extra_pages.push_back(face);
+
+    Mesh shown;
+    const Texture atlas = display_atlas(m, bake, shown);
+    CHECK_EQ(atlas.width, 1024);
+    CHECK_EQ(atlas.height, 512);
+    CHECK_NEAR(shown.uvs[1].x, 0.5, 1e-5);     // page 0, u = 1 -> the middle
+    CHECK_NEAR(shown.uvs[4].x, 1.0, 1e-5);     // page 1, u = 1 -> the right edge
+    CHECK_NEAR(shown.uvs[3].x, 0.5, 1e-5);     // page 1, u = 0 -> the middle
+    CHECK(atlas.get(700, 100).x > 0.9f);       // the face page's red, on the right
+
+    const auto dir = std::filesystem::temp_directory_path() / "rd_test_pages";
+    std::filesystem::remove_all(dir);
+    TargetProfile profile = TargetProfile::ps2_character_default();
+    profile.require_strips = false;
+    ExportOptions eo;
+    eo.write_obj = false;
+    eo.write_binary = false;
+    eo.write_indexed_texture = false;
+    eo.base_name = "paged";
+    Mesh to_ship = m;
+    const ExportResult r = export_asset(to_ship, bake.diffuse, bake.palette, profile, dir, eo,
+                                        bake.extra_pages);
+    REQUIRE(r.ok);
+    Mesh back;
+    meshio::LoadOptions lo;
+    lo.weld = false;
+    const meshio::LoadReport rep = meshio::load(dir / "paged.gltf", back, lo);
+    std::filesystem::remove_all(dir);
+    REQUIRE(rep.ok);
+    CHECK_EQ(back.triangle_count(), size_t(2));
+    REQUIRE(back.materials != nullptr);
+    CHECK_EQ(back.materials->materials.size(), size_t(2));
 }

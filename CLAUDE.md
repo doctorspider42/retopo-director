@@ -152,6 +152,12 @@ texture upside down in the bake.
 sources run through themselves at every fold, and a texel that lands on such a
 point sees nothing from there: that drew black scribbles over every character.
 
+**A low poly can have more than one texture page.** `Mesh::tri_page` says
+which; `ps2_character` gives the head a 512 page of its own, claimed by the
+`cutscene_face` camera. Each page is its own unwrap, bake and palette, the
+exporter keeps pages contiguous and never strips across them, and anything
+that shows the result with one texture goes through `display_atlas`.
+
 **A source's vertex colours are not lighting.** `Mesh::colors_prelit` says
 whether they carry baked light, and only the bake sets it. Assets ship colour
 channels as shader masks (every Quaternius character has COLOR_0 all white),

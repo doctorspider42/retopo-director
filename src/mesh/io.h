@@ -66,6 +66,9 @@ struct SaveOptions {
     bool write_colors             = true;
     bool binary                   = false;       // glTF only: emit .glb
     std::string texture_file;                    // referenced from the material
+    // One texture per page when the mesh has tri_page: page p's triangles get
+    // a material of their own reading page_textures[p].
+    std::vector<std::string> page_textures;
 };
 
 bool save_obj(const fs::path& path, const Mesh& mesh, const SaveOptions& opts = {},

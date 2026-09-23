@@ -161,6 +161,13 @@ Json TargetProfile::to_json() const
     t["require_uvs"]              = require_uvs;
     t["require_vertex_colors"]    = require_vertex_colors;
     t["bake_lighting_to_diffuse"] = bake_lighting_to_diffuse;
+    if (!texture.extra_pages.empty()) {
+        Json pages = Json::array();
+        for (const TexturePage& pg : texture.extra_pages)
+            pages.push_back(Json{{"name", pg.name}, {"width", pg.width}, {"height", pg.height},
+                                 {"camera", pg.camera}});
+        t["pages"] = pages;
+    }
     j["texture"] = t;
 
     Json q;
@@ -214,6 +221,16 @@ TargetProfile TargetProfile::from_json(const Json& j, std::string* error)
     p.texture.palette_colors = json_get<int>(t, "palette_colors", p.texture.palette_colors);
     p.texture.dithering      = json_get<bool>(t, "dithering", p.texture.dithering);
     p.texture.count          = json_get<int>(t, "count", p.texture.count);
+    p.texture.extra_pages.clear();
+    for (const Json& pg : json_array_or_empty(t, "pages")) {
+        if (!pg.is_object()) continue;
+        TexturePage page;
+        page.name   = json_get<std::string>(pg, "name", page.name);
+        page.width  = std::clamp(json_get<int>(pg, "width", page.width), 16, 4096);
+        page.height = std::clamp(json_get<int>(pg, "height", page.height), 16, 4096);
+        page.camera = json_get<std::string>(pg, "camera", page.camera);
+        p.texture.extra_pages.push_back(page);
+    }
     p.require_uvs               = json_get<bool>(t, "require_uvs", p.require_uvs);
     p.require_vertex_colors     = json_get<bool>(t, "require_vertex_colors", p.require_vertex_colors);
     p.bake_lighting_to_diffuse  = json_get<bool>(t, "bake_lighting_to_diffuse", p.bake_lighting_to_diffuse);

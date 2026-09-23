@@ -45,6 +45,7 @@ Flags:
 | 2 | vertex colours present |
 | 3 | skin present |
 | 4 | strips present |
+| 5 | texture page table present |
 
 ### Streams, in order, each present only if its flag is set
 
@@ -61,6 +62,17 @@ Flags:
 `u32` triangle list, `3 × triangle count` entries, in vertex-cache order.
 Then, when the strips flag is set, `u32` strip indices, `strip index count`
 entries, runs separated by the restart index.
+
+With more than one texture page the triangles are grouped by page, in page
+order, and no strip crosses from one page to the next.
+
+### Texture pages
+
+When bit 5 is set: `u32` page count, then per page `u32` first triangle,
+`u32` triangle count, `u32` first strip index, `u32` strip index count. Page 0
+is `<name>_diffuse.png`; page `p` is the profile's `texture.pages[p - 1]`,
+written as `<name>_<page name>_diffuse.png` with its own index image and CLUT.
+Uvs of a page's triangles point into that page's image.
 
 ### Skeleton
 
@@ -84,8 +96,8 @@ and a diff between two runs is readable.
 
 ## glTF
 
-A single buffer with one view per stream and a `mode: 4` primitive. The material
-references the baked diffuse when there is one. `--glb` packs it into one file.
+A single buffer with one view per stream and a `mode: 4` primitive per texture
+page, each with a material referencing that page's image. `--glb` packs it into one file.
 Positions are written back through the import transform, so the asset comes out
 in the space the source file used, not in the normalised space the pipeline
 works in.

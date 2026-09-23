@@ -87,6 +87,7 @@ void Mesh::clear()
     skin.clear();
     indices.clear();
     tri_region.clear();
+    tri_page.clear();
     tri_material.clear();
     corner_uvs.clear();
     materials.reset();
@@ -209,8 +210,10 @@ size_t Mesh::remove_degenerate(float area_epsilon)
     std::vector<uint32_t> kept;
     kept.reserve(indices.size());
     std::vector<uint16_t> kept_regions, kept_materials;
+    std::vector<uint8_t>  kept_pages;
     const bool has_regions   = tri_region.size() == before;
     const bool has_materials = tri_material.size() == before;
+    const bool has_page_ids  = tri_page.size() == before;
     if (has_regions)   kept_regions.reserve(before);
     if (has_materials) kept_materials.reserve(before);
 
@@ -225,9 +228,11 @@ size_t Mesh::remove_degenerate(float area_epsilon)
         kept.push_back(a); kept.push_back(b); kept.push_back(c);
         if (has_regions)   kept_regions.push_back(tri_region[t]);
         if (has_materials) kept_materials.push_back(tri_material[t]);
+        if (has_page_ids)  kept_pages.push_back(tri_page[t]);
     }
 
     indices.swap(kept);
+    if (has_page_ids)  tri_page.swap(kept_pages);
     if (has_regions)   tri_region.swap(kept_regions);
     if (has_materials) tri_material.swap(kept_materials);
     return before - triangle_count();
@@ -465,6 +470,7 @@ Mesh mesh_extract(const Mesh& src, const std::vector<bool>& tri_mask,
     const bool keep_r = src.tri_region.size()   == src.triangle_count();
     const bool keep_m = src.tri_material.size() == src.triangle_count();
     const bool keep_u = src.has_corner_uvs();
+    const bool keep_p = src.has_pages();
     out.materials     = src.materials;
     out.colors_prelit = src.colors_prelit;
 
@@ -484,6 +490,7 @@ Mesh mesh_extract(const Mesh& src, const std::vector<bool>& tri_mask,
         }
         if (keep_r) out.tri_region.push_back(src.tri_region[t]);
         if (keep_m) out.tri_material.push_back(src.tri_material[t]);
+        if (keep_p) out.tri_page.push_back(src.tri_page[t]);
         if (keep_u)
             for (int c = 0; c < 3; ++c) out.corner_uvs.push_back(src.corner_uvs[t * 3 + c]);
     }

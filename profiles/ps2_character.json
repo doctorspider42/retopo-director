@@ -19,10 +19,18 @@
     "height": 256,
     "palette_colors": 256,
     "dithering": true,
-    "count": 1,
+    "count": 2,
     "require_uvs": true,
     "require_vertex_colors": true,
-    "bake_lighting_to_diffuse": true
+    "bake_lighting_to_diffuse": true,
+    "pages": [
+      {
+        "name": "face",
+        "width": 512,
+        "height": 512,
+        "camera": "cutscene_face"
+      }
+    ]
   },
   "quality": {
     "target_silhouette_error": 0.02,

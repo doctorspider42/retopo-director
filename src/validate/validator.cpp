@@ -333,6 +333,27 @@ ValidationReport validate(const ValidationInput& in)
                          : format("palette has %d entries, the target allows %d",
                                   used, profile.texture.palette_colors));
             }
+            // Extra pages, each against its own size in the profile.
+            for (size_t p = 0; p < bake.extra_pages.size(); ++p) {
+                const BakeResult::Page& page = bake.extra_pages[p];
+                if (page.diffuse.empty()) continue;
+                const TexturePage* spec = p < profile.texture.extra_pages.size()
+                                              ? &profile.texture.extra_pages[p] : nullptr;
+                const bool ok = spec && page.diffuse.width <= spec->width &&
+                                page.diffuse.height <= spec->height;
+                check("texture.size", "Texture size: " + page.name, ok, Severity::Error,
+                      double(page.diffuse.width), spec ? spec->width : 0,
+                      format("%dx%d, %zu triangles", page.diffuse.width, page.diffuse.height,
+                             page.triangles), page.name);
+                if (profile.texture.palette_colors > 0) {
+                    const int used = int(page.palette.size());
+                    const bool pok = used > 0 && used <= profile.texture.palette_colors;
+                    check("texture.palette", "Palette: " + page.name, pok, Severity::Error, used,
+                          profile.texture.palette_colors,
+                          format("%d colours of %d allowed", used, profile.texture.palette_colors),
+                          page.name);
+                }
+            }
             {
                 const bool ok = bake.atlas_count <= profile.texture.count;
                 check("texture.pages", "Atlas pages", ok, Severity::Error,

@@ -44,6 +44,40 @@ std::vector<std::vector<uint32_t>> split_strips(const StripData& data)
     return out;
 }
 
+namespace {
+
+// Triangles grouped by texture page, in page order, keeping the order within a
+// page. Returns each page's [begin, end) in triangles. Every page is a draw of
+// its own on the target, so everything downstream works page by page.
+std::vector<std::pair<size_t, size_t>> group_by_page(Mesh& mesh)
+{
+    const size_t tcount = mesh.triangle_count();
+    if (!mesh.has_pages()) return {{0, tcount}};
+    const int pages = 1 + *std::max_element(mesh.tri_page.begin(), mesh.tri_page.end());
+    std::vector<uint32_t> indices;
+    std::vector<uint16_t> regions;
+    std::vector<uint8_t>  page_ids;
+    const bool keep_regions = mesh.tri_region.size() == tcount;
+    std::vector<std::pair<size_t, size_t>> ranges;
+    for (int p = 0; p < pages; ++p) {
+        const size_t begin = indices.size() / 3;
+        for (size_t t = 0; t < tcount; ++t) {
+            if (mesh.tri_page[t] != p) continue;
+            indices.insert(indices.end(), mesh.indices.begin() + long(t * 3),
+                           mesh.indices.begin() + long(t * 3 + 3));
+            if (keep_regions) regions.push_back(mesh.tri_region[t]);
+            page_ids.push_back(uint8_t(p));
+        }
+        ranges.push_back({begin, indices.size() / 3});
+    }
+    mesh.indices.swap(indices);
+    mesh.tri_page.swap(page_ids);
+    if (keep_regions) mesh.tri_region.swap(regions);
+    return ranges;
+}
+
+} // namespace
+
 OptimiseReport optimise_for_target(Mesh& mesh, const TargetProfile& profile)
 {
     OptimiseReport rep;
@@ -61,18 +95,16 @@ OptimiseReport optimise_for_target(Mesh& mesh, const TargetProfile& profile)
         rep.atvr_before = before.atvr;
     }
 
-    // 1. Cache friendly triangle order.
-    std::vector<uint32_t> ordered(index_count);
-    meshopt_optimizeVertexCacheStrip(ordered.data(), mesh.indices.data(), index_count,
-                                     vertex_count);
-    mesh.indices.swap(ordered);
-
-    // 2. Overdraw: only worth doing when we actually have positions to sort by.
-    {
-        std::vector<uint32_t> overdrawn(index_count);
-        meshopt_optimizeOverdraw(overdrawn.data(), mesh.indices.data(), index_count,
-                                 &mesh.positions[0].x, vertex_count, sizeof(Vec3), 1.02f);
-        mesh.indices.swap(overdrawn);
+    // 1 and 2, cache order then overdraw, within each texture page: a page is a
+    // draw of its own, so triangles must not wander from one page to another.
+    for (const auto& [begin, end] : group_by_page(mesh)) {
+        const size_t count = (end - begin) * 3;
+        if (count == 0) continue;
+        uint32_t* range = mesh.indices.data() + begin * 3;
+        std::vector<uint32_t> ordered(count);
+        meshopt_optimizeVertexCacheStrip(ordered.data(), range, count, vertex_count);
+        meshopt_optimizeOverdraw(range, ordered.data(), count, &mesh.positions[0].x,
+                                 vertex_count, sizeof(Vec3), 1.02f);
     }
 
     // 3. Fetch order: remap the vertices so the index buffer walks forward.
@@ -130,12 +162,26 @@ StripData build_strips(const Mesh& mesh, const TargetProfile& profile)
     StripData data;
     if (mesh.empty()) return data;
 
-    const size_t bound = meshopt_stripifyBound(mesh.indices.size());
-    data.indices.resize(bound);
-    const size_t count = meshopt_stripify(data.indices.data(), mesh.indices.data(),
-                                          mesh.indices.size(), mesh.vertex_count(),
-                                          data.restart_index);
-    data.indices.resize(count);
+    // Page by page, so no strip crosses from one texture to another. Pages
+    // are contiguous runs of triangles once optimise_for_target has run; on a
+    // mesh that has not been through it they are grouped here, on a copy.
+    Mesh grouped = mesh;
+    const auto ranges = group_by_page(grouped);
+    for (const auto& [begin, end] : ranges) {
+        StripData::PageRange pr{uint32_t(begin), uint32_t(end - begin),
+                                uint32_t(data.indices.size()), 0};
+        const size_t count = (end - begin) * 3;
+        if (count > 0) {
+            if (!data.indices.empty()) data.indices.push_back(data.restart_index);
+            pr.first_index = uint32_t(data.indices.size());
+            std::vector<uint32_t> strip(meshopt_stripifyBound(count));
+            const size_t n = meshopt_stripify(strip.data(), grouped.indices.data() + begin * 3,
+                                              count, grouped.vertex_count(), data.restart_index);
+            data.indices.insert(data.indices.end(), strip.begin(), strip.begin() + long(n));
+            pr.index_count = uint32_t(data.indices.size()) - pr.first_index;
+        }
+        if (grouped.has_pages()) data.pages.push_back(pr);
+    }
 
     const auto runs = split_strips(data);
     data.strip_count = runs.size();
@@ -173,6 +219,7 @@ bool write_rdmesh(const fs::path& path, const Mesh& mesh, const StripData& strip
     if (mesh.has_colors())  flags |= 1u << 2;
     if (mesh.has_skin())    flags |= 1u << 3;
     if (!strips.indices.empty()) flags |= 1u << 4;
+    if (!strips.pages.empty())   flags |= 1u << 5;
 
     put_u32(out, flags);
     put_u32(out, uint32_t(mesh.vertex_count()));
@@ -213,6 +260,17 @@ bool write_rdmesh(const fs::path& path, const Mesh& mesh, const StripData& strip
     for (uint32_t i : mesh.indices) put_u32(out, i);
     for (uint32_t i : strips.indices) put_u32(out, i);
 
+    // --- texture pages ------------------------------------------------------
+    if (!strips.pages.empty()) {
+        put_u32(out, uint32_t(strips.pages.size()));
+        for (const StripData::PageRange& p : strips.pages) {
+            put_u32(out, p.first_triangle);
+            put_u32(out, p.triangle_count);
+            put_u32(out, p.first_index);
+            put_u32(out, p.index_count);
+        }
+    }
+
     // --- skeleton -----------------------------------------------------------
     put_u32(out, uint32_t(mesh.armature.size()));
     for (const Joint& j : mesh.armature.joints) {
@@ -235,7 +293,8 @@ bool write_rdmesh(const fs::path& path, const Mesh& mesh, const StripData& strip
 // ---------------------------------------------------------------------------
 ExportResult export_asset(Mesh& mesh, const Texture& diffuse, const Palette& palette,
                           const TargetProfile& profile, const fs::path& directory,
-                          const ExportOptions& opts)
+                          const ExportOptions& opts,
+                          const std::vector<BakeResult::Page>& extra_pages)
 {
     Stopwatch watch;
     ExportResult result;
@@ -250,6 +309,7 @@ ExportResult export_asset(Mesh& mesh, const Texture& diffuse, const Palette& pal
     }
 
     if (opts.optimise) result.optimisation = optimise_for_target(mesh, profile);
+    else               group_by_page(mesh);
     if (profile.require_strips) result.strips = build_strips(mesh, profile);
 
     const std::string base = opts.base_name.empty() ? "lowpoly" : opts.base_name;
@@ -273,7 +333,33 @@ ExportResult export_asset(Mesh& mesh, const Texture& diffuse, const Palette& pal
         }
     }
 
+    // --- further pages ------------------------------------------------------
+    std::vector<std::string> page_textures;
+    if (!extra_pages.empty() && mesh.has_pages()) {
+        page_textures.push_back(texture_name);
+        for (const BakeResult::Page& page : extra_pages) {
+            std::string name;
+            if (opts.write_texture && !page.diffuse.empty()) {
+                const std::string stem = base + "_" + slugify(page.name) + "_diffuse";
+                const fs::path tex_path = directory / (stem + ".png");
+                if (page.diffuse.save_png(tex_path)) {
+                    result.files.push_back(tex_path);
+                    name = tex_path.filename().string();
+                }
+                if (opts.write_indexed_texture && !page.palette.colors.empty()) {
+                    std::string err;
+                    if (save_indexed(tex_path, page.diffuse, page.palette, &err)) {
+                        result.files.push_back(directory / (stem + "_index.png"));
+                        result.files.push_back(directory / (stem + "_clut.json"));
+                    }
+                }
+            }
+            page_textures.push_back(name);
+        }
+    }
+
     meshio::SaveOptions save;
+    save.page_textures = page_textures;
     save.restore_import_transform = true;
     save.write_normals = true;
     save.write_uvs     = mesh.has_uvs();

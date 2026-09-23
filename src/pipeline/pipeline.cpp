@@ -892,8 +892,12 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         opts.wireframe_overlay = true;
 
         const fs::path iter_dir = paths::iteration_dir(iteration);
-        ViewSet candidate = render_views(retopo.mesh, opts, iter_dir, "lowpoly", nullptr,
-                                         bake.ok ? &bake.diffuse : nullptr, true);
+        // One texture for the renderer: the pages laid side by side.
+        Mesh    display_mesh;
+        Texture display_tex = bake.ok ? display_atlas(retopo.mesh, bake, display_mesh) : Texture{};
+        if (!bake.ok) display_mesh = retopo.mesh;
+        ViewSet candidate = render_views(display_mesh, opts, iter_dir, "lowpoly", nullptr,
+                                         bake.ok ? &display_tex : nullptr, true);
         if (!candidate.ok) RD_WARN("candidate renders unavailable: %s", candidate.error.c_str());
 
         SilhouetteError silhouette;
@@ -904,6 +908,8 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
 
         if (bake.ok && !bake.diffuse.empty())
             bake.diffuse.save_png(iter_dir / "diffuse.png");
+        for (const BakeResult::Page& pg : bake.extra_pages)
+            if (!pg.diffuse.empty()) pg.diffuse.save_png(iter_dir / (slugify(pg.name) + "_diffuse.png"));
         {
             std::string err;
             json_save_file((iter_dir / "knobs.json").string(), panel.to_json(), err);
@@ -1057,11 +1063,13 @@ bool Pipeline::stage_export(const PipelineSettings& s)
     Mesh    mesh;
     Texture diffuse;
     Palette palette;
+    std::vector<BakeResult::Page> pages;
     {
         std::lock_guard lock(results_mutex_);
         mesh    = results_.lowpoly;
         diffuse = results_.bake.diffuse;
         palette = results_.bake.palette;
+        pages   = results_.bake.extra_pages;
     }
     if (mesh.empty()) {
         RD_WARN("nothing to export");
@@ -1076,7 +1084,7 @@ bool Pipeline::stage_export(const PipelineSettings& s)
     }
 
     ExportResult exported = export_asset(mesh, diffuse, palette, s.profile,
-                                         paths::export_dir(), opts);
+                                         paths::export_dir(), opts, pages);
     if (!exported.ok) RD_WARN("export incomplete: %s", exported.error.c_str());
 
     {

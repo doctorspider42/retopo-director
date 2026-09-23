@@ -309,10 +309,16 @@ void AppState::upload_meshes()
         }
 
         if (!r.lowpoly.empty()) {
-            gpu_low.upload(r.lowpoly);
+            // A multi page bake is shown through one texture, the pages side by
+            // side, with the uvs moved to match; the vertex and triangle order
+            // are the low poly's own, so the region overlay below still fits.
+            Mesh    display;
+            Texture atlas = r.bake.ok ? display_atlas(r.lowpoly, r.bake, display) : Texture{};
+            if (!r.bake.ok) display = r.lowpoly;
+            gpu_low.upload(display);
             gpu_low_ok = gpu_low.valid();
-            if (r.bake.ok && !r.bake.diffuse.empty() && show_baked_texture)
-                gpu_low.set_texture(r.bake.diffuse);
+            if (r.bake.ok && !atlas.empty() && show_baked_texture)
+                gpu_low.set_texture(atlas);
             if (!r.lowpoly.tri_region.empty() &&
                 r.lowpoly.tri_region.size() == r.lowpoly.triangle_count()) {
                 // Region colours for the low poly come from its own map.
