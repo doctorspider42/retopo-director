@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The build that ships: MinGW, static, the same preset build.cmd uses. The
+  # runner has no GPU, so the pipeline runs with --no-gpu; the silhouette metric
+  # is checked by tools/bench.py on a machine that has one.
+  windows-mingw:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-numpy
+      - name: configure
+        run: cmake --preset mingw-release -DRD_WARNINGS_AS_ERRORS=OFF
+      - name: build
+        run: cmake --build --preset mingw-release
+      - name: test
+        run: ctest --preset mingw-release
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: windows-bench-runs
+          path: build/mingw-release/ctest-bench/runs/*/run.log
+
+  # The engine under the sanitizers. GLFW is built with its null platform, so no
+  # X11 is needed; the window never opens, and neither the tests nor a --no-gpu
+  # headless run needs it to.
+  linux-sanitizers:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [linux-asan, linux-tsan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: packages
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libgl-dev python3-numpy
+      # The runner kernel randomises mmap with more bits than TSan's shadow
+      # layout tolerates ("unexpected memory mapping"); 28 is what it expects.
+      - name: tsan mmap entropy
+        if: matrix.preset == 'linux-tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: test
+        env:
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --preset ${{ matrix.preset }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ${{ matrix.preset }}-runs
+          path: build/${{ matrix.preset }}/ctest-bench/runs/*/run.log

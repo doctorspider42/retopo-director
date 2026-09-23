@@ -20,6 +20,19 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 option(RD_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(RD_LTO               "Enable link time optimisation in release builds" ON)
 option(RD_NATIVE_ARCH       "Optimise for the host CPU" OFF)
+# address, undefined, thread, or a comma list gcc/clang accept. Applied to every
+# target, third party included: a race inside meshoptimizer is still our race.
+set(RD_SANITIZE "" CACHE STRING "Sanitizers to build with, e.g. address,undefined")
+# Builds GLFW with its null platform only, which needs no X11 or Wayland
+# headers. The window cannot open, but headless --no-gpu runs and the unit tests
+# do not need it: this is how the sanitizer builds run on a bare Linux box.
+option(RD_GLFW_NULL_ONLY    "Build GLFW without X11/Wayland (headless Linux)" OFF)
+
+if(RD_SANITIZE)
+    add_compile_options(-fsanitize=${RD_SANITIZE} -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=${RD_SANITIZE})
+    set(RD_LTO OFF CACHE BOOL "" FORCE)
+endif()
 
 # ---------------------------------------------------------------------------
 # Third party.
@@ -34,6 +47,10 @@ set(GLFW_BUILD_DOCS      OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES  OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL         OFF CACHE BOOL "" FORCE)
+if(RD_GLFW_NULL_ONLY)
+    set(GLFW_BUILD_X11     OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+endif()
 FetchContent_Declare(glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git
     GIT_TAG        3.4
@@ -141,30 +158,36 @@ file(GLOB_RECURSE RD_SOURCES CONFIGURE_DEPENDS
      ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 file(GLOB_RECURSE RD_HEADERS CONFIGURE_DEPENDS
      ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
+list(REMOVE_ITEM RD_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
 
-add_executable(retopo-director ${RD_SOURCES} ${RD_HEADERS})
-target_include_directories(retopo-director PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(retopo-director PRIVATE
+# Everything but main() lives in one static library, so the tests link the same
+# object code the application runs rather than a second build of it.
+add_library(rd_engine STATIC ${RD_SOURCES} ${RD_HEADERS})
+target_include_directories(rd_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(rd_engine PUBLIC
     rd_imgui rd_meshoptimizer rd_xatlas rd_extern rd_json rd_ufbx glfw)
 
 find_package(OpenGL REQUIRED)
-target_link_libraries(retopo-director PRIVATE OpenGL::GL)
+target_link_libraries(rd_engine PUBLIC OpenGL::GL)
 
 find_package(Threads REQUIRED)
-target_link_libraries(retopo-director PRIVATE Threads::Threads)
+target_link_libraries(rd_engine PUBLIC Threads::Threads)
 
 if(WIN32)
-    target_link_libraries(retopo-director PRIVATE winhttp shlwapi comdlg32 ole32 shell32)
-    target_compile_definitions(retopo-director PRIVATE
+    target_link_libraries(rd_engine PUBLIC winhttp shlwapi comdlg32 ole32 shell32)
+    target_compile_definitions(rd_engine PUBLIC
         RD_PLATFORM_WINDOWS=1 NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 elseif(APPLE)
-    target_compile_definitions(retopo-director PRIVATE RD_PLATFORM_MACOS=1)
+    target_compile_definitions(rd_engine PUBLIC RD_PLATFORM_MACOS=1)
 else()
-    target_compile_definitions(retopo-director PRIVATE RD_PLATFORM_LINUX=1)
-    target_link_libraries(retopo-director PRIVATE ${CMAKE_DL_LIBS})
+    target_compile_definitions(rd_engine PUBLIC RD_PLATFORM_LINUX=1)
+    target_link_libraries(rd_engine PUBLIC ${CMAKE_DL_LIBS})
 endif()
 
-target_compile_definitions(retopo-director PRIVATE RD_VERSION_STRING="${PROJECT_VERSION}")
+target_compile_definitions(rd_engine PUBLIC RD_VERSION_STRING="${PROJECT_VERSION}")
+
+add_executable(retopo-director ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
+target_link_libraries(retopo-director PRIVATE rd_engine)
 
 # MinGW links libstdc++, libgcc and winpthread dynamically by default, which
 # makes the executable useless outside a shell that has the toolchain on PATH.
@@ -174,26 +197,29 @@ if(MINGW)
         -static-libgcc -static-libstdc++ -static)
 endif()
 
-if(MSVC)
-    target_compile_options(retopo-director PRIVATE /W4 /permissive- /MP /utf-8)
-    if(RD_WARNINGS_AS_ERRORS)
-        target_compile_options(retopo-director PRIVATE /WX)
+foreach(tgt rd_engine retopo-director)
+    if(MSVC)
+        target_compile_options(${tgt} PRIVATE /W4 /permissive- /MP /utf-8)
+        if(RD_WARNINGS_AS_ERRORS)
+            target_compile_options(${tgt} PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(${tgt} PRIVATE
+            -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
+        if(RD_WARNINGS_AS_ERRORS)
+            target_compile_options(${tgt} PRIVATE -Werror)
+        endif()
+        if(RD_NATIVE_ARCH)
+            target_compile_options(${tgt} PRIVATE -march=native)
+        endif()
     endif()
-else()
-    target_compile_options(retopo-director PRIVATE
-        -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
-    if(RD_WARNINGS_AS_ERRORS)
-        target_compile_options(retopo-director PRIVATE -Werror)
-    endif()
-    if(RD_NATIVE_ARCH)
-        target_compile_options(retopo-director PRIVATE -march=native)
-    endif()
-endif()
+endforeach()
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT RD_IPO_OK OUTPUT RD_IPO_MSG)
 if(RD_LTO AND RD_IPO_OK)
     set_property(TARGET retopo-director  PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET rd_engine        PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET rd_meshoptimizer PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET rd_ufbx          PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
@@ -209,6 +235,16 @@ add_custom_command(TARGET retopo-director POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_CURRENT_SOURCE_DIR}/tools $<TARGET_FILE_DIR:retopo-director>/tools
     COMMENT "Staging the segmentation sidecar")
+
+# ---------------------------------------------------------------------------
+# Tests: unit tests in one executable, plus whole-pipeline runs on the
+# synthetic meshes. `ctest --preset <name>` runs both.
+# ---------------------------------------------------------------------------
+option(RD_BUILD_TESTS "Build the test executable and register CTest cases" ON)
+if(RD_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
 
 message(STATUS "-------------------------------------------------")
 message(STATUS " Retopo Director ${PROJECT_VERSION}")
