@@ -83,6 +83,7 @@ void Mesh::clear()
     normals.clear();
     uvs.clear();
     colors.clear();
+    colors_prelit = false;
     skin.clear();
     indices.clear();
     tri_region.clear();

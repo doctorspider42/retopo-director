@@ -1065,6 +1065,7 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
         report(0.86f, "vertex colours");
         const size_t vcount = mesh.vertex_count();
         mesh.colors.assign(vcount, Vec4{1, 1, 1, 1});
+        mesh.colors_prelit = true;
 
         ThreadPool::shared().parallel_ranges(vcount, 64, [&](size_t b, size_t e, unsigned) {
             Rng rng(0xC01Fu + uint32_t(b) * 40503u);

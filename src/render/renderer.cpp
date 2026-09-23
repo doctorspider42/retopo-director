@@ -251,7 +251,7 @@ void GpuMesh::upload(const Mesh& mesh)
     index_count_  = mesh.indices.size();
     vertex_count_ = verts.size();
     bounds_       = mesh.bounds();
-    baked_colors_ = mesh.has_colors();
+    baked_colors_ = mesh.has_colors() && mesh.colors_prelit;
 }
 
 void GpuMesh::upload_attribute(const std::vector<Vec4>& colors)

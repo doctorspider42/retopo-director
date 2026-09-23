@@ -97,6 +97,12 @@ struct Mesh {
     std::vector<Vec3>        normals;   // empty or positions.size()
     std::vector<Vec2>        uvs;       // empty or positions.size()
     std::vector<Vec4>        colors;    // empty or positions.size(), linear RGBA
+    // True when `colors` already carry baked lighting - set by the bake, never
+    // by a loader. A source's vertex colours are albedo or, as often, a mask
+    // channel the artist painted for a shader (Quaternius ships every character
+    // with COLOR_0 all white), and drawing those unlit turned the reference
+    // renders the director judges against into a flat white cut-out.
+    bool                     colors_prelit = false;
     std::vector<SkinVertex>  skin;      // empty or positions.size()
     std::vector<uint32_t>    indices;   // 3 per triangle
 
