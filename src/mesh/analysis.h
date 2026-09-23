@@ -39,6 +39,10 @@ struct MeshAnalysis {
     std::vector<float> joint_distance;   // to nearest joint pivot, model units
     std::vector<int>   nearest_joint;    // -1 when there is no armature
     std::vector<float> ambient;          // cheap AO proxy, 0 = crevice, 1 = exposed
+    // Distance through the model to the opposite wall, model units: the
+    // diameter of a finger, the depth of an ear. bbox_diagonal where the inward
+    // ray leaves the model without hitting anything (an open sheet).
+    std::vector<float> thickness;
     std::vector<float> vertex_area;      // one third of incident triangle area
 
     // --- per triangle ------------------------------------------------------
@@ -77,6 +81,10 @@ struct AnalysisOptions {
     // Cheap ambient term: rays per vertex. 0 disables it.
     int   ambient_rays            = 24;
     float ambient_ray_length_rel  = 0.25f;
+    // Rays per vertex for the thickness estimate, in a narrow cone around the
+    // inward normal; the median is kept so one ray down a crevice does not
+    // decide it. 0 disables it.
+    int   thickness_rays          = 5;
     // Curvature is normalised against this percentile so a handful of spikes
     // does not flatten the whole field.
     float curvature_percentile    = 0.97f;

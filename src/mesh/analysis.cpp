@@ -52,6 +52,7 @@ void MeshAnalysis::clear()
     joint_distance.clear();
     nearest_joint.clear();
     ambient.clear();
+    thickness.clear();
     vertex_area.clear();
     tri_curvature.clear();
     tri_area.clear();
@@ -338,6 +339,45 @@ void analyse_mesh(const Mesh& mesh, MeshAnalysis& out, const AnalysisOptions& op
                     if (!out.bvh.occluded(origin, dir, 1e-4f, ray_len)) ++open;
                 }
                 out.ambient[v] = float(open) / float(rays);
+            }
+        });
+    }
+
+    // --- thickness ---------------------------------------------------------
+    // A shape diameter estimate: how far an inward ray travels before it meets
+    // the other side. It is what tells a finger from a palm with the same
+    // curvature, and what the density field needs to keep a limb round rather
+    // than collapsing it to a blade when the edge length outgrows it.
+    out.thickness.assign(vcount, out.bbox_diagonal);
+    if (opts.thickness_rays > 0) {
+        report(0.85f, "thickness");
+        const int   rays   = opts.thickness_rays;
+        const float offset = out.bbox_diagonal * 1e-4f;
+        // 20 degrees: wide enough to step past a single bad triangle, narrow
+        // enough that a ray from the inside of an elbow does not find the forearm.
+        const float spread = 0.36f;
+
+        ThreadPool::shared().parallel_ranges(vcount, 256, [&](size_t b, size_t e, unsigned) {
+            std::vector<float> hits;
+            for (size_t v = b; v < e; ++v) {
+                const Vec3 n = vnormals[v];
+                if (length2(n) < 0.5f) continue;
+                Vec3 tangent, bitangent;
+                basis_from_normal(n, tangent, bitangent);
+                const Vec3 origin = mesh.positions[v] - n * offset;
+
+                hits.clear();
+                for (int r = 0; r < rays; ++r) {
+                    Vec3 dir = -n;
+                    if (r > 0) {
+                        const float a = 6.2831853f * float(r - 1) / float(rays - 1);
+                        dir = normalize(dir + (tangent * std::cos(a) + bitangent * std::sin(a)) * spread);
+                    }
+                    const RayHit hit = out.bvh.intersect(origin, dir, offset, out.bbox_diagonal);
+                    hits.push_back(hit.hit() ? hit.t : out.bbox_diagonal);
+                }
+                std::nth_element(hits.begin(), hits.begin() + hits.size() / 2, hits.end());
+                out.thickness[v] = hits[hits.size() / 2];
             }
         });
     }
