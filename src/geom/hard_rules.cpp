@@ -600,6 +600,29 @@ size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& s
             if (length(p - pivot) <= band) ++nearby;
         if (nearby >= required) continue;
 
+        // A loop is only a loop if the band is wider than the triangles
+        // around it. A finger joint's band is a centimetre across on a hand
+        // made of a dozen triangles: the mesh has no finger to bend, and
+        // splitting "the longest edge inside the band" over and over just
+        // bisects the same few triangles into a fan of slivers - fifteen joints
+        // a hand, and the hands came out shattered. Measure the edges that
+        // reach into the band and skip the joint when they outsize it.
+        {
+            double edge_sum = 0.0;
+            int    edge_n   = 0;
+            for (size_t t = 0; t < mesh.triangle_count(); ++t)
+                for (int i = 0; i < 3; ++i) {
+                    const Vec3 a = mesh.positions[mesh.indices[t * 3 + i]];
+                    const Vec3 b = mesh.positions[mesh.indices[t * 3 + (i + 1) % 3]];
+                    if (length(a - pivot) > band * 2.0f && length(b - pivot) > band * 2.0f)
+                        continue;
+                    edge_sum += length(b - a);
+                    ++edge_n;
+                }
+            const float local_edge = edge_n > 0 ? float(edge_sum / edge_n) : 0.0f;
+            if (local_edge <= 0.0f || band * 2.0f < local_edge * 1.5f) continue;
+        }
+
         // Split the longest edges inside the band until the ring is dense
         // enough, or until we run out of headroom.
         for (int attempt = 0; attempt < required && nearby < required; ++attempt) {
