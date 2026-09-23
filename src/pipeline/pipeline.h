@@ -53,6 +53,15 @@ enum class Stage : uint8_t {
 const char* stage_name(Stage s);
 bool        stage_is_terminal(Stage s);
 
+// Where a stage sits in a whole run, 0..1, so one bar can stand for the entire
+// thing instead of one bar per stage. `within` is the stage's own progress.
+//
+// When the iteration count is known the loop stages are compressed into the
+// slice belonging to the current iteration, which keeps the bar moving forward
+// instead of rewinding every time the director asks for another pass.
+float stage_overall_progress(Stage s, float within, int iteration = 0,
+                             int total_iterations = 0);
+
 struct PipelineSettings {
     TargetProfile       profile;
     LlmConfig           llm;
@@ -139,6 +148,9 @@ public:
     bool start(const std::filesystem::path& mesh_path, const PipelineSettings& settings);
     // Re-runs from the density stage using the current panel, without the model.
     bool rebuild_geometry(const PipelineSettings& settings);
+    // Loads the mesh and nothing else, so the viewport has something to show
+    // the moment a file is picked. Leaves the stage on Idle: this is not a run.
+    bool preview(const std::filesystem::path& mesh_path, const PipelineSettings& settings);
 
     void cancel();
     void join();
@@ -163,7 +175,7 @@ public:
     void set_panel(const KnobPanel& panel);
 
 private:
-    enum class Entry { Full, GeometryOnly };
+    enum class Entry { Full, GeometryOnly, PreviewOnly };
 
     void launch(Entry entry, const std::filesystem::path& mesh_path,
                 const PipelineSettings& settings);
@@ -201,6 +213,9 @@ private:
     std::thread                  worker_;
     std::atomic<bool>            running_{false};
     std::atomic<bool>            cancel_{false};
+    // True while the worker is only loading a mesh for the viewport, which a
+    // real run is allowed to interrupt.
+    std::atomic<bool>            preview_{false};
     std::atomic<Stage>           stage_{Stage::Idle};
     std::atomic<float>           progress_{0.0f};
     std::atomic<int>             iteration_{0};

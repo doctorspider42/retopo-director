@@ -16,12 +16,39 @@
 #include <imgui.h>
 
 namespace rd::ui {
+
+// Drawn into the Options window rather than into a window of their own. These
+// are the settings that belong to a project rather than to a run: what the
+// target hardware allows, which model directs, how the mesh is split.
+void draw_profile_settings(AppState& app);
+void draw_director_settings(AppState& app);
+void draw_run_settings(AppState& app);
+
 namespace {
 
 const char* const kBackendNames[]  = {"Auto", "Quad field", "Quadric"};
 const char* const kFidelityNames[] = {"Geometry", "Balanced", "Texture"};
 const char* const kLlmNames[]      = {"Disabled", "Claude CLI", "Codex CLI", "OpenAI API"};
 const char* const kSegmenterNames[] = {"Geometric", "SAM", "Auto"};
+// The two ways of filling the knob panel. One control, two halves: a button
+// that says "run the director" over a checkbox that can switch the director off
+// is the same choice asked twice, and the second answer wins.
+const char* const kRunModeNames[]   = {"Director", "Manual"};
+
+} // namespace
+
+// How far along the whole run is, 0..1. Lives here rather than in the status bar
+// because both need it and neither owns it.
+float overall_progress(const AppState& app)
+{
+    const int total = app.settings.max_iterations > 0
+                          ? app.settings.max_iterations
+                          : app.settings.profile.max_iterations;
+    return stage_overall_progress(app.pipeline.stage(), app.pipeline.progress(),
+                                  app.pipeline.iteration(), total);
+}
+
+namespace {
 
 ImVec4 feasibility_color(Feasibility f)
 {
@@ -147,8 +174,7 @@ void action_open_mesh(AppState& app)
         app.mesh_path.empty() ? fs::path{} : app.mesh_path.parent_path());
     if (chosen.empty()) return;
 
-    app.mesh_path = chosen;
-    app.push_recent(chosen);
+    app.open_mesh(chosen);
     app.notify("Loaded " + chosen.filename().string());
 }
 
@@ -235,15 +261,19 @@ void panel_pipeline(AppState& app)
             ImGui::SameLine();
             if (ImGui::Button("Recent")) ImGui::OpenPopup("recent_meshes");
             if (ImGui::BeginPopup("recent_meshes")) {
-                for (const fs::path& path : app.recent_meshes) {
-                    if (ImGui::MenuItem(path.filename().string().c_str())) {
-                        app.mesh_path = path;
-                        app.push_recent(path);
-                    }
+                // Same two reasons as the File menu: names collide, and
+                // open_mesh reorders the list under the loop.
+                fs::path chosen;
+                for (size_t i = 0; i < app.recent_meshes.size(); ++i) {
+                    ImGui::PushID(int(i));
+                    if (ImGui::MenuItem(app.recent_label(i).c_str()))
+                        chosen = app.recent_meshes[i];
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%s", path.string().c_str());
+                        ImGui::SetTooltip("%s", app.recent_meshes[i].string().c_str());
+                    ImGui::PopID();
                 }
                 ImGui::EndPopup();
+                if (!chosen.empty()) app.open_mesh(chosen);
             }
         }
         ImGui::EndDisabled();
@@ -253,44 +283,86 @@ void panel_pipeline(AppState& app)
     spacer(8.0f);
 
     // --- run controls ---------------------------------------------------------
-    if (card_begin("run_card", "Run")) {
-        const float full = ImGui::GetContentRegionAvail().x;
-        if (running) {
-            if (danger_button("Cancel", ImVec2(full, 0))) app.pipeline.cancel();
-        } else {
-            ImGui::BeginDisabled(app.mesh_path.empty());
-            if (primary_button("Run the director", ImVec2(full, 0))) action_run(app);
-            ImGui::EndDisabled();
-        }
+    // Two ways of filling the knob panel, asked once, as one control. What the
+    // button does then follows from the answer instead of contradicting it.
+    bool can_rebuild = false;
+    app.pipeline.with_results([&](const PipelineResults& r) {
+        can_rebuild = !r.highpoly.empty() && r.segmentation.valid();
+    });
 
-        spacer(6.0f);
+    if (card_begin("run_card", "Retopologise")) {
+        const float full = ImGui::GetContentRegionAvail().x;
+
+        int run_mode = app.settings.use_llm ? 0 : 1;
         ImGui::BeginDisabled(running);
-        if (secondary_button("Rebuild geometry only", ImVec2(full, 0))) action_rebuild(app);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
-            ImGui::SetTooltip("Re-runs density, retopo, bake and validation with the "
-                              "current knob panel and without asking the model anything.");
+        if (segmented("run_mode", &run_mode, kRunModeNames, 2))
+            app.settings.use_llm = (run_mode == 0);
         ImGui::EndDisabled();
 
+        spacer(6.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, p.text_faint);
+        ImGui::TextWrapped("%s", app.settings.use_llm
+            ? "A language model names the parts, splits the triangle budget and "
+              "judges each pass from renders. It never touches a vertex, and you "
+              "can overrule every number it writes."
+            : "The knob panel is used exactly as it stands. Nothing is sent "
+              "anywhere and the run is fully deterministic.");
+        ImGui::PopStyleColor();
+
         spacer(10.0f);
-        begin_form("run_form", 150.0f);
-        toggle("Use the director", &app.settings.use_llm,
-               "When off, the panel stays exactly as you set it and no request is sent.");
-        toggle("Export on finish", &app.settings.auto_export);
-        toggle("Write the report", &app.settings.write_report);
-        slider_int("Max iterations", &app.settings.max_iterations, 0, 12, 0,
-                   "0 takes the value from the target profile.");
-        slider_int("Render size", &app.settings.render_size, 256, 1536, 640,
-                   "Pixels per side for the images the director is shown.");
-        end_form();
+        if (running) {
+            if (danger_button("Stop", ImVec2(full, 0))) app.pipeline.cancel();
+        } else {
+            ImGui::BeginDisabled(app.mesh_path.empty());
+            if (primary_button(app.settings.use_llm ? "Run with the director"
+                                                    : "Run",
+                               ImVec2(full, 0)))
+                action_run(app);
+            ImGui::EndDisabled();
+            if (app.mesh_path.empty())
+                ImGui::SetItemTooltip("Open a high poly mesh first.");
+        }
+
+        if (can_rebuild) {
+            spacer(10.0f);
+            ImGui::BeginDisabled(running);
+            // Named after what comes out of it, not after what it reads. The
+            // line underneath is there because the difference from Run is the
+            // whole reason the button exists, and a tooltip nobody hovers is
+            // not where that belongs.
+            if (secondary_button("Rebuild the low poly", ImVec2(full, 0)))
+                action_rebuild(app);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip("Density, retopology, bake and validation again. "
+                                  "Skips loading, analysis, the region split and the "
+                                  "director.");
+            ImGui::EndDisabled();
+
+            spacer(4.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, p.text_faint);
+            ImGui::TextWrapped("Keeps the regions you already have and builds the mesh "
+                               "again from the knob panel. Seconds, not a whole run.");
+            ImGui::PopStyleColor();
+        }
+
+        spacer(10.0f);
+        if (secondary_button("Settings...", ImVec2(full, 0))) app.show_options = true;
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+            ImGui::SetTooltip("Target hardware, which model directs, how the mesh is "
+                              "split, where the run writes.");
         card_end();
     }
 
     spacer(8.0f);
 
     // --- progress -------------------------------------------------------------
+    // Only once there is something to report. Before the first run the status
+    // bar along the bottom already says "Ready", and a card repeating it at 0%
+    // is one more thing to read and dismiss.
     {
         const Stage stage = app.pipeline.stage();
-        if (card_begin("progress_card", "Progress")) {
+        const bool  worth_showing = running || stage != Stage::Idle;
+        if (worth_showing && card_begin("progress_card", "Progress")) {
             dot(stage_color(stage), 5.0f);
             ImGui::PushStyleColor(ImGuiCol_Text, stage_color(stage));
             ImGui::TextUnformatted(stage_name(stage));
@@ -301,6 +373,13 @@ void panel_pipeline(AppState& app)
                 ImGui::SameLine();
                 badge(format("iteration %d", iteration).c_str(), p.accent);
             }
+
+            // The whole run first, the current stage under it. A stage bar on
+            // its own says nothing about how much is left, which is the only
+            // question anybody is asking while this sits there for a minute.
+            spacer(8.0f);
+            const float overall = overall_progress(app);
+            progress_bar(overall, format("%.0f%%", overall * 100.0f).c_str(), 16.0f);
 
             spacer(6.0f);
             const std::string msg = app.pipeline.message();
@@ -631,20 +710,10 @@ void panel_regions(AppState& app)
 }
 
 // ---------------------------------------------------------------------------
-// Target profile
+// Target profile - what the hardware allows. Set once per project.
 // ---------------------------------------------------------------------------
-void panel_profile(AppState& app)
+void draw_profile_settings(AppState& app)
 {
-    if (!app.show_profile) return;
-    if (app.advice_wants_attention && !app.advice_dismissed) {
-        app.advice_wants_attention = false;
-        ImGui::SetNextWindowFocus();     // brings the tab forward when docked
-    }
-    if (!ImGui::Begin("Target profile", &app.show_profile)) {
-        ImGui::End();
-        return;
-    }
-
     const Palette& p = palette();
     TargetProfile& profile = app.settings.profile;
 
@@ -809,8 +878,6 @@ void panel_profile(AppState& app)
     }
 
     if (changed) profile.clamp();
-
-    ImGui::End();
 }
 
 // ---------------------------------------------------------------------------
@@ -904,16 +971,11 @@ void draw_checkpoint_download(AppState& app, SegmenterOptions& seg)
 }
 
 // ---------------------------------------------------------------------------
-// Director
+// Which model directs, and who draws the regions it is asked to name. Both are
+// set up once for a machine, so both live in the Options window.
 // ---------------------------------------------------------------------------
-void panel_director(AppState& app)
+void draw_director_settings(AppState& app)
 {
-    if (!app.show_director) return;
-    if (!ImGui::Begin("Director", &app.show_director)) {
-        ImGui::End();
-        return;
-    }
-
     const Palette& p = palette();
     LlmConfig& cfg = app.settings.llm;
 
@@ -1034,15 +1096,23 @@ void panel_director(AppState& app)
         }
         card_end();
     }
+}
 
-    spacer(8.0f);
+// ---------------------------------------------------------------------------
+// Everything the director actually said, so a run can be argued with.
+// ---------------------------------------------------------------------------
+void panel_director(AppState& app)
+{
+    if (!app.show_director) return;
+    if (!ImGui::Begin("Director", &app.show_director)) {
+        ImGui::End();
+        return;
+    }
 
-    // --- transcript -----------------------------------------------------------
+    const Palette& p = palette();
+
     std::vector<LlmExchange> transcript;
     app.pipeline.with_results([&](const PipelineResults& r) { transcript = r.transcript; });
-
-    subheading("Transcript");
-    spacer(4.0f);
 
     if (transcript.empty()) {
         empty_state("Nothing said yet",
@@ -1248,6 +1318,124 @@ void panel_log(AppState& app)
 
     ImGui::EndChild();
     ImGui::PopFont();
+    ImGui::End();
+}
+
+// ---------------------------------------------------------------------------
+// What a run does with itself: where it writes and how hard it tries.
+// ---------------------------------------------------------------------------
+void draw_run_settings(AppState& app)
+{
+    const Palette& p = palette();
+
+    if (card_begin("run_output_card", "What a run leaves behind")) {
+        begin_form("run_output_form", 190.0f);
+        toggle("Export on finish", &app.settings.auto_export,
+               "Writes the low poly and its texture into the project's export folder "
+               "as soon as validation passes.");
+        toggle("Write the report", &app.settings.write_report,
+               "A markdown summary of every iteration, next to the renders.");
+        end_form();
+
+        spacer(8.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, p.text_faint);
+        ImGui::TextWrapped("%s", paths::project_dir().string().c_str());
+        ImGui::PopStyleColor();
+        spacer(4.0f);
+        if (secondary_button("Open the folder")) reveal_in_file_manager(paths::project_dir());
+        ImGui::SameLine();
+        if (secondary_button("Change...")) {
+            const fs::path chosen = pick_folder_dialog("Where should this run write?",
+                                                       paths::project_dir());
+            if (!chosen.empty()) {
+                paths::set_project_dir(chosen);
+                app.notify("Project folder: " + chosen.string());
+            }
+        }
+        card_end();
+    }
+
+    spacer(8.0f);
+
+    if (card_begin("run_effort_card", "How hard it tries")) {
+        begin_form("run_effort_form", 190.0f);
+        slider_int("Max iterations", &app.settings.max_iterations, 0, 12, 0,
+                   "How many passes the director may ask for. 0 takes the value from "
+                   "the target profile.");
+        slider_int("Render size", &app.settings.render_size, 256, 1536, 640,
+                   "Pixels per side for the images the director is shown. Bigger is "
+                   "not better: it reads a 640px silhouette as well as a 2048px one "
+                   "and the upload costs real time.");
+        end_form();
+        card_end();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Options: the second window.
+//
+// Everything here is decided once for a project or once for a machine - the
+// target hardware, which model directs, how the mesh is split, where the run
+// writes. Keeping it out of the main window is the point: what is left there is
+// load, look, run.
+// ---------------------------------------------------------------------------
+void panel_options(AppState& app)
+{
+    // A brief the director calls strained or impossible is worth interrupting
+    // for: open the options on the Target tab, where the advice card sits next
+    // to the sliders it is talking about.
+    bool select_target = false;
+    if (app.advice_wants_attention && !app.advice_dismissed) {
+        app.advice_wants_attention = false;
+        app.show_options = true;
+        select_target    = true;
+        ImGui::SetNextWindowFocus();
+    }
+
+    if (!app.show_options) return;
+
+    ImGui::SetNextWindowSize(ImVec2(580, 760), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(420, 280), ImVec2(FLT_MAX, FLT_MAX));
+    // Deliberately not dockable: it is a dialog that happens to stay open, and
+    // docking it back into the workspace would undo the whole point of it.
+    if (!ImGui::Begin("Options", &app.show_options, ImGuiWindowFlags_NoDocking)) {
+        ImGui::End();
+        return;
+    }
+
+    if (ImGui::BeginTabBar("options_tabs")) {
+        struct Tab {
+            const char* label;
+            const char* blurb;
+            void (*draw)(AppState&);
+        };
+        static const Tab kTabs[] = {
+            {"Target", "What the hardware allows. The validator rejects anything past "
+                       "these, and the director is told about them up front.",
+             &draw_profile_settings},
+            {"Director", "Which model directs, and who draws the regions it is asked "
+                         "to name.", &draw_director_settings},
+            {"Run", "Where a run writes and how many passes it may take.",
+             &draw_run_settings},
+        };
+
+        for (const Tab& tab : kTabs) {
+            const ImGuiTabItemFlags flags =
+                select_target && &tab == &kTabs[0] ? ImGuiTabItemFlags_SetSelected : 0;
+            if (!ImGui::BeginTabItem(tab.label, nullptr, flags)) continue;
+            spacer(6.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, palette().text_faint);
+            ImGui::TextWrapped("%s", tab.blurb);
+            ImGui::PopStyleColor();
+            divider();
+            ImGui::BeginChild("scroll", ImVec2(0, 0));
+            tab.draw(app);
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+
     ImGui::End();
 }
 

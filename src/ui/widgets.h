@@ -43,8 +43,11 @@ void stat(const char* caption, const char* value, const ImVec4& accent, float wi
 // Horizontal bar with a limit marker. Goes amber past `warn_at` and red past 1.
 void meter(const char* label, float value, float limit, const char* value_text = nullptr);
 
-// Flat rounded progress bar with centred text.
-void progress_bar(float fraction, const char* overlay = nullptr, float height = 0.0f);
+// Flat rounded progress bar with centred text. `width` 0 takes the rest of the
+// line, which is what a panel wants; the status bar passes one so the readout
+// and the stop button still fit beside it.
+void progress_bar(float fraction, const char* overlay = nullptr, float height = 0.0f,
+                  float width = 0.0f);
 
 // A coloured dot, for region swatches and status lights.
 void dot(const ImVec4& color, float radius = 5.0f);

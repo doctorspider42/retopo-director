@@ -43,6 +43,66 @@ bool stage_is_terminal(Stage s)
     return s == Stage::Done || s == Stage::Failed || s == Stage::Cancelled || s == Stage::Idle;
 }
 
+// Where each stage starts and ends in a whole run. The numbers are wall clock
+// shares measured on a 300k triangle character with the quad field backend and
+// the geometric split; they are rough on purpose, because the point is a bar
+// that keeps moving, not a time estimate.
+namespace {
+
+struct StageSpan { float begin, end; };
+
+StageSpan span_of(Stage s)
+{
+    switch (s) {
+    case Stage::Loading:          return {0.00f, 0.04f};
+    case Stage::Analysing:        return {0.04f, 0.11f};
+    case Stage::ReferenceRenders: return {0.11f, 0.18f};
+    case Stage::Segmenting:       return {0.18f, 0.28f};
+    case Stage::NamingRegions:    return {0.28f, 0.33f};
+    case Stage::AllocatingBudget: return {0.33f, 0.36f};
+    // The loop, from here to the end of the review.
+    case Stage::BuildingDensity:  return {0.36f, 0.44f};
+    case Stage::Retopologising:   return {0.44f, 0.62f};
+    case Stage::Baking:           return {0.62f, 0.76f};
+    case Stage::Validating:       return {0.76f, 0.80f};
+    case Stage::CandidateRenders: return {0.80f, 0.86f};
+    case Stage::Reviewing:        return {0.86f, 0.92f};
+    case Stage::Exporting:        return {0.92f, 0.97f};
+    case Stage::Reporting:        return {0.97f, 1.00f};
+    case Stage::Done:             return {1.00f, 1.00f};
+    default:                      return {0.00f, 0.00f};
+    }
+}
+
+constexpr float kLoopBegin = 0.36f;
+constexpr float kLoopEnd   = 0.92f;
+
+bool stage_in_loop(Stage s)
+{
+    return s >= Stage::BuildingDensity && s <= Stage::Reviewing;
+}
+
+} // namespace
+
+float stage_overall_progress(Stage s, float within, int iteration, int total_iterations)
+{
+    if (s == Stage::Failed || s == Stage::Cancelled) return 0.0f;
+    if (s == Stage::Done) return 1.0f;
+
+    const StageSpan span = span_of(s);
+    float f = span.begin + (span.end - span.begin) * clampf(within, 0.0f, 1.0f);
+
+    // Squeeze the loop stages into the slice of the loop window that belongs to
+    // this iteration. Without it the bar snaps back to 36% every time the
+    // director asks for another pass, which reads as the run starting over.
+    if (stage_in_loop(s) && total_iterations > 1 && iteration > 0) {
+        const float slice = (kLoopEnd - kLoopBegin) / float(total_iterations);
+        const float local = (f - kLoopBegin) / (kLoopEnd - kLoopBegin);
+        f = kLoopBegin + slice * (float(std::min(iteration, total_iterations) - 1) + local);
+    }
+    return clampf(f, 0.0f, 1.0f);
+}
+
 // ---------------------------------------------------------------------------
 Pipeline::Pipeline() = default;
 
@@ -117,7 +177,13 @@ void Pipeline::set_panel(const KnobPanel& panel)
 
 bool Pipeline::start(const fs::path& mesh_path, const PipelineSettings& settings)
 {
-    if (running_.load()) return false;
+    if (running_.load()) {
+        // A preview is a courtesy and a run is not, so the run takes the thread.
+        // It only loads a file, so this waits for a fraction of a second. Without
+        // it, pressing Run on a mesh picked a moment ago quietly does nothing.
+        if (!preview_.load()) return false;
+        cancel();
+    }
     join();
     launch(Entry::Full, mesh_path, settings);
     return true;
@@ -132,6 +198,14 @@ bool Pipeline::rebuild_geometry(const PipelineSettings& settings)
     }
     join();
     launch(Entry::GeometryOnly, {}, settings);
+    return true;
+}
+
+bool Pipeline::preview(const fs::path& mesh_path, const PipelineSettings& settings)
+{
+    if (running_.load()) return false;
+    join();
+    launch(Entry::PreviewOnly, mesh_path, settings);
     return true;
 }
 
@@ -1004,6 +1078,20 @@ bool Pipeline::stage_report(const PipelineSettings& s)
 void Pipeline::run(Entry entry, fs::path mesh_path, PipelineSettings settings)
 {
     Stopwatch watch;
+
+    // A preview is not a run: no model, no project folders, no report. It exists
+    // so that picking a file puts something on screen straight away.
+    if (entry == Entry::PreviewOnly) {
+        preview_.store(true);
+        const bool loaded = stage_load(mesh_path, settings);
+        if (loaded) set_stage(Stage::Idle, mesh_path.filename().string());
+        progress_.store(0.0f);
+        bump();
+        preview_.store(false);
+        running_.store(false);
+        return;
+    }
+
     llm_ = settings.use_llm ? make_llm_backend(settings.llm) : nullptr;
 
     if (llm_) {
@@ -1021,19 +1109,32 @@ void Pipeline::run(Entry entry, fs::path mesh_path, PipelineSettings settings)
     paths::ensure_dir(paths::renders_dir());
     paths::ensure_dir(paths::reports_dir());
 
+    // The engine path returns result structs rather than throwing, but it calls
+    // into third party loaders and the standard library, and an exception that
+    // reaches the top of this thread is std::terminate - the window vanishes
+    // with nothing on screen and nothing in the log. Turn it into the failure it
+    // is, so the message lands in the Pipeline panel like any other.
     bool ok = true;
-    if (entry == Entry::Full) {
-        ok = stage_load(mesh_path, settings) &&
-             stage_analyse(settings) &&
-             stage_reference_renders(settings) &&
-             stage_segment(settings) &&
-             stage_name_regions(settings) &&
-             stage_allocate_budget(settings);
-    }
+    try {
+        if (entry == Entry::Full) {
+            ok = stage_load(mesh_path, settings) &&
+                 stage_analyse(settings) &&
+                 stage_reference_renders(settings) &&
+                 stage_segment(settings) &&
+                 stage_name_regions(settings) &&
+                 stage_allocate_budget(settings);
+        }
 
-    if (ok && !cancelled()) ok = stage_iterate(settings);
-    if (ok && !cancelled()) ok = stage_export(settings);
-    if (ok && !cancelled()) ok = stage_report(settings);
+        if (ok && !cancelled()) ok = stage_iterate(settings);
+        if (ok && !cancelled()) ok = stage_export(settings);
+        if (ok && !cancelled()) ok = stage_report(settings);
+    } catch (const std::exception& e) {
+        fail(std::string("the run hit an unexpected error: ") + e.what());
+        ok = false;
+    } catch (...) {
+        fail("the run hit an unexpected error of unknown type");
+        ok = false;
+    }
 
     {
         std::lock_guard lock(results_mutex_);

@@ -12,6 +12,40 @@
 #include <imgui.h>
 
 namespace rd::ui {
+namespace {
+
+// Two spellings of one file - a different case, a forward slash where the
+// dialog gave a backslash, a stray "." - are one file to the filesystem and two
+// entries to a vector of paths. Everything entering the recent list is flattened
+// to a single spelling first.
+fs::path normalise_mesh_path(const fs::path& p)
+{
+    std::error_code ec;
+    fs::path        out = p.is_absolute() ? p : fs::absolute(p, ec);
+    if (ec) out = p;
+    out = out.lexically_normal();
+#if defined(RD_PLATFORM_WINDOWS)
+    out.make_preferred();
+#endif
+    return out;
+}
+
+// Windows does not distinguish two names by case, so neither does the list.
+bool same_name(const std::string& a, const std::string& b)
+{
+#if defined(RD_PLATFORM_WINDOWS)
+    return iequals(a, b);
+#else
+    return a == b;
+#endif
+}
+
+bool same_mesh_path(const fs::path& a, const fs::path& b)
+{
+    return same_name(a.string(), b.string());
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 ViewCamera OrbitCamera::to_view_camera(const Aabb& bounds) const
@@ -115,10 +149,80 @@ void AppState::notify(const std::string& text, double seconds)
 void AppState::push_recent(const fs::path& p)
 {
     if (p.empty()) return;
-    recent_meshes.erase(std::remove(recent_meshes.begin(), recent_meshes.end(), p),
+    // Copied before anything is erased: callers pass a reference straight out of
+    // this vector, and removing the element underneath the argument would leave
+    // us inserting a dangling path.
+    const fs::path path = normalise_mesh_path(p);
+
+    recent_meshes.erase(std::remove_if(recent_meshes.begin(), recent_meshes.end(),
+                                       [&](const fs::path& e) {
+                                           return same_mesh_path(e, path);
+                                       }),
                         recent_meshes.end());
-    recent_meshes.insert(recent_meshes.begin(), p);
+    recent_meshes.insert(recent_meshes.begin(), path);
     if (recent_meshes.size() > 10) recent_meshes.resize(10);
+}
+
+std::string AppState::recent_label(size_t index) const
+{
+    if (index >= recent_meshes.size()) return {};
+    const fs::path& path = recent_meshes[index];
+
+    // Take the filename, and keep adding parent folders until no other entry
+    // ends the same way. One level is not always enough: two runs of the same
+    // asset pack give ".../unity/Body.fbx" and ".../unreal/Body.fbx", but two
+    // scratch folders give ".../scratchpad/high.obj" twice over.
+    std::vector<std::string> parts;
+    for (const fs::path& part : path) parts.push_back(part.string());
+    if (parts.empty()) return path.string();
+
+    auto ends_with_tail = [&](const fs::path& other, size_t depth) {
+        std::vector<std::string> theirs;
+        for (const fs::path& part : other) theirs.push_back(part.string());
+        if (theirs.size() < depth) return false;
+        for (size_t k = 0; k < depth; ++k)
+            if (!same_name(theirs[theirs.size() - 1 - k], parts[parts.size() - 1 - k]))
+                return false;
+        return true;
+    };
+
+    size_t depth = 1;
+    for (; depth < parts.size(); ++depth) {
+        bool clash = false;
+        for (size_t i = 0; i < recent_meshes.size() && !clash; ++i)
+            clash = i != index && ends_with_tail(recent_meshes[i], depth);
+        if (!clash) break;
+    }
+
+    const std::string name = parts.back();
+    if (depth <= 1) return name;
+
+    // The folders, outermost first, so it reads the way a path does.
+    std::string where;
+    for (size_t k = depth - 1; k >= 1; --k) {
+        if (!where.empty()) where += "/";
+        where += parts[parts.size() - 1 - k];
+    }
+    return where.empty() ? name : name + "  -  " + where;
+}
+
+void AppState::open_mesh(const fs::path& p)
+{
+    if (p.empty()) return;
+    push_recent(p);
+    mesh_path = recent_meshes.front();   // the one spelling the list agreed on
+
+    // A new subject deserves a new framing, and the preview is of the high poly
+    // because that is the only thing there is until a run finishes.
+    want_frame       = true;
+    auto_view_source = true;
+    source           = ViewSource::HighPoly;
+    selected_region  = -1;
+    panel_dirty      = false;
+    images.clear();
+
+    if (!pipeline.preview(p, settings))
+        notify("Busy; the preview will have to wait for the run to finish", 4.0);
 }
 
 void AppState::refresh_profiles()
@@ -188,6 +292,8 @@ void AppState::upload_meshes()
     if (version == gpu_version) return;
     gpu_version = version;
 
+    const bool had_low = gpu_low_ok;
+
     pipeline.with_results([&](const PipelineResults& r) {
         if (!r.highpoly.empty()) {
             gpu_high.upload(r.highpoly);
@@ -224,9 +330,17 @@ void AppState::upload_meshes()
         }
 
         const Aabb bounds = gpu_low_ok ? r.lowpoly.bounds() : r.highpoly.bounds();
-        if (bounds.valid() && !scene_bounds.valid()) camera.frame(bounds);
+        if (bounds.valid() && (want_frame || !scene_bounds.valid())) {
+            camera.frame(bounds);
+            want_frame = false;
+        }
         if (bounds.valid()) scene_bounds = bounds;
     });
+
+    // The first low poly of a run is what everyone came to see, so show it
+    // without being asked. Only once: after that the source control is obeyed.
+    if (auto_view_source && gpu_low_ok && !had_low) source = ViewSource::LowPoly;
+    if (auto_view_source && !gpu_low_ok && gpu_high_ok) source = ViewSource::HighPoly;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,11 +497,15 @@ void AppState::load_settings()
     mode                    = RenderMode(std::clamp(json_get<int>(ui, "mode", 0), 0, 6));
     log_min_level           = std::clamp(json_get<int>(ui, "log_min_level", 1), 0, 4);
 
-    for (const Json& p : json_array_or_empty(j, "recent")) {
-        if (!p.is_string()) continue;
-        const fs::path path = p.get<std::string>();
+    // Oldest first, because push_recent inserts at the front. Going through it
+    // rather than push_back is what collapses entries a previous build wrote
+    // twice under two spellings.
+    const Json& recents = json_array_or_empty(j, "recent");
+    for (auto it = recents.rbegin(); it != recents.rend(); ++it) {
+        if (!it->is_string()) continue;
+        const fs::path path = it->get<std::string>();
         std::error_code ec;
-        if (fs::exists(path, ec)) recent_meshes.push_back(path);
+        if (fs::exists(path, ec)) push_recent(path);
     }
 
     const std::string project = json_get<std::string>(j, "project_dir", "");

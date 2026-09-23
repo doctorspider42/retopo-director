@@ -127,6 +127,14 @@ struct AppState {
     bool        wireframe   = true;
     bool        auto_rotate = false;
     bool        use_profile_camera = false;
+    // Puts the high poly on screen the moment a file is picked, and swaps to the
+    // low poly the first time a run produces one. Touching the source control
+    // turns it off: after that the choice is the user's.
+    bool        auto_view_source = true;
+    // Set when a new file arrives. sync_from_pipeline refreshes scene_bounds the
+    // moment the preview lands, so "have we framed this yet" cannot be inferred
+    // from the bounds alone; it has to be asked for.
+    bool        want_frame = false;
     int         profile_camera_index = 0;
     bool        show_baked_texture = true;
 
@@ -159,7 +167,6 @@ struct AppState {
     bool show_viewport   = true;
     bool show_pipeline   = true;
     bool show_regions    = true;
-    bool show_profile    = true;
     bool show_director   = true;
     bool show_validation = true;
     bool show_gallery    = true;
@@ -167,6 +174,8 @@ struct AppState {
     bool show_stats      = true;
     bool show_demo       = false;
     bool show_about      = false;
+    // The second window: everything that is set once and then left alone.
+    bool show_options    = false;
 
     // --- log view ------------------------------------------------------------
     int         log_min_level = 1;   // Debug
@@ -186,6 +195,13 @@ struct AppState {
     void save_settings() const;
     void load_settings();
     void push_recent(const fs::path& p);
+    // What to call recent_meshes[index] in a menu. Normally the filename; the
+    // parent folder is appended when another entry has the same filename, which
+    // is the usual case for an asset pack that exports one character per engine.
+    std::string recent_label(size_t index) const;
+    // Points the application at a file and asks the pipeline for a preview, so
+    // the viewport fills in without anybody pressing anything.
+    void open_mesh(const fs::path& p);
 };
 
 } // namespace rd::ui
