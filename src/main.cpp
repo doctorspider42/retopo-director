@@ -26,6 +26,7 @@ void print_usage()
         "  --profile <file>  Load a target profile on startup (.json)\n"
         "  --headless        Run the pipeline without a window and exit\n"
         "  --no-llm          Skip the director; run the deterministic half only\n"
+        "  --llm             Run the director even when the saved settings turn it off\n"
         "  --backend <name>  Force auto | quad_field | quadric\n"
         "  --run             Start the pipeline as soon as the window opens\n"
         "  --verbose         Mirror the log to stderr\n"
@@ -72,6 +73,8 @@ int main(int argc, char** argv)
             opts.headless = true;
         } else if (!std::strcmp(a, "--no-llm")) {
             opts.no_llm = true;
+        } else if (!std::strcmp(a, "--llm")) {
+            opts.force_llm = true;
         } else if (!std::strcmp(a, "--verbose")) {
             opts.verbose = true;
         } else if (!std::strcmp(a, "--run")) {

@@ -430,7 +430,17 @@ int run_application(const AppOptions& opts)
     if (!opts.sam_checkpoint.empty()) app->settings.segmenter.sam.checkpoint = opts.sam_checkpoint;
     if (!opts.sam_device.empty())     app->settings.segmenter.sam.device     = opts.sam_device;
 
-    if (opts.no_llm) app->settings.use_llm = false;
+    // --no-llm wins over --llm: the one that takes something away is the safe
+    // reading of a contradictory command line.
+    if (opts.force_llm) app->settings.use_llm = true;
+    if (opts.no_llm)    app->settings.use_llm = false;
+
+    // Otherwise a run with the director switched off in the saved settings looks
+    // exactly like a run where the director had nothing to say, which cost an
+    // afternoon once already.
+    if (!app->settings.use_llm)
+        RD_INFO("the director is off (%s); running the deterministic half only",
+                opts.no_llm ? "--no-llm" : "saved settings, override with --llm");
 
     app->pipeline.set_dispatcher(&app->dispatcher);
 

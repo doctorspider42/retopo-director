@@ -31,6 +31,14 @@ struct LoadOptions {
     float sharp_angle_degrees     = 60.0f;
     // Import the skeleton when the file has one.
     bool  load_armature  = true;
+    // Import base colour textures and the per triangle material assignment, so
+    // the bake can read the original artwork instead of inventing one. Costs
+    // whatever the source maps weigh, which on a character is tens of
+    // megabytes, so anything that only needs geometry turns it off.
+    bool  load_materials = true;
+    // Source maps are often 2k or 4k and the target atlas is 256. Downscaling
+    // on load keeps the memory sane; 0 loads them at their authored size.
+    int   max_material_texture_size = 1024;
 };
 
 struct LoadReport {
@@ -43,6 +51,7 @@ struct LoadReport {
     size_t      dropped_triangles = 0;
     size_t      primitives       = 0;
     size_t      joints           = 0;
+    size_t      materials        = 0;   // how many carried a base colour map
     double      seconds          = 0.0;
 };
 

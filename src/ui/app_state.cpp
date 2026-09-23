@@ -102,8 +102,14 @@ void ImageCache::clear()
 // ---------------------------------------------------------------------------
 void AppState::notify(const std::string& text, double seconds)
 {
-    toast       = text;
-    toast_until = ImGui::GetTime() + seconds;
+    toast = text;
+    // Startup notifies before there is an interface to notify. `--profile`
+    // loads a profile from run_application, which is a long way above
+    // ImGui::CreateContext, and headless never creates a context at all;
+    // GetTime() dereferences the context unconditionally, so the option
+    // segfaulted on its way in, windowed and headless alike. Without a context
+    // the toast has nowhere to appear, so it is left already expired.
+    toast_until = ImGui::GetCurrentContext() ? ImGui::GetTime() + seconds : 0.0;
 }
 
 void AppState::push_recent(const fs::path& p)
@@ -162,6 +168,16 @@ void AppState::sync_from_pipeline()
             knobs_json_buffer = json_dump(panel.to_json());
         }
         scene_bounds = r.lowpoly.empty() ? r.highpoly.bounds() : r.lowpoly.bounds();
+
+        // A dismissal covers the objection that was on screen, not every
+        // objection the director will ever raise: a later pass that has seen the
+        // render has earned the right to interrupt again.
+        if (r.advice.headline != advice.headline ||
+            r.advice.feasibility != advice.feasibility) {
+            advice_dismissed = false;
+            advice_wants_attention |= feasibility_is_alarming(r.advice.feasibility);
+        }
+        advice = r.advice;
     });
     panel_version = version;
 }

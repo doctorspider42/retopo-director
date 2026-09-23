@@ -59,6 +59,9 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
 size_t enforce_symmetry(Mesh& mesh, const SymmetryPlane& plane, float epsilon,
                         const Bvh* reproject_onto, size_t* clipped_out = nullptr);
 size_t repair_nonmanifold(Mesh& mesh);
+// `mirror` makes the cull symmetry aware: mirrored shells are admitted or
+// dropped as a pair, never one without the other. Pass null when the asset is
+// not being kept symmetric.
 size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share);
 size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& source_bvh,
                           float density, int max_new_triangles);

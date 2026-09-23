@@ -10,6 +10,7 @@ struct AppOptions {
     std::string startup_profile;
     bool        headless = false;
     bool        no_llm   = false;   // deterministic half only
+    bool        force_llm = false;  // run the director whatever the settings say
     bool        verbose  = false;   // mirror the log to stderr
     bool        autorun  = false;   // start the pipeline as soon as the window opens
     std::string backend;            // auto | quad_field | quadric, overrides the panel

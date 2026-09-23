@@ -77,6 +77,11 @@ struct GlobalKnobs {
     float quad_dominance       = 0.7f;   // 0..1, how hard to pair triangles into quads
 
     // Baking.
+    // Carry the source uv layout onto the new topology and repack it, instead
+    // of unwrapping from scratch. Keeps the artwork where the artist put it;
+    // needs a source that actually has uvs and materials, and falls back to a
+    // fresh unwrap when it does not.
+    bool  reuse_source_uvs       = true;
     bool  bake_ambient_occlusion = true;
     float ao_intensity           = 0.75f;
     bool  bake_vertex_colors     = true;

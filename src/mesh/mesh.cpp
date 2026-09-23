@@ -86,6 +86,9 @@ void Mesh::clear()
     skin.clear();
     indices.clear();
     tri_region.clear();
+    tri_material.clear();
+    corner_uvs.clear();
+    materials.reset();
     armature.joints.clear();
     import_transform = Mat4::identity();
     import_scale     = 1.0f;
@@ -204,9 +207,11 @@ size_t Mesh::remove_degenerate(float area_epsilon)
     const size_t before = triangle_count();
     std::vector<uint32_t> kept;
     kept.reserve(indices.size());
-    std::vector<uint16_t> kept_regions;
-    const bool has_regions = tri_region.size() == before;
-    if (has_regions) kept_regions.reserve(before);
+    std::vector<uint16_t> kept_regions, kept_materials;
+    const bool has_regions   = tri_region.size() == before;
+    const bool has_materials = tri_material.size() == before;
+    if (has_regions)   kept_regions.reserve(before);
+    if (has_materials) kept_materials.reserve(before);
 
     for (size_t t = 0; t < before; ++t) {
         const uint32_t a = indices[t * 3 + 0];
@@ -217,11 +222,13 @@ size_t Mesh::remove_degenerate(float area_epsilon)
         const Vec3 fn = cross(positions[b] - positions[a], positions[c] - positions[a]);
         if (length2(fn) * 0.25f <= area_epsilon * area_epsilon) continue;
         kept.push_back(a); kept.push_back(b); kept.push_back(c);
-        if (has_regions) kept_regions.push_back(tri_region[t]);
+        if (has_regions)   kept_regions.push_back(tri_region[t]);
+        if (has_materials) kept_materials.push_back(tri_material[t]);
     }
 
     indices.swap(kept);
-    if (has_regions) tri_region.swap(kept_regions);
+    if (has_regions)   tri_region.swap(kept_regions);
+    if (has_materials) tri_material.swap(kept_materials);
     return before - triangle_count();
 }
 
@@ -454,7 +461,9 @@ Mesh mesh_extract(const Mesh& src, const std::vector<bool>& tri_mask,
     std::vector<uint32_t> remap(src.positions.size(), kInvalidIndex);
     const bool keep_n = src.has_normals(), keep_t = src.has_uvs();
     const bool keep_c = src.has_colors(),  keep_s = src.has_skin();
-    const bool keep_r = src.tri_region.size() == src.triangle_count();
+    const bool keep_r = src.tri_region.size()   == src.triangle_count();
+    const bool keep_m = src.tri_material.size() == src.triangle_count();
+    out.materials = src.materials;
 
     for (size_t t = 0, n = src.triangle_count(); t < n; ++t) {
         if (t >= tri_mask.size() || !tri_mask[t]) continue;
@@ -471,6 +480,7 @@ Mesh mesh_extract(const Mesh& src, const std::vector<bool>& tri_mask,
             out.indices.push_back(remap[v]);
         }
         if (keep_r) out.tri_region.push_back(src.tri_region[t]);
+        if (keep_m) out.tri_material.push_back(src.tri_material[t]);
     }
 
     if (vertex_map) *vertex_map = std::move(remap);

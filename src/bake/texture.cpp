@@ -26,48 +26,6 @@ struct ColorBox {
 
 } // namespace
 
-void Texture::set(int x, int y, Vec4 c)
-{
-    uint8_t* p = at(x, y);
-    p[0] = encode(c.x);
-    if (channels > 1) p[1] = encode(c.y);
-    if (channels > 2) p[2] = encode(c.z);
-    if (channels > 3) p[3] = uint8_t(clampf(c.w * 255.0f + 0.5f, 0.0f, 255.0f));
-}
-
-Vec4 Texture::get(int x, int y) const
-{
-    const uint8_t* p = at(x, y);
-    Vec4 c;
-    c.x = decode(p[0]);
-    c.y = channels > 1 ? decode(p[1]) : c.x;
-    c.z = channels > 2 ? decode(p[2]) : c.x;
-    c.w = channels > 3 ? float(p[3]) / 255.0f : 1.0f;
-    return c;
-}
-
-bool Texture::save_png(const std::filesystem::path& path) const
-{
-    if (empty()) return false;
-    paths::ensure_dir(path.parent_path());
-    const std::string utf8 = path.string();
-    const int ok = stbi_write_png(utf8.c_str(), width, height, channels,
-                                  pixels.data(), width * channels);
-    if (!ok) RD_ERROR("failed to write %s", utf8.c_str());
-    return ok != 0;
-}
-
-bool Texture::load_png(const std::filesystem::path& path)
-{
-    int w = 0, h = 0, c = 0;
-    stbi_uc* data = stbi_load(path.string().c_str(), &w, &h, &c, 4);
-    if (!data) return false;
-    width = w; height = h; channels = 4;
-    pixels.assign(data, data + size_t(w) * h * 4);
-    stbi_image_free(data);
-    return true;
-}
-
 float CoverageMask::utilisation() const
 {
     if (covered.empty()) return 0.0f;

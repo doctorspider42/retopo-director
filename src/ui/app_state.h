@@ -145,6 +145,16 @@ struct AppState {
     bool        knobs_json_valid = true;
     std::string knobs_json_error;
 
+    // --- director advice -----------------------------------------------------
+    // What the director said about the brief, and whether the user has already
+    // said they do not want to hear it again for this run.
+    ProfileAdvice advice;
+    bool          advice_dismissed = false;
+    // Set once when an objection worth interrupting for arrives, cleared by the
+    // panel that raises itself. An objection nobody sees is the thing this
+    // whole channel exists to avoid.
+    bool          advice_wants_attention = false;
+
     // --- panels --------------------------------------------------------------
     bool show_viewport   = true;
     bool show_pipeline   = true;

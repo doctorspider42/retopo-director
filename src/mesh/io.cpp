@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cstdio>
+#include <sstream>
 #include <cstring>
 #include <unordered_map>
 
@@ -79,6 +80,67 @@ const char* parse_obj_index(const char* p, const char* end, ObjKey& key)
     return p;
 }
 
+// Defined with the rest of the material helpers, below the obj reader.
+void downscale_to(Texture& tex, int limit);
+
+// An mtl is a flat list of "newmtl <name>" blocks. Only map_Kd and Kd matter
+// here: everything else describes shading this target does not have.
+std::shared_ptr<MaterialSet> load_mtl(const fs::path& mtl_path, int size_limit,
+                                      std::unordered_map<std::string, uint16_t>& by_name,
+                                      size_t* textured)
+{
+    std::string text;
+    if (!paths::read_file(mtl_path, text)) return nullptr;
+
+    auto set = std::make_shared<MaterialSet>();
+    const fs::path base_dir = mtl_path.parent_path();
+
+    SourceMaterial* current = nullptr;
+    std::string     map_file;
+
+    auto flush = [&] {
+        if (!current) return;
+        if (!map_file.empty()) {
+            if (current->base_color.load_png(base_dir / map_file) ||
+                current->base_color.load_png(map_file)) {
+                downscale_to(current->base_color, size_limit);
+                if (textured) ++*textured;
+            } else {
+                RD_WARN("mtl material '%s' points at %s, which will not open",
+                        current->name.c_str(), map_file.c_str());
+            }
+        }
+        map_file.clear();
+    };
+
+    std::istringstream in(text);
+    std::string        line;
+    while (std::getline(in, line)) {
+        const std::string t = trim(line);
+        if (t.empty() || t[0] == '#') continue;
+
+        if (t.rfind("newmtl", 0) == 0) {
+            flush();
+            set->materials.push_back({});
+            current = &set->materials.back();
+            current->name = trim(t.substr(6));
+            by_name[current->name] = uint16_t(set->materials.size() - 1);
+        } else if (current && t.rfind("map_Kd", 0) == 0) {
+            // The last token is the filename; the ones before it are options
+            // like -s or -o that this pipeline has no use for.
+            const std::string rest = trim(t.substr(6));
+            const size_t      sp   = rest.find_last_of(" \t");
+            map_file = (sp == std::string::npos) ? rest : trim(rest.substr(sp + 1));
+        } else if (current && t.rfind("Kd", 0) == 0) {
+            float r = 1.0f, g = 1.0f, b = 1.0f;
+            if (std::sscanf(t.c_str() + 2, "%f %f %f", &r, &g, &b) == 3)
+                current->base_factor = {r, g, b, 1.0f};
+        }
+    }
+    flush();
+    return set->materials.empty() ? nullptr : set;
+}
+
 LoadReport load_obj(const fs::path& path, Mesh& out, const LoadOptions& opts)
 {
     LoadReport rep;
@@ -95,6 +157,12 @@ LoadReport load_obj(const fs::path& path, Mesh& out, const LoadOptions& opts)
     std::vector<Vec2> raw_uv;
     std::vector<Vec4> raw_col;      // OBJ vertex colour extension: "v x y z r g b"
     bool              saw_colors = false;
+
+    // Material assignment is positional in an obj: "usemtl" applies to every
+    // face after it. Names are collected per triangle and resolved against the
+    // mtl at the end, because the mtllib line is not required to come first.
+    std::string              mtl_name, pending_material;
+    std::vector<std::string> face_materials;
 
     raw_pos.reserve(text.size() / 48);
 
@@ -150,6 +218,10 @@ LoadReport load_obj(const fs::path& path, Mesh& out, const LoadOptions& opts)
                 c = parse_float(c, eol, v);
                 raw_uv.push_back({u, v});
             }
+        } else if (opts.load_materials && c + 6 < eol && std::strncmp(c, "mtllib", 6) == 0) {
+            mtl_name = trim(std::string(c + 6, eol));
+        } else if (opts.load_materials && c + 6 < eol && std::strncmp(c, "usemtl", 6) == 0) {
+            pending_material = trim(std::string(c + 6, eol));
         } else if (c < eol && *c == 'f' && c + 1 < eol && (c[1] == ' ' || c[1] == '\t')) {
             ++c;
             face.clear();
@@ -196,11 +268,25 @@ LoadReport load_obj(const fs::path& path, Mesh& out, const LoadOptions& opts)
                     out.indices.push_back(v0);
                     out.indices.push_back(resolve(face[i]));
                     out.indices.push_back(resolve(face[i + 1]));
+                    if (opts.load_materials) face_materials.push_back(pending_material);
                 }
             }
         }
 
         p = eol < end ? eol + 1 : end;
+    }
+
+    if (opts.load_materials && !mtl_name.empty()) {
+        std::unordered_map<std::string, uint16_t> by_name;
+        out.materials = load_mtl(path.parent_path() / mtl_name,
+                                 opts.max_material_texture_size, by_name, &rep.materials);
+        if (out.materials) {
+            out.tri_material.assign(out.triangle_count(), 0);
+            for (size_t t = 0; t < out.triangle_count() && t < face_materials.size(); ++t) {
+                const auto it = by_name.find(face_materials[t]);
+                if (it != by_name.end()) out.tri_material[t] = it->second;
+            }
+        }
     }
 
     rep.source_vertices  = out.positions.size();
@@ -234,6 +320,119 @@ bool read_accessor_vec(const cgltf_accessor* acc, int components, std::vector<fl
                 c < static_cast<int>(tmp.size()) ? tmp[c] : 0.0f);
     }
     return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// Source materials
+// ---------------------------------------------------------------------------
+// A source map is routinely 2k or 4k and the atlas it will be resampled into is
+// 256. Keeping the full resolution in memory buys nothing: the bake reads each
+// texel through a closest point query, so it is already sampling far below the
+// source rate. Box filter down to `limit` on the longest side.
+void downscale_to(Texture& tex, int limit)
+{
+    if (limit <= 0 || tex.empty()) return;
+    const int longest = std::max(tex.width, tex.height);
+    if (longest <= limit) return;
+
+    const float scale = float(limit) / float(longest);
+    const int   nw = std::max(1, int(std::lround(tex.width * scale)));
+    const int   nh = std::max(1, int(std::lround(tex.height * scale)));
+
+    Texture out;
+    out.resize(nw, nh, 4);
+    for (int y = 0; y < nh; ++y) {
+        const int y0 = y * tex.height / nh, y1 = std::max(y0 + 1, (y + 1) * tex.height / nh);
+        for (int x = 0; x < nw; ++x) {
+            const int x0 = x * tex.width / nw, x1 = std::max(x0 + 1, (x + 1) * tex.width / nw);
+            Vec4 sum{0, 0, 0, 0};
+            int  n = 0;
+            for (int sy = y0; sy < y1 && sy < tex.height; ++sy)
+                for (int sx = x0; sx < x1 && sx < tex.width; ++sx) { sum = sum + tex.get(sx, sy); ++n; }
+            out.set(x, y, n > 0 ? sum * (1.0f / float(n)) : Vec4{1, 1, 1, 1});
+        }
+    }
+    tex = std::move(out);
+}
+
+bool decode_data_uri(const char* uri, Texture& tex)
+{
+    const char* comma = std::strchr(uri, ',');
+    if (!comma) return false;
+    if (std::strstr(uri, "base64") == nullptr || std::strstr(uri, "base64") > comma) return false;
+
+    static const auto value = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+
+    std::vector<uint8_t> bytes;
+    uint32_t acc = 0;
+    int      bits = 0;
+    for (const char* p = comma + 1; *p; ++p) {
+        const int v = value(*p);
+        if (v < 0) continue;                       // '=' padding and whitespace
+        acc = (acc << 6) | uint32_t(v);
+        bits += 6;
+        if (bits >= 8) { bits -= 8; bytes.push_back(uint8_t((acc >> bits) & 0xFF)); }
+    }
+    return tex.load_memory(bytes.data(), bytes.size());
+}
+
+std::shared_ptr<MaterialSet> load_gltf_materials(const cgltf_data* data, const fs::path& base_dir,
+                                                 int size_limit, size_t* textured)
+{
+    if (!data || data->materials_count == 0) return nullptr;
+
+    auto set = std::make_shared<MaterialSet>();
+    set->materials.resize(data->materials_count);
+
+    for (cgltf_size m = 0; m < data->materials_count; ++m) {
+        const cgltf_material& src = data->materials[m];
+        SourceMaterial&       dst = set->materials[m];
+        dst.name = src.name ? src.name : format("material_%zu", size_t(m));
+
+        const cgltf_texture_view* view = nullptr;
+        if (src.has_pbr_metallic_roughness) {
+            view = &src.pbr_metallic_roughness.base_color_texture;
+            const float* f = src.pbr_metallic_roughness.base_color_factor;
+            dst.base_factor = {f[0], f[1], f[2], f[3]};
+        } else if (src.has_pbr_specular_glossiness) {
+            view = &src.pbr_specular_glossiness.diffuse_texture;
+            const float* f = src.pbr_specular_glossiness.diffuse_factor;
+            dst.base_factor = {f[0], f[1], f[2], f[3]};
+        }
+        if (!view || !view->texture || !view->texture->image) continue;
+
+        const cgltf_image& img = *view->texture->image;
+        bool ok = false;
+        if (img.buffer_view && img.buffer_view->buffer && img.buffer_view->buffer->data) {
+            // The glb case: the png is sitting in the binary chunk.
+            const uint8_t* bytes = static_cast<const uint8_t*>(img.buffer_view->buffer->data) +
+                                   img.buffer_view->offset;
+            ok = dst.base_color.load_memory(bytes, img.buffer_view->size);
+        } else if (img.uri) {
+            if (std::strncmp(img.uri, "data:", 5) == 0) {
+                ok = decode_data_uri(img.uri, dst.base_color);
+            } else {
+                std::string uri = img.uri;
+                cgltf_decode_uri(uri.data());
+                ok = dst.base_color.load_png(base_dir / uri.c_str());
+                if (!ok) RD_WARN("material '%s' points at %s, which will not open",
+                                 dst.name.c_str(), uri.c_str());
+            }
+        }
+        if (ok) {
+            downscale_to(dst.base_color, size_limit);
+            if (textured) ++*textured;
+        }
+    }
+    return set;
 }
 
 LoadReport load_gltf(const fs::path& path, Mesh& out, const LoadOptions& opts)
@@ -408,6 +607,7 @@ LoadReport load_gltf(const fs::path& path, Mesh& out, const LoadOptions& opts)
                 }
             }
 
+            const size_t tris_before = out.triangle_count();
             if (prim.indices) {
                 const cgltf_size ic = prim.indices->count;
                 out.indices.reserve(out.indices.size() + ic);
@@ -419,7 +619,22 @@ LoadReport load_gltf(const fs::path& path, Mesh& out, const LoadOptions& opts)
                 for (size_t v = 0; v < vcount; ++v)
                     out.indices.push_back(base + static_cast<uint32_t>(v));
             }
+
+            if (opts.load_materials) {
+                const uint16_t mat =
+                    prim.material ? uint16_t(cgltf_material_index(data, prim.material)) : 0;
+                out.tri_material.resize(out.triangle_count(), mat);
+                for (size_t t = tris_before; t < out.triangle_count(); ++t)
+                    out.tri_material[t] = mat;
+            }
         }
+    }
+
+    if (opts.load_materials) {
+        out.materials = load_gltf_materials(data, path.parent_path(),
+                                            opts.max_material_texture_size, &rep.materials);
+        if (out.materials && out.tri_material.size() != out.triangle_count())
+            out.tri_material.assign(out.triangle_count(), 0);
     }
 
     if (data->meshes_count > 0 && data->meshes[0].name) out.name = data->meshes[0].name;
@@ -483,6 +698,67 @@ struct FbxSkeleton {
     }
 };
 
+// FBX says "diffuse" where glTF says "base colour", and a file exported from a
+// PBR tool carries both. Prefer the PBR slot and fall back to the legacy one.
+const ufbx_texture* fbx_base_texture(const ufbx_material* mat)
+{
+    if (!mat) return nullptr;
+    if (mat->pbr.base_color.texture)    return mat->pbr.base_color.texture;
+    if (mat->fbx.diffuse_color.texture) return mat->fbx.diffuse_color.texture;
+    return nullptr;
+}
+
+std::shared_ptr<MaterialSet> load_fbx_materials(const ufbx_scene* scene, const fs::path& base_dir,
+                                                int size_limit, size_t* textured)
+{
+    if (!scene || scene->materials.count == 0) return nullptr;
+
+    auto set = std::make_shared<MaterialSet>();
+    set->materials.resize(scene->materials.count);
+
+    for (size_t m = 0; m < scene->materials.count; ++m) {
+        const ufbx_material* src = scene->materials.data[m];
+        SourceMaterial&      dst = set->materials[m];
+        dst.name = string_from_ufbx(src->name);
+        if (dst.name.empty()) dst.name = format("material_%zu", m);
+
+        const ufbx_material_map& factor =
+            src->pbr.base_color.has_value ? src->pbr.base_color : src->fbx.diffuse_color;
+        if (factor.has_value)
+            dst.base_factor = {float(factor.value_vec4.x), float(factor.value_vec4.y),
+                               float(factor.value_vec4.z), 1.0f};
+
+        const ufbx_texture* tex = fbx_base_texture(src);
+        if (!tex) continue;
+
+        bool ok = false;
+        if (tex->content.size > 0 && tex->content.data) {
+            ok = dst.base_color.load_memory(static_cast<const uint8_t*>(tex->content.data),
+                                            tex->content.size);
+        }
+        if (!ok) {
+            // Exporters write an absolute path from the authoring machine, so
+            // the file beside the model is the one that actually exists.
+            for (const ufbx_string* candidate : {&tex->filename, &tex->absolute_filename,
+                                                 &tex->relative_filename}) {
+                const std::string name = string_from_ufbx(*candidate);
+                if (name.empty()) continue;
+                const fs::path direct = name;
+                if (dst.base_color.load_png(direct)) { ok = true; break; }
+                if (dst.base_color.load_png(base_dir / direct.filename())) { ok = true; break; }
+            }
+        }
+        if (ok) {
+            downscale_to(dst.base_color, size_limit);
+            if (textured) ++*textured;
+        } else {
+            RD_DEBUG("material '%s' has a base colour texture that could not be read",
+                     dst.name.c_str());
+        }
+    }
+    return set;
+}
+
 LoadReport load_fbx(const fs::path& path, Mesh& out, const LoadOptions& opts)
 {
     LoadReport rep;
@@ -497,11 +773,13 @@ LoadReport load_fbx(const fs::path& path, Mesh& out, const LoadOptions& opts)
     lo.target_axes        = ufbx_axes_right_handed_y_up;
     lo.target_unit_meters = 1.0f;
     lo.space_conversion   = UFBX_SPACE_CONVERSION_MODIFY_GEOMETRY;
-    // Nothing downstream reads animation, textures or embedded blobs, and a
-    // character file carries megabytes of all three.
+    // Animation is never read and a character file carries megabytes of it.
+    // Textures are read only when somebody is going to bake from them, which
+    // is the usual case but not the cheap one: an fbx embeds its maps at full
+    // authored resolution.
     lo.ignore_animation    = true;
-    lo.ignore_embedded     = true;
-    lo.load_external_files = false;
+    lo.ignore_embedded     = !opts.load_materials;
+    lo.load_external_files = opts.load_materials;
     // Missing normals are computed at the end of load(), the same as for OBJ.
     lo.generate_missing_normals = false;
 
@@ -513,6 +791,10 @@ LoadReport load_fbx(const fs::path& path, Mesh& out, const LoadOptions& opts)
         rep.error = "ufbx: " + trim(buffer);
         return rep;
     }
+
+    if (opts.load_materials)
+        out.materials = load_fbx_materials(scene, path.parent_path(),
+                                           opts.max_material_texture_size, &rep.materials);
 
     // --- skeleton ----------------------------------------------------------
     FbxSkeleton skeleton;
@@ -592,6 +874,18 @@ LoadReport load_fbx(const fs::path& path, Mesh& out, const LoadOptions& opts)
             // Quads and n-gons are the norm in a file out of a DCC. ufbx fans
             // them, and returns zero triangles for the degenerate ones.
             const uint32_t tris = ufbx_triangulate_face(fan.data(), fan.size(), mesh, face);
+
+            if (opts.load_materials) {
+                // face_material indexes this mesh's own material list; the set
+                // built above is indexed by the scene's, so hop through it.
+                uint16_t mat = 0;
+                if (f < mesh->face_material.count) {
+                    const uint32_t local = mesh->face_material.data[f];
+                    if (local < mesh->materials.count && mesh->materials.data[local])
+                        mat = uint16_t(mesh->materials.data[local]->typed_id);
+                }
+                out.tri_material.insert(out.tri_material.end(), tris, mat);
+            }
 
             for (uint32_t t = 0; t < tris * 3; ++t) {
                 const uint32_t ix = fan[t];
@@ -710,6 +1004,13 @@ LoadReport load(const fs::path& path, Mesh& out, const LoadOptions& opts)
 
     rep.dropped_triangles = out.remove_degenerate();
 
+    // Before the weld, while both sides of every uv seam still exist.
+    const size_t triangles_at_snapshot = out.triangle_count();
+    if (opts.load_materials && out.has_uvs()) {
+        out.corner_uvs.resize(out.indices.size());
+        for (size_t i = 0; i < out.indices.size(); ++i) out.corner_uvs[i] = out.uvs[out.indices[i]];
+    }
+
     if (opts.weld) {
         const Aabb  box = out.bounds();
         const float eps = std::max(box.diagonal() * opts.weld_epsilon_rel, 1e-9f);
@@ -718,15 +1019,30 @@ LoadReport load(const fs::path& path, Mesh& out, const LoadOptions& opts)
 
     out.compact();
 
+    // Anything that dropped a triangle after the snapshot invalidates it; the
+    // per vertex uvs are still there to fall back on.
+    if (!out.corner_uvs.empty() && out.triangle_count() != triangles_at_snapshot) {
+        RD_DEBUG("corner uvs dropped: the triangle count moved from %zu to %zu after welding",
+                 triangles_at_snapshot, out.triangle_count());
+        out.corner_uvs.clear();
+    }
+
     if (opts.normalise) out.normalise_to_unit(true);
 
     if (opts.force_recompute_normals || !out.has_normals())
         out.compute_normals(opts.sharp_angle_degrees);
 
     rep.seconds = watch.seconds();
-    RD_INFO("loaded %s: %zu tri, %zu vtx, %zu joints in %s",
+    std::string material_note;
+    if (out.materials && !out.materials->materials.empty()) {
+        size_t bytes = 0;
+        for (const SourceMaterial& m : out.materials->materials) bytes += m.base_color.byte_size();
+        material_note = format(", %zu of %zu materials textured (%.1f MB)", rep.materials,
+                               out.materials->materials.size(), double(bytes) / (1024.0 * 1024.0));
+    }
+    RD_INFO("loaded %s: %zu tri, %zu vtx, %zu joints%s in %s",
             path.filename().string().c_str(), out.triangle_count(), out.vertex_count(),
-            out.armature.size(), format_duration(rep.seconds).c_str());
+            out.armature.size(), material_note.c_str(), format_duration(rep.seconds).c_str());
     return rep;
 }
 

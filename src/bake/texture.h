@@ -1,8 +1,11 @@
 #pragma once
 
-// Minimal CPU image plus the palette work a console target needs. No GPU is
-// involved: the bake has to run identically in headless mode.
+// The palette work a console target needs, on top of the plain CPU image in
+// core/image.h. No GPU is involved: the bake has to run identically in
+// headless mode. Texture is re-exported through this header so the renderer,
+// the exporter and the bake keep including one thing.
 
+#include "core/image.h"
 #include "core/math.h"
 
 #include <cstdint>
@@ -12,30 +15,6 @@
 
 namespace rd {
 
-struct Texture {
-    int                  width    = 0;
-    int                  height   = 0;
-    int                  channels = 4;
-    std::vector<uint8_t> pixels;      // row major, top row first
-
-    bool   empty() const { return width <= 0 || height <= 0 || pixels.empty(); }
-    size_t byte_size() const { return pixels.size(); }
-
-    void resize(int w, int h, int c = 4)
-    {
-        width = w; height = h; channels = c;
-        pixels.assign(size_t(w) * size_t(h) * size_t(c), 0);
-    }
-
-    uint8_t*       at(int x, int y)       { return &pixels[(size_t(y) * width + x) * channels]; }
-    const uint8_t* at(int x, int y) const { return &pixels[(size_t(y) * width + x) * channels]; }
-
-    void set(int x, int y, Vec4 linear_rgba);
-    Vec4 get(int x, int y) const;
-
-    bool save_png(const std::filesystem::path& path) const;
-    bool load_png(const std::filesystem::path& path);
-};
 
 // Coverage mask produced by the rasteriser, used for dilation and for the
 // utilisation metric in the validation report.
@@ -70,18 +49,5 @@ void apply_palette(Texture& tex, const CoverageMask& mask, const Palette& palett
 // index image. Engines that want a CLUT read this instead of the RGBA png.
 bool save_indexed(const std::filesystem::path& base_path, const Texture& tex,
                   const Palette& palette, std::string* error = nullptr);
-
-// sRGB conversions. The bake works in linear and only encodes on the way out.
-inline float linear_to_srgb(float v)
-{
-    v = saturate(v);
-    return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
-}
-
-inline float srgb_to_linear(float v)
-{
-    v = saturate(v);
-    return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
-}
 
 } // namespace rd

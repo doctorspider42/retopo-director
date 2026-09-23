@@ -75,6 +75,33 @@ struct UnwrapResult {
 UnwrapResult unwrap_uvs(Mesh& mesh, int width, int height, int padding,
                         float stretch_tolerance);
 
+// Carries the source uv layout onto `mesh` by projection, so the low poly reads
+// the original artwork through the coordinates it was painted in rather than
+// through a freshly invented atlas.
+//
+// The vertex buffer is rebuilt: a corner needs its own uv whenever the corners
+// around a vertex come from different parts of the source layout, which is most
+// of them. `mesh.tri_material` is filled at the same time, because the uv only
+// means anything paired with the material it indexes into.
+struct UvTransferResult {
+    bool   ok = false;
+    size_t triangles_mapped   = 0;
+    size_t triangles_fallback = 0;  // corners disagreed, extrapolated from one source triangle
+    size_t triangles_unmapped = 0;  // nothing of the source within reach
+    size_t vertices_before    = 0;
+    size_t vertices_after     = 0;
+    std::string error;
+};
+UvTransferResult transfer_source_uvs(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
+                                     float search_distance);
+
+// Packs an existing uv layout into one atlas page without re-parameterising it.
+// `carried` is any per vertex array that must follow the rebuilt vertex buffer,
+// which is how the source uvs survive the repack to be sampled from.
+UnwrapResult repack_uvs(Mesh& mesh, std::vector<Vec2>* carried, int width, int height,
+                        int padding);
+
+
 // The light rig used by the bake. Deterministic and documented so the result is
 // reproducible and an artist can match it in their DCC.
 struct BakeLight {
