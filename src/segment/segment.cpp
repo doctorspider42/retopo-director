@@ -297,9 +297,11 @@ void segment_mesh(const Mesh& mesh, const MeshAnalysis& analysis, Segmentation& 
         // the pivot. Gives limbs their own patches from the start.
         std::unordered_map<int, uint32_t> best_tri;
         std::unordered_map<int, float>    best_dist;
+        std::unordered_map<int, double>   owned_area;
         for (size_t t = 0; t < tcount; ++t) {
             const int j = joint[t];
             if (j < 0 || static_cast<size_t>(j) >= mesh.armature.size()) continue;
+            owned_area[j] += mesh.triangle_area(t);
             const float d = length(centroid[t] - mesh.armature.joints[j].bind_position);
             const auto it = best_dist.find(j);
             if (it == best_dist.end() || d < it->second) {
@@ -307,12 +309,21 @@ void segment_mesh(const Mesh& mesh, const MeshAnalysis& analysis, Segmentation& 
                 best_tri[j]  = static_cast<uint32_t>(t);
             }
         }
+        // When there are more joints than regions, the joints that own the
+        // most surface get the seeds. Taking them in index order kept the
+        // first 28 of a 65 joint skeleton - spine, arms and every finger bone
+        // - and left the legs, which a UE style rig numbers last, without a
+        // seed of their own: both legs and both feet grew out of the pelvis
+        // as one region of 45% of the body, and no brief could ask for feet.
         std::vector<std::pair<int, uint32_t>> ordered(best_tri.begin(), best_tri.end());
+        std::sort(ordered.begin(), ordered.end(), [&](const auto& a, const auto& b) {
+            const double wa = owned_area[a.first], wb = owned_area[b.first];
+            if (wa != wb) return wa > wb;
+            return a.first < b.first;
+        });
+        if (static_cast<int>(ordered.size()) > target) ordered.resize(size_t(target));
         std::sort(ordered.begin(), ordered.end());
-        for (const auto& [j, t] : ordered) {
-            if (static_cast<int>(seeds.size()) >= target) break;
-            seeds.push_back(t);
-        }
+        for (const auto& [j, t] : ordered) seeds.push_back(t);
     }
 
     if (seeds.empty()) {
