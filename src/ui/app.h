@@ -18,6 +18,9 @@ struct AppOptions {
     bool        no_settings = false;
     bool        autorun  = false;   // start the pipeline as soon as the window opens
     std::string backend;            // auto | quad_field | quadric, overrides the panel
+    // A run's reports/prompts folder: the director's replies are read back from
+    // it instead of asking a model. Implies --llm.
+    std::string replay;
 
     // Region split. Empty keeps whatever settings.json holds; the rest override
     // it for this run only, which is how the two paths get compared on one mesh.

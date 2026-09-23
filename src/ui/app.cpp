@@ -510,6 +510,12 @@ int run_application(const AppOptions& opts)
     if (!opts.sam_checkpoint.empty()) app->settings.segmenter.sam.checkpoint = opts.sam_checkpoint;
     if (!opts.sam_device.empty())     app->settings.segmenter.sam.device     = opts.sam_device;
 
+    if (!opts.replay.empty()) {
+        app->settings.llm.kind       = LlmBackendKind::Replay;
+        app->settings.llm.replay_dir = opts.replay;
+        app->settings.use_llm        = true;
+    }
+
     // --no-llm wins over --llm: the one that takes something away is the safe
     // reading of a contradictory command line.
     if (opts.force_llm) app->settings.use_llm = true;

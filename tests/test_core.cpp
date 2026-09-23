@@ -4,10 +4,13 @@
 #include "test.h"
 
 #include "core/json.h"
+#include "core/paths.h"
+#include "llm/backend.h"
 #include "core/thread_pool.h"
 #include "pipeline/pipeline.h"
 
 #include <atomic>
+#include <filesystem>
 #include <numeric>
 #include <stdexcept>
 
@@ -128,4 +131,47 @@ TEST(overall_progress_never_rewinds)
             }
     CHECK(!rewound);
     CHECK_NEAR(stage_overall_progress(Stage::Done, 0.0f), 1.0, 1e-6);
+}
+
+TEST(replay_backend_answers_in_recorded_order_per_label)
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "rd_test_replay";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto put = [&](const char* name, const char* text) { paths::write_file(dir / name, text); };
+    put("00_name_regions_text.txt", R"({"regions": []})");
+    put("01_review_text.txt", R"(Looks fine. {"verdict": "accept"})");
+    put("02_review_text.txt", R"({"verdict": "iterate"})");
+    put("01_review_reply.txt", "the raw envelope, which replay must ignore");
+
+    LlmConfig cfg;
+    cfg.kind       = LlmBackendKind::Replay;
+    cfg.replay_dir = dir.string();
+    auto llm = make_llm_backend(cfg);
+    REQUIRE(llm);
+    std::string reason;
+    CHECK(llm->available(&reason));
+
+    LlmRequest review;
+    review.label = "review";
+    const LlmResponse a = llm->complete(review);
+    const LlmResponse b = llm->complete(review);
+    const LlmResponse c = llm->complete(review);
+    CHECK(a.ok && a.json_ok);
+    CHECK_EQ(json_get<std::string>(a.json, "verdict", ""), std::string("accept"));
+    CHECK(b.ok);
+    CHECK_EQ(json_get<std::string>(b.json, "verdict", ""), std::string("iterate"));
+    // Running out is an error the director handles, not a crash or a repeat.
+    CHECK(!c.ok);
+    CHECK(!c.error.empty());
+
+    LlmRequest naming;
+    naming.label = "name_regions";
+    CHECK(llm->complete(naming).ok);
+
+    LlmConfig missing = cfg;
+    missing.replay_dir = (dir / "nope").string();
+    CHECK(!make_llm_backend(missing)->available(&reason));
+    fs::remove_all(dir);
 }

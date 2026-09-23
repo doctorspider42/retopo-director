@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <functional>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace rdtest {
@@ -23,6 +24,13 @@ struct Case {
 
 std::vector<Case>& registry();
 void                fail(const char* file, int line, const std::string& what);
+
+template <typename T>
+std::string to_text(const T& v)
+{
+    if constexpr (std::is_arithmetic_v<T>) return std::to_string(v);
+    else return std::string(v);
+}
 
 struct Registrar {
     Registrar(const char* name, std::function<void()> fn) { registry().push_back({name, std::move(fn)}); }
@@ -63,8 +71,8 @@ double signed_volume(const rd::Mesh& m);
         const auto vb_ = (b);                                                   \
         if (!(va_ == vb_))                                                      \
             ::rdtest::fail(__FILE__, __LINE__,                                  \
-                           std::string(#a " == " #b "  (") + std::to_string(va_) + \
-                               " vs " + std::to_string(vb_) + ")");             \
+                           std::string(#a " == " #b "  (") + ::rdtest::to_text(va_) + \
+                               " vs " + ::rdtest::to_text(vb_) + ")");             \
     } while (0)
 
 #define CHECK_NEAR(a, b, tol)                                                   \
@@ -72,6 +80,6 @@ double signed_volume(const rd::Mesh& m);
         const double va_ = double(a), vb_ = double(b);                          \
         if (!(std::fabs(va_ - vb_) <= double(tol)))                             \
             ::rdtest::fail(__FILE__, __LINE__,                                  \
-                           std::string(#a " ~ " #b "  (") + std::to_string(va_) + \
-                               " vs " + std::to_string(vb_) + ")");             \
+                           std::string(#a " ~ " #b "  (") + ::rdtest::to_text(va_) + \
+                               " vs " + ::rdtest::to_text(vb_) + ")");             \
     } while (0)

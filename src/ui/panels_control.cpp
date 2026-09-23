@@ -28,7 +28,7 @@ namespace {
 
 const char* const kBackendNames[]  = {"Auto", "Quad field", "Quadric"};
 const char* const kFidelityNames[] = {"Geometry", "Balanced", "Texture"};
-const char* const kLlmNames[]      = {"Disabled", "Claude CLI", "Codex CLI", "OpenAI API"};
+const char* const kLlmNames[]      = {"Disabled", "Claude CLI", "Codex CLI", "OpenAI API", "Replay"};
 const char* const kSegmenterNames[] = {"Geometric", "SAM", "Auto"};
 // The two ways of filling the knob panel. One control, two halves: a button
 // that says "run the director" over a checkbox that can switch the director off
@@ -982,7 +982,7 @@ void draw_director_settings(AppState& app)
     if (card_begin("backend_card", "Backend")) {
         int kind = int(cfg.kind);
         ImGui::SetNextItemWidth(-FLT_MIN);
-        if (segmented("llm_kind", &kind, kLlmNames, 4)) cfg.kind = LlmBackendKind(kind);
+        if (segmented("llm_kind", &kind, kLlmNames, 5)) cfg.kind = LlmBackendKind(kind);
 
         spacer(8.0f);
         begin_form("llm_form", 170.0f);
@@ -1003,6 +1003,11 @@ void draw_director_settings(AppState& app)
                        "The key is never written to the settings file.");
             toggle("Send images", &cfg.openai_send_images,
                    "Off saves tokens but leaves the model judging by numbers alone.");
+            break;
+        case LlmBackendKind::Replay:
+            text_input("Recorded run", cfg.replay_dir, "<run>/reports/prompts",
+                       "Answers every request with what an earlier run's director said, "
+                       "in the same order. For repeating a run exactly, without the model.");
             break;
         default:
             break;

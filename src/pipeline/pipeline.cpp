@@ -291,6 +291,10 @@ LlmResponse Pipeline::ask(const LlmRequest& req, const char* stage_label)
     res = llm_->complete(req, &cancel_);
 
     if (!res.raw.empty()) paths::write_file(dir / (base + "_reply.txt"), res.raw);
+    // The reply as the director layer saw it, without the backend's envelope.
+    // This is what the Replay backend reads back, so a run can be repeated
+    // exactly without the model: --replay <this run>/reports/prompts.
+    if (res.ok) paths::write_file(dir / (base + "_text.txt"), res.text);
 
     LlmExchange exchange;
     exchange.stage  = stage_label;

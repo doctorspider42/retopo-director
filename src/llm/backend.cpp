@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <map>
 
 namespace rd {
 namespace {
@@ -348,6 +349,65 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+class ReplayBackend final : public ILlmBackend {
+public:
+    explicit ReplayBackend(const LlmConfig& c) : dir_(c.replay_dir) {}
+
+    bool available(std::string* reason) const override
+    {
+        std::error_code ec;
+        if (dir_.empty() || !std::filesystem::is_directory(dir_, ec)) {
+            if (reason) *reason = "no replay folder: point it at a run's reports/prompts";
+            return false;
+        }
+        for (const auto& e : std::filesystem::directory_iterator(dir_, ec))
+            if (ends_with(e.path().filename().string(), "_text.txt")) return true;
+        if (reason) *reason = "the replay folder holds no recorded replies (*_text.txt)";
+        return false;
+    }
+    const char*    name() const override { return "Replay"; }
+    LlmBackendKind kind() const override { return LlmBackendKind::Replay; }
+    std::string    describe() const override { return "replaying " + dir_.string(); }
+
+    LlmResponse complete(const LlmRequest& req, const std::atomic<bool>*) override
+    {
+        LlmResponse res;
+        res.command = describe();
+        // Recorded as NN_<label>_text.txt, NN being the iteration; sorting the
+        // names puts them back in the order they were asked.
+        const std::string suffix = "_" + slugify(req.label) + "_text.txt";
+        std::vector<std::filesystem::path> matches;
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(dir_, ec)) {
+            const std::string f = e.path().filename().string();
+            if (ends_with(f, suffix)) matches.push_back(e.path());
+        }
+        std::sort(matches.begin(), matches.end());
+
+        const size_t k = asked_[req.label]++;
+        if (k >= matches.size()) {
+            res.error = format("no recorded reply #%zu for '%s' (%zu recorded)", k + 1,
+                               req.label.c_str(), matches.size());
+            return res;
+        }
+        std::string text;
+        if (!paths::read_file(matches[k], text)) {
+            res.error = "cannot read " + matches[k].string();
+            return res;
+        }
+        res.text = text;
+        res.raw  = text;
+        res.ok   = true;
+        finish(res, req);
+        return res;
+    }
+
+private:
+    std::filesystem::path             dir_;
+    std::map<std::string, size_t>     asked_;
+};
+
+// ---------------------------------------------------------------------------
 class DisabledBackend final : public ILlmBackend {
 public:
     bool available(std::string* reason) const override
@@ -376,6 +436,7 @@ const char* llm_backend_name(LlmBackendKind k)
     case LlmBackendKind::ClaudeCli: return "claude_cli";
     case LlmBackendKind::CodexCli:  return "codex_cli";
     case LlmBackendKind::OpenAiApi: return "openai_api";
+    case LlmBackendKind::Replay:    return "replay";
     default:                        return "disabled";
     }
 }
@@ -386,6 +447,7 @@ const char* llm_backend_label(LlmBackendKind k)
     case LlmBackendKind::ClaudeCli: return "Claude CLI";
     case LlmBackendKind::CodexCli:  return "Codex CLI";
     case LlmBackendKind::OpenAiApi: return "OpenAI API";
+    case LlmBackendKind::Replay:    return "Replay";
     default:                        return "Disabled";
     }
 }
@@ -395,6 +457,7 @@ LlmBackendKind llm_backend_from_name(std::string_view s)
     if (iequals(s, "claude_cli") || iequals(s, "claude")) return LlmBackendKind::ClaudeCli;
     if (iequals(s, "codex_cli")  || iequals(s, "codex"))  return LlmBackendKind::CodexCli;
     if (iequals(s, "openai_api") || iequals(s, "openai")) return LlmBackendKind::OpenAiApi;
+    if (iequals(s, "replay"))                             return LlmBackendKind::Replay;
     return LlmBackendKind::Disabled;
 }
 
@@ -424,6 +487,7 @@ Json LlmConfig::to_json() const
     j["openai_api"]  = o;
 
     j["timeout_seconds"] = timeout_seconds;
+    j["replay_dir"]      = replay_dir;
     j["save_transcript"] = save_transcript;
     return j;
 }
@@ -449,6 +513,7 @@ LlmConfig LlmConfig::from_json(const Json& j)
     c.openai_send_images = json_get<bool>(oo, "send_images", c.openai_send_images);
 
     c.timeout_seconds = std::clamp(json_get<int>(j, "timeout_seconds", c.timeout_seconds), 10, 3600);
+    c.replay_dir      = json_get<std::string>(j, "replay_dir", "");
     c.save_transcript = json_get<bool>(j, "save_transcript", c.save_transcript);
     return c;
 }
@@ -459,6 +524,7 @@ std::unique_ptr<ILlmBackend> make_llm_backend(const LlmConfig& config)
     case LlmBackendKind::ClaudeCli: return std::make_unique<ClaudeCliBackend>(config);
     case LlmBackendKind::CodexCli:  return std::make_unique<CodexCliBackend>(config);
     case LlmBackendKind::OpenAiApi: return std::make_unique<OpenAiBackend>(config);
+    case LlmBackendKind::Replay:    return std::make_unique<ReplayBackend>(config);
     default:                        return std::make_unique<DisabledBackend>();
     }
 }

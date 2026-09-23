@@ -28,6 +28,7 @@ void print_usage()
         "  --no-llm          Skip the director; run the deterministic half only\n"
         "  --llm             Run the director even when the saved settings turn it off\n"
         "  --backend <name>  Force auto | quad_field | quadric\n"
+        "  --replay <dir>    Answer the director from a recorded run (reports/prompts)\n"
         "  --run             Start the pipeline as soon as the window opens\n"
         "  --verbose         Mirror the log to stderr\n"
         "  --no-gpu          Do not create a GL context, even in headless mode\n"
@@ -81,6 +82,8 @@ int main(int argc, char** argv)
             opts.no_settings = true;
         } else if (!std::strcmp(a, "--run")) {
             opts.autorun = true;
+        } else if (!std::strcmp(a, "--replay")) {
+            opts.replay = next("--replay");
         } else if (!std::strcmp(a, "--backend")) {
             opts.backend = next("--backend");
         } else if (!std::strcmp(a, "--segmenter")) {
