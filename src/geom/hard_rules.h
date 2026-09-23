@@ -37,8 +37,18 @@ struct HardRuleReport {
 struct HardRuleOptions {
     float symmetry_epsilon_rel = 2.5e-3f;
     // Shells smaller than this share of the total area are dropped when the
-    // profile caps the shell count.
-    float min_shell_area_share = 0.02f;
+    // profile caps the shell count. Debris only: at 2% it stopped admitting at
+    // the first small piece, so a creature with 36 shells against a limit of
+    // 32 lost every one of its legs - each under 2% - rather than its four
+    // smallest scraps.
+    float min_shell_area_share = 0.002f;
+    // Share of the profile's triangle budget the shells other than the largest
+    // may hold between them; 0 leaves it unbounded. Off by default, because an
+    // asset made mostly of pieces - a creature whose carapace and legs are all
+    // separate - is destroyed by it. The budget re-fit turns it on when it
+    // stalls: the costumed ranger's 32 kept pieces put a floor of 2150
+    // triangles under a 1400 budget that no smaller budget could move.
+    float secondary_shell_budget_share = 0.0f;
     // Upper bound on triangles added by the joint loop rule, as a fraction of
     // the profile budget.
     float joint_split_headroom = 0.08f;
@@ -64,7 +74,13 @@ size_t repair_nonmanifold(Mesh& mesh);
 // `mirror` makes the cull symmetry aware: mirrored shells are admitted or
 // dropped as a pair, never one without the other. Pass null when the asset is
 // not being kept symmetric.
-size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share);
+//
+// `secondary_triangle_cap` bounds the triangles every shell but the largest may
+// hold between them; 0 means no bound. A closed piece cannot be simplified
+// below a handful of triangles, so a costume of dozens of trinkets has a floor
+// the simplifier cannot go under, and past the cap the body would starve.
+size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
+                    const SymmetryPlane* mirror = nullptr, int secondary_triangle_cap = 0);
 size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& source_bvh,
                           float density, int max_new_triangles);
 

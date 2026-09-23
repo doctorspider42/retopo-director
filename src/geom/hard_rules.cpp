@@ -443,7 +443,7 @@ size_t repair_nonmanifold(Mesh& mesh)
 }
 
 size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
-                    const SymmetryPlane* mirror)
+                    const SymmetryPlane* mirror, int secondary_triangle_cap)
 {
     if (max_shells <= 0 || mesh.empty()) return 0;
 
@@ -466,6 +466,7 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
     }
 
     std::map<uint32_t, double> shell_area;
+    std::map<uint32_t, int>    shell_tris;
     std::vector<uint32_t>      tri_shell(tcount);
     double                     total_area = 0.0;
     for (size_t t = 0; t < tcount; ++t) {
@@ -473,6 +474,7 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
         tri_shell[t] = root;
         const double a = mesh.triangle_area(t);
         shell_area[root] += a;
+        ++shell_tris[root];
         total_area += a;
     }
     if (shell_area.size() <= size_t(max_shells)) return 0;
@@ -529,6 +531,7 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
     }
 
     std::unordered_set<uint32_t> keep;
+    int secondary_tris = 0;
     for (size_t i = 0; i < ranked.size(); ++i) {
         const uint32_t root = ranked[i].second;
         if (keep.count(root)) continue;
@@ -544,6 +547,11 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
             // order would drop a bigger piece of the asset for a smaller one.
             break;
         }
+        const int cost = shell_tris[root] + (needed == 2 ? shell_tris[it->second] : 0);
+        if (!keep.empty() && secondary_triangle_cap > 0 &&
+            secondary_tris + cost > secondary_triangle_cap)
+            break;
+        if (!keep.empty()) secondary_tris += cost;
         keep.insert(root);
         if (needed == 2) keep.insert(it->second);
     }
@@ -835,7 +843,8 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
     if (profile.max_shells > 0) {
         const size_t before_shell_cull = mesh.triangle_count();
         rep.removed_shells = limit_shells(mesh, profile.max_shells, opts.min_shell_area_share,
-                                          rep.symmetry_applied ? &symmetry : nullptr);
+                                          rep.symmetry_applied ? &symmetry : nullptr,
+                                          int(profile.max_triangles * opts.secondary_shell_budget_share));
         if (rep.removed_shells) {
             rep.note(format("dropped %zu triangles in loose shells (profile allows %d)",
                             rep.removed_shells, profile.max_shells));

@@ -706,6 +706,11 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         // Largest budget known to land legal, smallest known to land over.
         int              legal_budget   = -1;
         int              illegal_budget = std::numeric_limits<int>::max();
+        // Triangles the previous over-budget attempt came back with, and
+        // whether the shell cap has been engaged because shrinking stopped
+        // doing anything.
+        int              previous_over_tris = -1;
+        float            shell_cap_share    = s.retopo.hard_rules.secondary_shell_budget_share;
 
         for (int attempt = 0; attempt < kBudgetAttempts; ++attempt) {
             panel.resolve_budgets(effective_budget);
@@ -719,6 +724,7 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             // --- retopo -----------------------------------------------------
             set_stage(Stage::Retopologising, format("iteration %d", iteration));
             RetopoOptions ropts = s.retopo;
+            ropts.hard_rules.secondary_shell_budget_share = shell_cap_share;
             if (s.force_backend) {
                 ropts.forced_backend_valid = true;
                 ropts.forced_backend       = s.backend;
@@ -794,6 +800,25 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             const bool legal = !over_tri && !over_vert;
             if (legal) legal_budget   = std::max(legal_budget, effective_budget);
             else       illegal_budget = std::min(illegal_budget, effective_budget);
+
+            // A smaller budget that barely moved the triangle count means the
+            // count has a floor: dozens of separate pieces, each already as
+            // small as a closed piece can be. Shrinking further only starves
+            // the body, so the next attempt caps what the pieces may hold.
+            if (!legal && previous_over_tris > 0 && shell_cap_share <= 0.0f &&
+                tris * 10 > previous_over_tris * 9) {
+                shell_cap_share = 0.4f;
+                RD_INFO("budget re-fit stalled at %d triangles; capping the loose pieces at "
+                        "%.0f%% of the budget", tris, shell_cap_share * 100.0f);
+                // What was learnt about budgets no longer holds with fewer
+                // pieces, so the bracket starts over at the profile's own.
+                legal_budget       = -1;
+                illegal_budget     = std::numeric_limits<int>::max();
+                previous_over_tris = -1;
+                effective_budget   = s.profile.max_triangles;
+                if (attempt + 1 < kBudgetAttempts) continue;
+            }
+            if (!legal) previous_over_tris = tris;
 
             if (legal && fill >= kBudgetFillTarget) break;
 
