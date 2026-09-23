@@ -144,6 +144,21 @@ size_t enforce_symmetry(Mesh& mesh, const SymmetryPlane& plane, float epsilon,
 
     const int8_t keep = (pos_area >= neg_area) ? 1 : -1;
 
+    // Mirroring is the one hard rule that can throw geometry away, so it says
+    // how much. A half that is nowhere near half the mesh means the plane, not
+    // the retopology, is what made the asset small.
+    {
+        size_t on_plane = 0, kept_tris = 0;
+        for (size_t t = 0; t < tcount; ++t) {
+            if (tri_side[t] == 0)    ++on_plane;
+            else if (tri_side[t] == keep) ++kept_tris;
+        }
+        RD_DEBUG("symmetry: %zu tri in, keeping %zu on the %s side, %zu straddle the "
+                 "plane, area %.4f vs %.4f, eps %.5f",
+                 tcount, kept_tris, keep > 0 ? "positive" : "negative", on_plane,
+                 pos_area, neg_area, epsilon);
+    }
+
     // Collect the kept half.
     Mesh half;
     half.name             = mesh.name;
@@ -206,26 +221,46 @@ size_t enforce_symmetry(Mesh& mesh, const SymmetryPlane& plane, float epsilon,
         }
     }
 
+    if (reproject_onto && !reproject_onto->empty()) {
+        // Pull the surface back onto the high poly, which mirroring left it
+        // slightly off - and do it only for the half that was kept.
+        //
+        // Snapping every vertex independently, mirrored copies included, is
+        // what used to happen, and it quietly undoes the mirror: the source is
+        // never perfectly symmetric (this character scores 0.97 on its best
+        // plane), so the two copies of a vertex get pulled to two different
+        // places. The finer the low poly, the more faithfully it inherits the
+        // source's asymmetry, which is a strange way to fail - raising the
+        // budget made the asset stop passing a check it used to pass. So the
+        // kept half is reprojected and its mirror is derived from the result,
+        // which is exact by construction.
+        //
+        // This has to run before the weld, because that is the last moment at
+        // which `mirror_index` still says which vertex is whose reflection.
+        const float max_move = std::max(epsilon * 12.0f, 1e-6f);
+        for (size_t v = 0; v < half_v; ++v) {
+            Vec3&       p = half.positions[v];
+            const float d = dot(plane.normal, p) - plane.offset;
+
+            // The search is capped: a vertex allowed to jump across a thin
+            // feature turns its triangles inside out, which then bakes to black.
+            const ClosestHit hit = reproject_onto->closest_point(p, max_move);
+            if (hit.hit()) {
+                Vec3 snapped = hit.point;
+                if (std::fabs(d) <= epsilon)
+                    snapped = snapped - plane.normal * (dot(plane.normal, snapped) - plane.offset);
+                p = snapped;
+            }
+
+            const uint32_t m = mirror_index[v];
+            if (m != uint32_t(v) && m < half.positions.size())
+                half.positions[m] = plane.mirror(p);
+        }
+    }
+
     half.weld(epsilon * 0.5f);
     half.remove_degenerate();
     half.compact();
-
-    if (reproject_onto && !reproject_onto->empty()) {
-        // Mirrored vertices land on the mirror of the source surface, which is
-        // close but not identical when the input was only roughly symmetric.
-        // The search is capped: a vertex allowed to jump across a thin feature
-        // turns its triangles inside out, which then bakes to black.
-        const float max_move = std::max(epsilon * 12.0f, 1e-6f);
-        for (Vec3& p : half.positions) {
-            const float d = dot(plane.normal, p) - plane.offset;
-            const ClosestHit hit = reproject_onto->closest_point(p, max_move);
-            if (!hit.hit()) continue;
-            Vec3 snapped = hit.point;
-            if (std::fabs(d) <= epsilon)
-                snapped = snapped - plane.normal * (dot(plane.normal, snapped) - plane.offset);
-            p = snapped;
-        }
-    }
 
     const size_t mirrored = half_t;
     mesh = std::move(half);
@@ -407,7 +442,8 @@ size_t repair_nonmanifold(Mesh& mesh)
     return removed;
 }
 
-size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share)
+size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
+                    const SymmetryPlane* mirror)
 {
     if (max_shells <= 0 || mesh.empty()) return 0;
 
@@ -449,11 +485,67 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share)
         return a.second < b.second;
     });
 
+    // Mirrored shells have identical area, so the sort above separates them by
+    // nothing but their arbitrary root index, and a cut that lands between the
+    // two keeps one arm of a pair and deletes the other. The asset then fails
+    // the symmetry check it was mirrored to pass, and the reason is invisible:
+    // the shell count is right, the geometry is symmetric everywhere it still
+    // exists. Pair them up first and admit a pair or neither.
+    std::unordered_map<uint32_t, uint32_t> partner;
+    if (mirror) {
+        std::unordered_map<uint32_t, Vec3>  centroid;
+        std::unordered_map<uint32_t, float> weight;
+        for (size_t t = 0; t < tcount; ++t) {
+            const float a = mesh.triangle_area(t);
+            const Vec3  c = (mesh.positions[mesh.indices[t * 3 + 0]] +
+                             mesh.positions[mesh.indices[t * 3 + 1]] +
+                             mesh.positions[mesh.indices[t * 3 + 2]]) * (1.0f / 3.0f);
+            centroid[tri_shell[t]] = centroid[tri_shell[t]] + c * a;
+            weight[tri_shell[t]]  += a;
+        }
+        for (auto& [root, c] : centroid)
+            if (weight[root] > kEps) c = c * (1.0f / weight[root]);
+
+        const float tol = std::max(mesh.bounds().diagonal() * 0.01f, 1e-6f);
+        for (const auto& [area_a, root_a] : ranked) {
+            if (partner.count(root_a)) continue;
+            const Vec3 want = mirror->mirror(centroid[root_a]);
+            // A shell straddling the plane is its own mirror; leave it single.
+            if (length2(want - centroid[root_a]) <= tol * tol) continue;
+
+            uint32_t best = kInvalidIndex;
+            float    best_d2 = tol * tol;
+            for (const auto& [area_b, root_b] : ranked) {
+                if (root_b == root_a || partner.count(root_b)) continue;
+                if (std::fabs(area_b - area_a) > area_a * 0.05 + 1e-9) continue;
+                const float d2 = length2(want - centroid[root_b]);
+                if (d2 < best_d2) { best_d2 = d2; best = root_b; }
+            }
+            if (best != kInvalidIndex) {
+                partner[root_a] = best;
+                partner[best]   = root_a;
+            }
+        }
+    }
+
     std::unordered_set<uint32_t> keep;
-    for (size_t i = 0; i < ranked.size() && int(keep.size()) < max_shells; ++i) {
+    for (size_t i = 0; i < ranked.size(); ++i) {
+        const uint32_t root = ranked[i].second;
+        if (keep.count(root)) continue;
+
         const double share = total_area > 0.0 ? ranked[i].first / total_area : 0.0;
-        if (i > 0 && share < double(min_area_share)) break;
-        keep.insert(ranked[i].second);
+        if (!keep.empty() && share < double(min_area_share)) break;
+
+        const auto it = partner.find(root);
+        const int  needed = (it != partner.end() && !keep.count(it->second)) ? 2 : 1;
+        if (int(keep.size()) + needed > max_shells) {
+            // A pair that does not fit ends the admission rather than being
+            // halved; a later, smaller pair would fit but taking it out of
+            // order would drop a bigger piece of the asset for a smaller one.
+            break;
+        }
+        keep.insert(root);
+        if (needed == 2) keep.insert(it->second);
     }
     if (keep.empty()) keep.insert(ranked.front().second);
 
@@ -611,10 +703,29 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
     }
 
     if (profile.max_shells > 0) {
-        rep.removed_shells = limit_shells(mesh, profile.max_shells, opts.min_shell_area_share);
-        if (rep.removed_shells)
+        const size_t before_shell_cull = mesh.triangle_count();
+        rep.removed_shells = limit_shells(mesh, profile.max_shells, opts.min_shell_area_share,
+                                          rep.symmetry_applied ? &symmetry : nullptr);
+        if (rep.removed_shells) {
             rep.note(format("dropped %zu triangles in loose shells (profile allows %d)",
                             rep.removed_shells, profile.max_shells));
+
+            // A character authored as separate pieces - body, hood, belts, boots -
+            // reads `max_shells: 1` as an instruction to delete everything but the
+            // largest piece. That is a faithful reading of the profile and a
+            // catastrophic one for the asset, and it used to happen in silence:
+            // the validator then reports "1 shell, ok" over what is left of a
+            // torso, and every knob upstream looks like the thing to blame.
+            const float share = before_shell_cull > 0
+                                    ? float(rep.removed_shells) / float(before_shell_cull)
+                                    : 0.0f;
+            if (share > 0.15f)
+                RD_WARN("the shell limit discarded %.0f%% of the mesh (%zu of %zu triangles): "
+                        "this source is built from %zu separate pieces and the profile allows "
+                        "%d. Raise max_shells, or join the pieces before retopology.",
+                        share * 100.0f, rep.removed_shells, before_shell_cull,
+                        analysis.stats.shells, profile.max_shells);
+        }
     }
 
     // --- 4. deformation loops ----------------------------------------------

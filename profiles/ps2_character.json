@@ -1,10 +1,10 @@
 {
   "name": "ps2_character",
-  "description": "Playable third person character, PlayStation 2 class budget.",
+  "description": "Playable third person character, PlayStation 2 class budget. Costume pieces may stay separate: characters are authored as a body plus hood, belts, boots and straps, and a limit of one deletes all but the largest of them.",
   "geometry": {
     "max_triangles": 1400,
-    "max_vertices": 1200,
-    "max_shells": 1,
+    "max_vertices": 1400,
+    "max_shells": 32,
     "max_bone_influences": 2,
     "require_manifold": true,
     "allow_ngons": false,

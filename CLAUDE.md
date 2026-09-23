@@ -79,6 +79,21 @@ keys off the region ids: renumber the regions without renumbering
 `tri_region` in the same pass and every region silently reports somebody else's
 area. Fill the gaps with `grow_unassigned_regions` before that.
 
+**`max_shells` is a demolition charge, not a check.** The shell limit does not
+reject a mesh with too many pieces, it deletes pieces until the count fits,
+largest first. A character authored as a body plus hood, belts, boots and
+straps is sixty five shells, so `max_shells: 1` silently reduces it to a torso
+and the validator then reports "1 shell, ok" over the wreckage.
+
+`ps2_character` allows 32. A skinned body is already around sixteen shells on
+its own - torso, head, two upper arms, two forearms, two hands, pelvis, two
+thighs, two shins, two boots - so a limit near that number spends the whole
+budget on the body and demolishes every costume piece. Measured on a costumed
+character, quadric scores the same at 16, 32 and 48 and falls apart at 64,
+where shell debris starts surviving; `min_shell_area_share` is what removes
+that debris, and `0` disables the rule entirely, debris included, so it scores
+worse than any of them.
+
 **`std::filesystem::exists` cannot see a Windows app execution alias.** The
 Microsoft Store installs python as a reparse point that only CreateProcess can
 resolve; opening it fails, so `exists()` says no and the interpreter looks
