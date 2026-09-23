@@ -4,6 +4,7 @@
   "geometry": {
     "max_triangles": 1400,
     "max_vertices": 1400,
+    "budget_tolerance": 0.03,
     "max_shells": 32,
     "max_bone_influences": 2,
     "require_manifold": true,

@@ -141,6 +141,7 @@ Json TargetProfile::to_json() const
     Json g;
     g["max_triangles"]         = max_triangles;
     g["max_vertices"]          = max_vertices;
+    g["budget_tolerance"]      = budget_tolerance;
     g["max_shells"]            = max_shells;
     g["max_bone_influences"]   = max_bone_influences;
     g["require_manifold"]      = require_manifold;
@@ -197,6 +198,7 @@ TargetProfile TargetProfile::from_json(const Json& j, std::string* error)
     const Json& g = json_object_or_empty(j, "geometry");
     p.max_triangles         = json_get<int>(g, "max_triangles", p.max_triangles);
     p.max_vertices          = json_get<int>(g, "max_vertices", p.max_vertices);
+    p.budget_tolerance      = json_get<float>(g, "budget_tolerance", p.budget_tolerance);
     p.max_shells            = json_get<int>(g, "max_shells", p.max_shells);
     p.max_bone_influences   = json_get<int>(g, "max_bone_influences", p.max_bone_influences);
     p.require_manifold      = json_get<bool>(g, "require_manifold", p.require_manifold);
@@ -241,6 +243,7 @@ void TargetProfile::clamp()
 {
     max_triangles       = std::clamp(max_triangles, 12, 2000000);
     max_vertices        = std::clamp(max_vertices, 8, 2000000);
+    budget_tolerance    = std::clamp(budget_tolerance, 0.0f, 0.25f);
     max_shells          = std::max(0, max_shells);
     max_bone_influences = std::clamp(max_bone_influences, 0, 4);
     vertex_cache_size   = std::clamp(vertex_cache_size, 4, 64);

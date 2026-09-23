@@ -43,6 +43,14 @@ struct TargetProfile {
     // --- hard geometry limits ---------------------------------------------
     int  max_triangles       = 1200;
     int  max_vertices        = 900;
+    // How far past the triangle and vertex limits a run may go, as a fraction
+    // of them, before validation fails instead of warning. The engine still
+    // aims at the limit itself; the margin is there for what comes after the
+    // aim - closing a hole takes two triangles, and a run one triangle over
+    // was otherwise judged the same as one a thousand over. 0 is a hard wall.
+    float budget_tolerance   = 0.0f;
+    int  triangle_ceiling() const { return int(float(max_triangles) * (1.0f + budget_tolerance)); }
+    int  vertex_ceiling()   const { return int(float(max_vertices) * (1.0f + budget_tolerance)); }
     int  max_shells          = 1;      // 0 = unlimited
     int  max_bone_influences = 2;
     bool require_manifold    = true;

@@ -154,23 +154,33 @@ ValidationReport validate(const ValidationInput& in)
     // --- geometry budgets ---------------------------------------------------
     {
         const int tri = int(stats.triangles);
-        const bool ok = tri <= profile.max_triangles;
-        check("geometry.triangle_count", "Triangle count", ok, Severity::Error,
-              tri, profile.max_triangles,
+        const bool ok     = tri <= profile.max_triangles;
+        const bool within = tri <= profile.triangle_ceiling();
+        check("geometry.triangle_count", "Triangle count", ok,
+              within ? Severity::Warning : Severity::Error, tri, profile.max_triangles,
               ok ? format("%d of %d triangles used (%.0f%% of budget)", tri,
                           profile.max_triangles,
                           100.0 * tri / std::max(1, profile.max_triangles))
-                 : format("triangle budget exceeded by %d (%d used, limit %d)",
-                          tri - profile.max_triangles, tri, profile.max_triangles));
+              : within
+                  ? format("%d over the %d triangle budget, inside the profile's %.0f%% "
+                           "tolerance", tri - profile.max_triangles, profile.max_triangles,
+                           profile.budget_tolerance * 100.0f)
+                  : format("triangle budget exceeded by %d (%d used, limit %d)",
+                           tri - profile.max_triangles, tri, profile.max_triangles));
     }
     {
         const int vtx = int(stats.vertices);
-        const bool ok = vtx <= profile.max_vertices;
-        check("geometry.vertex_count", "Vertex count", ok, Severity::Error,
-              vtx, profile.max_vertices,
+        const bool ok     = vtx <= profile.max_vertices;
+        const bool within = vtx <= profile.vertex_ceiling();
+        check("geometry.vertex_count", "Vertex count", ok,
+              within ? Severity::Warning : Severity::Error, vtx, profile.max_vertices,
               ok ? format("%d of %d vertices used", vtx, profile.max_vertices)
-                 : format("vertex budget exceeded by %d (%d used, limit %d)",
-                          vtx - profile.max_vertices, vtx, profile.max_vertices));
+              : within
+                  ? format("%d over the %d vertex budget, inside the profile's %.0f%% "
+                           "tolerance", vtx - profile.max_vertices, profile.max_vertices,
+                           profile.budget_tolerance * 100.0f)
+                  : format("vertex budget exceeded by %d (%d used, limit %d)",
+                           vtx - profile.max_vertices, vtx, profile.max_vertices));
     }
     if (profile.max_shells > 0) {
         const bool ok = int(topology.shells) <= profile.max_shells;

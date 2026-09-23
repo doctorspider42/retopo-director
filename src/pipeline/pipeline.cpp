@@ -18,7 +18,7 @@ constexpr int kBudgetAttempts = 6;
 // lands within 20% of its target - and the unwrap's seam vertices eat into
 // the vertex limit unpredictably, so without a second look a quarter of the
 // budget the profile allows is routinely left unspent.
-constexpr float kBudgetFillTarget = 0.93f;
+constexpr float kBudgetFillTarget = 0.96f;
 
 const char* stage_name(Stage s)
 {
@@ -777,15 +777,24 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
 
             const int tris  = int(retopo.mesh.triangle_count());
             const int verts = int(retopo.mesh.vertex_count());
-            const bool over_tri  = tris  > s.profile.max_triangles;
-            const bool over_vert = verts > s.profile.max_vertices;
+            // Legal is judged against the ceiling, the limit plus the profile's
+            // tolerance; the aim below stays on the limit itself, so the
+            // margin is left for the fixes that come after it.
+            const bool over_tri  = tris  > s.profile.triangle_ceiling();
+            const bool over_vert = verts > s.profile.vertex_ceiling();
 
             // Score this attempt so the run can fall back to the best one. The
             // unwrap is not a smooth function of the triangle budget - the seam
             // count jumps around - so the last attempt is often not the best.
-            const int overshoot = std::max(0, tris - s.profile.max_triangles) +
-                                  std::max(0, verts - s.profile.max_vertices);
-            const int score = overshoot * 10000 - tris;   // legal first, then fullest
+            const int overshoot = std::max(0, tris - s.profile.triangle_ceiling()) +
+                                  std::max(0, verts - s.profile.vertex_ceiling());
+            // Legal first, then inside the budget proper, then fullest. The
+            // tolerance is for the fixes that come after the aim - closing a
+            // hole - not budget to spend: an attempt that fits the limit
+            // itself always beats one that only fits the ceiling.
+            const int over_limit = std::max(0, tris - s.profile.max_triangles) +
+                                   std::max(0, verts - s.profile.max_vertices);
+            const int score = overshoot * 100000 + (over_limit > 0 ? 50000 + over_limit : 0) - tris;
             if (score < best_score) {
                 best_score      = score;
                 best_density    = density;
@@ -801,8 +810,13 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             const float fill = std::max(float(tris) / float(std::max(1, s.profile.max_triangles)),
                                         float(verts) / float(std::max(1, s.profile.max_vertices)));
             const bool legal = !over_tri && !over_vert;
-            if (legal) legal_budget   = std::max(legal_budget, effective_budget);
-            else       illegal_budget = std::min(illegal_budget, effective_budget);
+            // For the bracket, past the limit counts as over even inside the
+            // tolerance: the search is for the biggest budget that fits the
+            // limit itself.
+            const bool past_limit = tris > s.profile.max_triangles ||
+                                    verts > s.profile.max_vertices;
+            if (legal && !past_limit) legal_budget   = std::max(legal_budget, effective_budget);
+            else                      illegal_budget = std::min(illegal_budget, effective_budget);
 
             // A smaller budget that barely moved the triangle count means the
             // count has a floor: dozens of separate pieces, each already as
@@ -824,7 +838,9 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             }
             if (!legal) previous_over_tris = tris;
 
-            if (legal && fill >= kBudgetFillTarget) break;
+            if (legal && !past_limit && fill >= kBudgetFillTarget) break;
+            // Past the limit but inside the tolerance: legal, but the next
+            // attempt aims back under the limit rather than further up.
 
             if (attempt + 1 >= attempts_allowed) {
                 if (!legal || !have_best)
@@ -842,8 +858,9 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             // overshoots it again.
             const float scale = std::min(float(s.profile.max_triangles) / float(std::max(1, tris)),
                                          float(s.profile.max_vertices) / float(std::max(1, verts)));
-            int next = legal ? int(float(effective_budget) * std::min(scale * 0.97f, 2.0f))
-                             : int(float(effective_budget) * scale * 0.92f);
+            int next = legal && !past_limit
+                           ? int(float(effective_budget) * std::min(scale * 0.97f, 2.0f))
+                           : int(float(effective_budget) * scale * 0.92f);
             if (next >= illegal_budget) next = (std::max(legal_budget, effective_budget) + illegal_budget) / 2;
             if (next <= legal_budget)   next = (legal_budget + std::min(illegal_budget, effective_budget)) / 2;
             next = std::max(16, next);
