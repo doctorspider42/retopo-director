@@ -3,6 +3,7 @@
 #include "core/log.h"
 #include "core/util.h"
 #include "mesh/topology.h"
+#include "mesh/visibility.h"
 
 #include <algorithm>
 #include <functional>
@@ -691,6 +692,81 @@ size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& s
 }
 
 // ---------------------------------------------------------------------------
+bool source_shell_is_droppable(const MeshAnalysis& analysis, uint32_t shell,
+                               const HardRuleOptions& opts)
+{
+    if (!opts.drop_hidden_shells) return false;
+    if (shell >= analysis.shell_area_share.size() || shell == analysis.largest_shell) return false;
+    if (analysis.shell_area_share[shell] >= opts.hidden_max_area_share) return false;
+    const bool hidden = analysis.shell_visible_share[shell] < opts.hidden_visible_share;
+    const bool decal  = shell < analysis.shell_offset.size() &&
+                       analysis.shell_offset[shell] <
+                           opts.decal_max_offset_rel * analysis.bbox_diagonal;
+    return hidden || decal;
+}
+
+// ---------------------------------------------------------------------------
+size_t drop_hidden_shells(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis& analysis,
+                          float max_visible_share, float max_area_share,
+                          float decal_max_offset_rel)
+{
+    if (mesh.empty() || source_bvh.empty() || analysis.tri_shell.empty()) return 0;
+    const size_t source_shells = analysis.shell_area_share.size();
+
+    // Which source piece is each low poly piece a simplification of? Every
+    // vertex votes with the piece of the source triangle nearest to it.
+    std::vector<uint32_t> low_shell;
+    const uint32_t low_count = label_shells(mesh, low_shell);
+    if (low_count < 2) return 0;
+    std::vector<std::vector<uint32_t>> votes(low_count, std::vector<uint32_t>(source_shells, 0));
+    for (size_t t = 0; t < mesh.triangle_count(); ++t) {
+        const ClosestHit hit = source_bvh.closest_point(mesh.triangle_centroid(t));
+        if (!hit.hit() || hit.triangle >= analysis.tri_shell.size()) continue;
+        ++votes[low_shell[t]][analysis.tri_shell[hit.triangle]];
+    }
+
+    // Never the piece that carries most of the model, whatever it scores.
+    std::vector<size_t> low_tris(low_count, 0);
+    for (uint32_t s : low_shell) ++low_tris[s];
+    const uint32_t largest = uint32_t(std::max_element(low_tris.begin(), low_tris.end()) -
+                                      low_tris.begin());
+
+    std::vector<bool> drop(low_count, false);
+    for (uint32_t s = 0; s < low_count; ++s) {
+        if (s == largest) continue;
+        // A piece lying on the main surface is nearest to that surface for
+        // half its triangles, so the main piece is left out of the count: a
+        // low poly piece that is a fair share made of some small source piece
+        // is that piece.
+        const auto& v = votes[s];
+        size_t src = analysis.largest_shell, best = 0;
+        for (size_t k = 0; k < v.size(); ++k)
+            if (k != analysis.largest_shell && v[k] > best) { best = v[k]; src = k; }
+        if (best * 4 < low_tris[s]) continue;
+        HardRuleOptions o;
+        o.hidden_visible_share  = max_visible_share;
+        o.hidden_max_area_share = max_area_share;
+        o.decal_max_offset_rel  = decal_max_offset_rel;
+        drop[s] = source_shell_is_droppable(analysis, uint32_t(src), o);
+    }
+
+    std::vector<uint32_t> kept;
+    std::vector<uint16_t> kept_regions;
+    const bool keep_regions = mesh.tri_region.size() == mesh.triangle_count();
+    size_t removed = 0;
+    for (size_t t = 0; t < mesh.triangle_count(); ++t) {
+        if (drop[low_shell[t]]) { ++removed; continue; }
+        for (int i = 0; i < 3; ++i) kept.push_back(mesh.indices[t * 3 + i]);
+        if (keep_regions) kept_regions.push_back(mesh.tri_region[t]);
+    }
+    if (removed == 0) return 0;
+    mesh.indices.swap(kept);
+    if (keep_regions) mesh.tri_region.swap(kept_regions);
+    mesh.compact();
+    return removed;
+}
+
+// ---------------------------------------------------------------------------
 float fit_to_surface(Mesh& mesh, const Bvh& source_bvh, int passes,
                      const SymmetryPlane* symmetry, float symmetry_epsilon)
 {
@@ -895,6 +971,18 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
                         share * 100.0f, rep.removed_shells, before_shell_cull,
                         analysis.stats.shells, profile.max_shells);
         }
+    }
+
+    // --- 3b. pieces nobody can see ------------------------------------------
+    if (opts.drop_hidden_shells) {
+        const size_t hidden = drop_hidden_shells(mesh, source_bvh, analysis,
+                                                 opts.hidden_visible_share,
+                                                 opts.hidden_max_area_share,
+                                                 opts.decal_max_offset_rel);
+        if (hidden)
+            rep.note(format("dropped %zu triangles in small pieces that are out of sight or "
+                            "lie flat on the surface (eyeballs, brows, straps); the bake "
+                            "paints them instead", hidden));
     }
 
     // --- 4. deformation loops ----------------------------------------------

@@ -1,5 +1,7 @@
 #include "mesh/analysis.h"
 
+#include "mesh/visibility.h"
+
 #include "core/log.h"
 #include "core/thread_pool.h"
 #include "core/util.h"
@@ -53,6 +55,12 @@ void MeshAnalysis::clear()
     nearest_joint.clear();
     ambient.clear();
     thickness.clear();
+    tri_hidden.clear();
+    tri_shell.clear();
+    shell_area_share.clear();
+    shell_visible_share.clear();
+    shell_offset.clear();
+    largest_shell = 0;
     vertex_area.clear();
     tri_curvature.clear();
     tri_area.clear();
@@ -380,6 +388,66 @@ void analyse_mesh(const Mesh& mesh, MeshAnalysis& out, const AnalysisOptions& op
                 out.thickness[v] = hits[hits.size() / 2];
             }
         });
+    }
+
+    // --- pieces and what can be seen of them ----------------------------------
+    {
+        const uint32_t shells = label_shells(mesh, out.tri_shell);
+        out.tri_hidden.assign(tcount, 0);
+        if (opts.visibility_rays > 0) {
+            report(0.87f, "visibility");
+            EnclosedOptions eo;
+            eo.rays = opts.visibility_rays;
+            find_enclosed_triangles(mesh, out.bvh, out.tri_hidden, eo);
+        }
+        std::vector<double> area(shells, 0.0), seen(shells, 0.0);
+        double total = 0.0;
+        for (size_t t = 0; t < tcount; ++t) {
+            const double a = out.tri_area[t];
+            area[out.tri_shell[t]] += a;
+            if (!out.tri_hidden[t]) seen[out.tri_shell[t]] += a;
+            total += a;
+        }
+        out.shell_area_share.assign(shells, 0.0f);
+        out.shell_visible_share.assign(shells, 1.0f);
+        for (uint32_t s = 0; s < shells; ++s) {
+            out.shell_area_share[s]    = total > 0.0 ? float(area[s] / total) : 0.0f;
+            out.shell_visible_share[s] = area[s] > 0.0 ? float(seen[s] / area[s]) : 1.0f;
+        }
+        out.largest_shell = uint32_t(std::max_element(out.shell_area_share.begin(),
+                                                      out.shell_area_share.end()) -
+                                     out.shell_area_share.begin());
+
+        // Stand-off of every small piece from the largest, against a BVH of
+        // the largest piece alone - the full one would answer "zero, you are
+        // on yourself" for every query.
+        out.shell_offset.assign(shells, 0.0f);
+        if (shells > 1) {
+            std::vector<bool> is_main(tcount);
+            for (size_t t = 0; t < tcount; ++t) is_main[t] = out.tri_shell[t] == out.largest_shell;
+            const Mesh main = mesh_extract(mesh, is_main);
+            Bvh main_bvh;
+            main_bvh.build(main);
+            std::vector<std::vector<float>> dist(shells);
+            for (size_t t = 0; t < tcount; ++t) {
+                const uint32_t s = out.tri_shell[t];
+                if (s == out.largest_shell || out.shell_area_share[s] >= 0.05f) continue;
+                const ClosestHit hit = main_bvh.closest_point(mesh.triangle_centroid(t));
+                dist[s].push_back(hit.hit() ? std::sqrt(hit.distance2) : out.bbox_diagonal);
+            }
+            for (uint32_t s = 0; s < shells; ++s) {
+                if (dist[s].empty()) continue;
+                const size_t k = std::min(dist[s].size() - 1, dist[s].size() * 9 / 10);
+                std::nth_element(dist[s].begin(), dist[s].begin() + k, dist[s].end());
+                out.shell_offset[s] = dist[s][k];
+            }
+        }
+        for (uint32_t s = 0; s < shells && s < 40; ++s)
+            if (s != out.largest_shell && out.shell_area_share[s] < 0.05f)
+                RD_DEBUG("piece %u: %.2f%% of the surface, %.0f%% of it visible, %.2f%% of "
+                         "the model's size off the main surface", s,
+                         out.shell_area_share[s] * 100.0f, out.shell_visible_share[s] * 100.0f,
+                         100.0f * out.shell_offset[s] / std::max(out.bbox_diagonal, kEps));
     }
 
     // --- symmetry ----------------------------------------------------------

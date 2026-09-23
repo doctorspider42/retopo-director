@@ -42,8 +42,8 @@ struct HardRuleOptions {
     // 32 lost every one of its legs - each under 2% - rather than its four
     // smallest scraps.
     float min_shell_area_share = 0.002f;
-    // Share of the profile's triangle budget the shells other than the largest
-    // may hold between them; 0 leaves it unbounded. Off by default, because an
+    // Share of the mesh's triangles the shells other than the largest may hold
+    // between them; 0 leaves it unbounded. Off by default, because an
     // asset made mostly of pieces - a creature whose carapace and legs are all
     // separate - is destroyed by it. The budget re-fit turns it on when it
     // stalls: the costumed ranger's 32 kept pieces put a floor of 2150
@@ -56,6 +56,21 @@ struct HardRuleOptions {
     bool  enforce_manifold     = true;
     bool  enforce_joint_loops  = true;
     bool  reproject            = true;
+    // Drop small pieces of the low poly whose source is mostly out of sight:
+    // an eyeball whose back two thirds sit inside the skull. Built down to a
+    // handful of triangles it becomes a polyhedron that pokes through the
+    // simplified eyelids, which is how the eyes came out as grey shards. The
+    // high poly keeps it, so the bake still paints the eye onto the face.
+    //
+    // Small pieces lying on the main surface go the same way: an eyebrow card,
+    // a strap, a patch. A few millimetres of relief the silhouette cannot
+    // show, rebuilt as a closed solid of eight triangles floating in front of
+    // a simplified brow - the other half of the "grey shards" on the face.
+    // Painted by the bake they cost nothing and sit exactly where they were.
+    bool  drop_hidden_shells     = true;
+    float hidden_visible_share   = 0.5f;    // of the piece's own area
+    float hidden_max_area_share  = 0.02f;   // of the whole surface
+    float decal_max_offset_rel   = 0.006f;  // of the bbox diagonal: ~1 cm on a character
     // Passes of fit_to_surface. 0 leaves the vertices where the backend put them.
     int   fit_surface_passes   = 4;
 };
@@ -91,6 +106,18 @@ size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& s
 // inside out; an inverted face bakes to black because its sampling
 // hemisphere points into the model. Returns how many were flipped.
 size_t fix_winding(Mesh& mesh, const Bvh& source_bvh);
+
+// Whether a piece of the source is one drop_hidden_shells would take out of
+// the low poly: small, and either mostly out of sight or lying on the main
+// surface. The backend choice asks the same question, so the two agree on
+// which pieces the retopology really has to build.
+bool source_shell_is_droppable(const MeshAnalysis& analysis, uint32_t shell,
+                               const HardRuleOptions& opts);
+
+// See HardRuleOptions::drop_hidden_shells. Returns the triangles removed.
+size_t drop_hidden_shells(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis& analysis,
+                          float max_visible_share, float max_area_share,
+                          float decal_max_offset_rel);
 
 // Moves vertices along their normals until the low poly's faces, not just its
 // vertices, sit on the high poly on average. A mesh whose vertices all lie on

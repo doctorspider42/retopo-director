@@ -8,6 +8,7 @@
 #include "mesh/bvh.h"
 #include "mesh/io.h"
 #include "mesh/topology.h"
+#include "mesh/visibility.h"
 #include "segment/segment.h"
 
 #include <filesystem>
@@ -349,4 +350,52 @@ TEST(analysis_thickness_measures_the_way_through)
     REQUIRE(n > 0);
     // The radius at |y| < 0.3 is between 0.095 and 0.1.
     CHECK_NEAR(sum / n, 0.195, 0.02);
+}
+
+// An eyeball mostly sunk into the head and a patch lying on the skin are
+// dropped from the low poly; a small piece standing clear of the body is not.
+TEST(hidden_and_flat_pieces_are_dropped_and_standing_pieces_kept)
+{
+    Mesh src = rdtest::icosphere(4);                            // the body
+    Mesh eye = rdtest::icosphere(2, 0.12f);
+    for (Vec3& p : eye.positions) p = p + Vec3(0.0f, 0.95f, 0.0f);
+    Mesh patch = rdtest::icosphere(1);   // on the front, clear of the eye
+    for (Vec3& p : patch.positions) p = Vec3(p.x * 0.06f, p.y * 0.06f, 1.004f + p.z * 0.002f);
+    Mesh knob = rdtest::icosphere(2, 0.1f);
+    for (Vec3& p : knob.positions) p = p + Vec3(1.6f, 0.0f, 0.0f);
+    mesh_append(src, eye);
+    mesh_append(src, patch);
+    mesh_append(src, knob);
+
+    MeshAnalysis an;
+    AnalysisOptions ao;
+    ao.ambient_rays = 0;
+    analyse_mesh(src, an, ao);
+    REQUIRE(an.shell_area_share.size() == 4);
+
+    HardRuleOptions rules;
+    int droppable = 0;
+    for (uint32_t s = 0; s < 4; ++s) droppable += source_shell_is_droppable(an, s, rules);
+    CHECK_EQ(droppable, 2);
+    CHECK(an.shell_visible_share[2] > 0.4f);   // the patch is seen, and dropped as flat
+
+    Mesh low = src;
+    const size_t removed = drop_hidden_shells(low, an.bvh, an, rules.hidden_visible_share,
+                                              rules.hidden_max_area_share,
+                                              rules.decal_max_offset_rel);
+    CHECK_EQ(removed, eye.triangle_count() + patch.triangle_count());
+    CHECK_EQ(low.compute_stats().shells, size_t(2));
+}
+
+TEST(visibility_sees_both_faces_of_a_thin_plate)
+{
+    Mesh patch = rdtest::icosphere(1);
+    for (Vec3& p : patch.positions) p = Vec3(p.x * 0.06f, 1.004f + p.y * 0.002f, p.z * 0.06f);
+    Bvh bvh;
+    bvh.build(patch);
+    std::vector<uint8_t> hidden;
+    find_enclosed_triangles(patch, bvh, hidden);
+    size_t n = 0;
+    for (uint8_t h : hidden) n += h;
+    CHECK_EQ(n, size_t(0));
 }

@@ -510,6 +510,7 @@ int run_application(const AppOptions& opts)
     if (!opts.sam_checkpoint.empty()) app->settings.segmenter.sam.checkpoint = opts.sam_checkpoint;
     if (!opts.sam_device.empty())     app->settings.segmenter.sam.device     = opts.sam_device;
 
+    if (opts.keep_hidden) app->settings.retopo.hard_rules.drop_hidden_shells = false;
     if (!opts.replay.empty()) {
         app->settings.llm.kind       = LlmBackendKind::Replay;
         app->settings.llm.replay_dir = opts.replay;

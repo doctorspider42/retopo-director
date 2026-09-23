@@ -16,6 +16,9 @@ struct AppOptions {
     // headless run that quietly inherits it is not reproducible: the benchmark
     // and the tests pass this together with an explicit --profile.
     bool        no_settings = false;
+    // Keep small pieces the camera cannot see (eyeballs behind their lids) in
+    // the low poly. For comparing against the default, which drops them.
+    bool        keep_hidden = false;
     bool        autorun  = false;   // start the pipeline as soon as the window opens
     std::string backend;            // auto | quad_field | quadric, overrides the panel
     // A run's reports/prompts folder: the director's replies are read back from

@@ -31,6 +31,8 @@ void print_usage()
         "  --replay <dir>    Answer the director from a recorded run (reports/prompts)\n"
         "  --run             Start the pipeline as soon as the window opens\n"
         "  --verbose         Mirror the log to stderr\n"
+        "  --no-settings     Ignore the saved settings (reproducible runs)\n"
+        "  --keep-hidden     Keep small, mostly hidden pieces (eyeballs) in the low poly\n"
         "  --no-gpu          Do not create a GL context, even in headless mode\n"
         "\n"
         "  --segmenter <name>       Region split: geometric | sam | auto\n"
@@ -78,6 +80,8 @@ int main(int argc, char** argv)
             opts.force_llm = true;
         } else if (!std::strcmp(a, "--verbose")) {
             opts.verbose = true;
+        } else if (!std::strcmp(a, "--keep-hidden")) {
+            opts.keep_hidden = true;
         } else if (!std::strcmp(a, "--no-settings")) {
             opts.no_settings = true;
         } else if (!std::strcmp(a, "--run")) {

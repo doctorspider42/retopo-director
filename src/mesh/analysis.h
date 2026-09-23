@@ -50,6 +50,20 @@ struct MeshAnalysis {
     std::vector<float> tri_area;
     std::vector<Vec3>  tri_normal;
 
+    // Triangles no ray from outside reaches from either side (mesh/visibility.h).
+    std::vector<uint8_t>  tri_hidden;
+    // Connected piece each triangle belongs to, and per piece its share of the
+    // surface and the share of its own area that can be seen.
+    std::vector<uint32_t> tri_shell;
+    std::vector<float>    shell_area_share;
+    std::vector<float>    shell_visible_share;
+    // How far each piece stands off the largest one: the 90th percentile of
+    // its vertices' distances to that surface, in model units. 0 for the
+    // largest piece itself. An eyebrow card sits a few millimetres off the
+    // skin; a hood stands centimetres clear of the head.
+    std::vector<float>    shell_offset;
+    uint32_t              largest_shell = 0;
+
     // --- per edge ----------------------------------------------------------
     std::vector<float> edge_dihedral;    // radians, signed
     // Bytes, not std::vector<bool>: it is filled from a parallel loop, and the
@@ -89,6 +103,9 @@ struct AnalysisOptions {
     // inward normal; the median is kept so one ray down a crevice does not
     // decide it. 0 disables it.
     int   thickness_rays          = 5;
+    // Visibility of each triangle from outside the model. 0 skips it, which
+    // leaves every piece counted as fully visible.
+    int   visibility_rays         = 48;
     // Curvature is normalised against this percentile so a handful of spikes
     // does not flatten the whole field.
     float curvature_percentile    = 0.97f;

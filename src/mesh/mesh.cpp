@@ -464,7 +464,9 @@ Mesh mesh_extract(const Mesh& src, const std::vector<bool>& tri_mask,
     const bool keep_c = src.has_colors(),  keep_s = src.has_skin();
     const bool keep_r = src.tri_region.size()   == src.triangle_count();
     const bool keep_m = src.tri_material.size() == src.triangle_count();
-    out.materials = src.materials;
+    const bool keep_u = src.has_corner_uvs();
+    out.materials     = src.materials;
+    out.colors_prelit = src.colors_prelit;
 
     for (size_t t = 0, n = src.triangle_count(); t < n; ++t) {
         if (t >= tri_mask.size() || !tri_mask[t]) continue;
@@ -482,6 +484,8 @@ Mesh mesh_extract(const Mesh& src, const std::vector<bool>& tri_mask,
         }
         if (keep_r) out.tri_region.push_back(src.tri_region[t]);
         if (keep_m) out.tri_material.push_back(src.tri_material[t]);
+        if (keep_u)
+            for (int c = 0; c < 3; ++c) out.corner_uvs.push_back(src.corner_uvs[t * 3 + c]);
     }
 
     if (vertex_map) *vertex_map = std::move(remap);
