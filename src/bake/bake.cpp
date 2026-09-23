@@ -812,14 +812,26 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
             // vertex count is the limit that actually binds. So the transfer
             // has to answer to the profile like everything else, and hand back
             // to the unwrap when it cannot.
+            //
+            // Fitting is not enough either. A layout that fits by tripling the
+            // vertex count has spent the vertex limit on seams, and the budget
+            // re-fit then stops with two thirds of the triangle budget unused,
+            // because the vertex limit is the one that binds. A fresh unwrap
+            // costs 30 to 45 per cent; twice the welded count is as much as
+            // keeping the artist's layout is worth.
+            const float overhead =
+                float(candidate.vertex_count()) / float(std::max<size_t>(1, mesh.vertex_count()));
+            constexpr float kMaxCarriedOverhead = 2.0f;
             const bool affordable =
                 packed.ok && profile.max_vertices > 0 &&
-                candidate.vertex_count() <= size_t(profile.max_vertices);
+                candidate.vertex_count() <= size_t(profile.max_vertices) &&
+                overhead <= kMaxCarriedOverhead;
 
             if (packed.ok && !affordable) {
-                RD_INFO("the source uv layout needs %zu vertices against a budget of %d "
-                        "(%d charts); unwrapping fresh instead",
-                        candidate.vertex_count(), profile.max_vertices, packed.charts);
+                RD_INFO("the source uv layout needs %zu vertices (%.1fx the welded %zu) against "
+                        "a budget of %d (%d charts); unwrapping fresh instead",
+                        candidate.vertex_count(), overhead, mesh.vertex_count(),
+                        profile.max_vertices, packed.charts);
                 result.messages.push_back(
                     format("kept the generated uv layout: carrying the source layout over would "
                            "have cost %zu vertices of %d allowed",
@@ -1114,8 +1126,20 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
     }
 
     // --- 7. uv stretch metric ----------------------------------------------
+    // How far texel density strays from the mesh's own average, either way:
+    // more texels than average is wasted atlas and shimmer, fewer is blur.
+    //
+    // A percentile weighted by surface area, not the single worst triangle.
+    // The worst triangle is always a sliver a few millimetres across that the
+    // packer rounded up to a texel, and it swung this number from 3 to 47 on
+    // the same asset between two runs that looked identical. What an artist
+    // sees is the surface, so the surface decides: the density ratio that 98%
+    // of the model's area is within.
     {
-        float worst = 0.0f;
+        struct Sample { float deviation, area; };
+        std::vector<Sample> samples;
+        samples.reserve(tcount);
+        double uv_total = 0.0, area_total = 0.0;
         for (size_t t = 0; t < tcount; ++t) {
             const uint32_t i0 = mesh.indices[t * 3 + 0];
             const uint32_t i1 = mesh.indices[t * 3 + 1];
@@ -1125,27 +1149,23 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
             const float area2 = 0.5f * std::fabs((b.x - a.x) * (c.y - a.y) -
                                                  (b.y - a.y) * (c.x - a.x));
             if (area3 < 1e-12f || area2 < 1e-12f) continue;
-            const float ratio = (area2 / area3);
-            worst = std::max(worst, ratio);
+            uv_total   += area2;
+            area_total += area3;
+            samples.push_back({area2 / area3, area3});
         }
-        // Normalise against the median-ish scale so the number means "how much
-        // worse than the average texel density", not raw units.
-        float mean_ratio = 0.0f;
-        int   counted = 0;
-        for (size_t t = 0; t < tcount; ++t) {
-            const uint32_t i0 = mesh.indices[t * 3 + 0];
-            const uint32_t i1 = mesh.indices[t * 3 + 1];
-            const uint32_t i2 = mesh.indices[t * 3 + 2];
-            const float area3 = mesh.triangle_area(t);
-            const Vec2 a = mesh.uvs[i0], b = mesh.uvs[i1], c = mesh.uvs[i2];
-            const float area2 = 0.5f * std::fabs((b.x - a.x) * (c.y - a.y) -
-                                                 (b.y - a.y) * (c.x - a.x));
-            if (area3 < 1e-12f || area2 < 1e-12f) continue;
-            mean_ratio += area2 / area3;
-            ++counted;
+        if (!samples.empty() && uv_total > 0.0 && area_total > 0.0) {
+            const float mean = float(uv_total / area_total);
+            for (Sample& s : samples) s.deviation = std::max(s.deviation / mean, mean / s.deviation);
+            std::sort(samples.begin(), samples.end(),
+                      [](const Sample& x, const Sample& y) { return x.deviation < y.deviation; });
+            const double cutoff = 0.98 * area_total;
+            double acc = 0.0;
+            for (const Sample& s : samples) {
+                acc += s.area;
+                result.uv_max_stretch = s.deviation;
+                if (acc >= cutoff) break;
+            }
         }
-        if (counted > 0 && mean_ratio > 0.0f)
-            result.uv_max_stretch = worst / (mean_ratio / float(counted));
     }
 
     result.ok      = true;
