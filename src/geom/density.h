@@ -82,6 +82,12 @@ struct DensityOptions {
     // double sided sheet (a cloak, a hair card), not a volume, and is ignored:
     // honouring it would pour the whole budget into a flat plane.
     float thin_sheet_cutoff_rel = 0.0025f;
+    // And no feature is protected below this fraction of the edge the whole
+    // budget would give an evenly spread mesh. A whisker or the last inch of a
+    // tail is thinner than anything the budget can resolve; honouring it made
+    // the rat's whiskers a few thousand triangles too small for the weld to
+    // keep, and the rest of the rat paid for them.
+    float thin_floor_of_mean_edge = 0.15f;
     // Rays used for the silhouette visibility test.
     bool  compute_silhouette = true;
 };

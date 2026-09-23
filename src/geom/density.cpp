@@ -149,6 +149,9 @@ void build_density_field(const Mesh& mesh, const MeshAnalysis& analysis,
     const float joint_radius = bbox * 0.08f;
 
     std::vector<float> scale(tcount, 1.0f);
+    const float mean_edge = edge_for_area(analysis.stats.surface_area /
+                                          float(std::max(1, profile.max_triangles)));
+    const float thin_floor = mean_edge * opts.thin_floor_of_mean_edge;
 
     ThreadPool::shared().parallel_ranges(tcount, 1024, [&](size_t begin, size_t end, unsigned) {
         for (size_t t = begin; t < end; ++t) {
@@ -219,7 +222,7 @@ void build_density_field(const Mesh& mesh, const MeshAnalysis& analysis,
                 for (int c = 0; c < 3; ++c)
                     thick = std::min(thick, analysis.thickness[mesh.indices[t * 3 + c]]);
                 if (base > 0.0f && thick > bbox * opts.thin_sheet_cutoff_rel) {
-                    const float want = opts.thin_edge_ratio * thick;
+                    const float want = std::max(opts.thin_edge_ratio * thick, thin_floor);
                     if (want < base)
                         thin_term = std::pow(want / base, 0.8f * opts.thin_strength);
                 }

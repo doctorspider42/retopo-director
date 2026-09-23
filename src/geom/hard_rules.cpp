@@ -896,6 +896,7 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
     if (!profile.allow_ngons) rep.note("triangles only, as the profile requires");
 
     rep.seconds = watch.seconds();
+    for (const std::string& m : rep.messages) RD_DEBUG("hard rules: %s", m.c_str());
     RD_INFO("hard rules: %zu tri after %s in %s", mesh.triangle_count(),
             rep.symmetry_applied ? "mirroring" : "cleanup",
             format_duration(rep.seconds).c_str());
