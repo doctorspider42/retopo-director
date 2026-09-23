@@ -1,0 +1,23 @@
+{
+  "_comment": "Paths are relative to --root / $RD_CORPUS unless synthetic. Synthetic meshes come from tools/make_test_meshes.py; the PolyHaven folder from tools/fetch_corpus.py; the rest are Quaternius and GGBot CC0 packs.",
+  "meshes": [
+    {"name": "sphere",          "synthetic": true, "path": "sphere.obj"},
+    {"name": "torus",           "synthetic": true, "path": "torus.obj"},
+    {"name": "blob",            "synthetic": true, "path": "blob.obj"},
+    {"name": "figure",          "synthetic": true, "path": "figure.obj"},
+
+    {"name": "marble_bust",     "path": "PolyHaven/marble_bust_01/marble_bust_01_1k.gltf"},
+    {"name": "gothic_statue",   "path": "PolyHaven/gothic_statue/gothic_statue_1k.gltf"},
+    {"name": "horse_statue",    "path": "PolyHaven/horse_statue_01/horse_statue_01_1k.gltf"},
+    {"name": "lion_head",       "path": "PolyHaven/lion_head/lion_head_1k.gltf"},
+    {"name": "street_rat",      "path": "PolyHaven/street_rat/street_rat_1k.gltf"},
+
+    {"name": "superhero_male",  "path": "Universal Base Characters[Standard]/Base Characters/Godot - UE/Superhero_Male_FullBody.gltf"},
+    {"name": "superhero_female","path": "Universal Base Characters[Standard]/Base Characters/Godot - UE/Superhero_Female_FullBody.gltf"},
+    {"name": "mannequin_f",     "path": "Universal Animation Library 2[Standard]/Female Mannequin/Unreal-Godot/Mannequin_F.glb"},
+    {"name": "male_ranger",     "path": "Modular Character Outfits - Fantasy[Standard]/Exports/glTF (Godot-Unreal)/Outfits/Male_Ranger.gltf"},
+    {"name": "female_peasant",  "path": "Modular Character Outfits - Fantasy[Standard]/Exports/glTF (Godot-Unreal)/Outfits/Female_Peasant.gltf"},
+    {"name": "trilobite",       "path": "Sci-Fi Essentials Kit[Standard]/glTF/Enemy_Trilobite.gltf"},
+    {"name": "car_cc96",        "path": "CC96/car1.fbx"}
+  ]
+}

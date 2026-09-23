@@ -77,6 +77,8 @@ int main(int argc, char** argv)
             opts.force_llm = true;
         } else if (!std::strcmp(a, "--verbose")) {
             opts.verbose = true;
+        } else if (!std::strcmp(a, "--no-settings")) {
+            opts.no_settings = true;
         } else if (!std::strcmp(a, "--run")) {
             opts.autorun = true;
         } else if (!std::strcmp(a, "--backend")) {

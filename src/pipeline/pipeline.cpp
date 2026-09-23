@@ -975,6 +975,33 @@ bool Pipeline::stage_report(const PipelineSettings& s)
     j["silhouette"] = Json{{"mean", r.silhouette.mean},
                            {"worst", r.silhouette.worst},
                            {"worst_view", r.silhouette.worst_view}};
+    // One flat block with the numbers a run is judged by, so tools/bench.py can
+    // compare two runs without knowing the shape of the rest of this file.
+    {
+        int budget_sum = 0, budget_used = 0;
+        for (const RegionKnobs& k : r.panel.regions) {
+            budget_sum += k.triangle_budget;
+            if (k.id < r.retopo.region_triangles.size())
+                budget_used += r.retopo.region_triangles[k.id];
+        }
+        j["summary"] = Json{
+            {"highpoly_triangles", r.highpoly.triangle_count()},
+            {"highpoly_vertices", r.highpoly.vertex_count()},
+            {"lowpoly_triangles", r.lowpoly.triangle_count()},
+            {"lowpoly_vertices", r.lowpoly.vertex_count()},
+            {"max_triangles", s.profile.max_triangles},
+            {"max_vertices", s.profile.max_vertices},
+            {"regions", r.panel.regions.size()},
+            {"region_budget_sum", budget_sum},
+            {"region_triangles_sum", budget_used},
+            {"silhouette_mean", r.silhouette.mean},
+            {"silhouette_worst", r.silhouette.worst},
+            {"validation_passed", r.validation.passed},
+            {"errors", r.validation.errors},
+            {"warnings", r.validation.warnings},
+            {"iterations", r.iterations.size()},
+        };
+    }
 
     Json iterations = Json::array();
     for (const IterationRecord& it : r.iterations) {

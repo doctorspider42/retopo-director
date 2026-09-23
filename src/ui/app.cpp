@@ -476,7 +476,8 @@ int run_application(const AppOptions& opts)
     if (opts.verbose) log::set_echo_stderr(true);
 
     app->settings.profile = TargetProfile::ps2_character_default();
-    app->load_settings();
+    if (opts.no_settings) RD_INFO("saved settings ignored (--no-settings)");
+    else                  app->load_settings();
 
     // After load_settings, not before: the stored project directory is the one
     // the window was last pointed at, and it would otherwise quietly win over
