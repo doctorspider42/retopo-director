@@ -29,6 +29,7 @@ void print_usage()
         "  --llm             Run the director even when the saved settings turn it off\n"
         "  --backend <name>  Force auto | quad_field | quadric\n"
         "  --replay <dir>    Answer the director from a recorded run (reports/prompts)\n"
+        "  --llm-model <id>  Claude CLI director model (default claude-opus-5-5)\n"
         "  --run             Start the pipeline as soon as the window opens\n"
         "  --verbose         Mirror the log to stderr\n"
         "  --no-settings     Ignore the saved settings (reproducible runs)\n"
@@ -90,6 +91,8 @@ int main(int argc, char** argv)
             opts.replay = next("--replay");
         } else if (!std::strcmp(a, "--backend")) {
             opts.backend = next("--backend");
+        } else if (!std::strcmp(a, "--llm-model")) {
+            opts.llm_model = next("--llm-model");
         } else if (!std::strcmp(a, "--segmenter")) {
             opts.segmenter = next("--segmenter");
         } else if (!std::strcmp(a, "--sam-checkpoint")) {

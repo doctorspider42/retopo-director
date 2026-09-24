@@ -992,7 +992,7 @@ void draw_director_settings(AppState& app)
         switch (cfg.kind) {
         case LlmBackendKind::ClaudeCli:
             text_input("Executable", cfg.claude_path, "claude");
-            text_input("Model", cfg.claude_model, "leave empty for the CLI default");
+            text_input("Model", cfg.claude_model, "claude-opus-5-5; \"default\" for the CLI's own");
             break;
         case LlmBackendKind::CodexCli:
             text_input("Executable", cfg.codex_path, "codex");

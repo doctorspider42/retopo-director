@@ -507,6 +507,7 @@ int run_application(const AppOptions& opts)
             RD_WARN("unknown segmenter '%s', keeping %s", opts.segmenter.c_str(),
                     segmenter_kind_name(app->settings.segmenter.kind));
     }
+    if (!opts.llm_model.empty()) app->settings.llm.claude_model = opts.llm_model;
     if (!opts.sam_checkpoint.empty()) app->settings.segmenter.sam.checkpoint = opts.sam_checkpoint;
     if (!opts.sam_device.empty())     app->settings.segmenter.sam.device     = opts.sam_device;
 

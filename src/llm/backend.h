@@ -61,7 +61,11 @@ struct LlmConfig {
 
     // Claude CLI
     std::string claude_path  = "claude";
-    std::string claude_model;                  // empty means the CLI default
+    // Pinned rather than left to the CLI: its default is whatever that install
+    // was last set to, which made two runs of the same command ask two different
+    // models - the recorded runs so far were answered by an old Opus. "default"
+    // asks for the CLI default.
+    std::string claude_model = "claude-opus-5-5";
     std::vector<std::string> claude_extra_args;
 
     // Codex CLI

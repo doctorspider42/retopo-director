@@ -124,7 +124,7 @@ private:
     std::vector<std::string> build_args() const
     {
         std::vector<std::string> args = {"-p", "--output-format", "json"};
-        if (!cfg_.claude_model.empty()) {
+        if (!cfg_.claude_model.empty() && cfg_.claude_model != "default") {
             args.push_back("--model");
             args.push_back(cfg_.claude_model);
         }
@@ -499,7 +499,10 @@ LlmConfig LlmConfig::from_json(const Json& j)
 
     const Json& cc = json_object_or_empty(j, "claude_cli");
     c.claude_path  = json_get<std::string>(cc, "path", c.claude_path);
-    c.claude_model = json_get<std::string>(cc, "model", "");
+    // Earlier versions saved an empty model, meaning "no preference"; it still
+    // does, and gets the pinned default rather than whatever the CLI is set to.
+    const std::string saved_model = json_get<std::string>(cc, "model", "");
+    if (!saved_model.empty()) c.claude_model = saved_model;
     c.claude_extra_args = json_get<std::vector<std::string>>(cc, "extra_args", {});
 
     const Json& xx = json_object_or_empty(j, "codex_cli");
