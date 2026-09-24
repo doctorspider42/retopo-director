@@ -6,6 +6,7 @@
 #include "mesh/visibility.h"
 
 #include <algorithm>
+#include <limits>
 #include <functional>
 #include <map>
 #include <unordered_map>
@@ -478,7 +479,8 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
         ++shell_tris[root];
         total_area += a;
     }
-    if (shell_area.size() <= size_t(max_shells)) return 0;
+    // Under the count, only a triangle cap can still ask for something to go.
+    if (shell_area.size() <= size_t(max_shells) && secondary_triangle_cap <= 0) return 0;
 
     std::vector<std::pair<double, uint32_t>> ranked;
     ranked.reserve(shell_area.size());
@@ -1077,9 +1079,17 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
             rep.note(format("removed %zu non manifold faces", rep.removed_nonmanifold));
     }
 
-    if (profile.max_shells > 0) {
+    // The budget re-fit sets secondary_shell_budget_share when shrinking the
+    // budget stops shrinking the mesh: the loose pieces have a floor of a few
+    // triangles each, and a coffee cart of 255 pieces cannot come under 800
+    // however small the budget. That has to hold on a profile with no shell
+    // limit too - there the re-fit used to announce the cap and nothing read
+    // it. Largest pieces first; the bake paints what goes onto what stays.
+    if (profile.max_shells > 0 || opts.secondary_shell_budget_share > 0.0f) {
         const size_t before_shell_cull = mesh.triangle_count();
-        rep.removed_shells = limit_shells(mesh, profile.max_shells, opts.min_shell_area_share,
+        const int shell_limit = profile.max_shells > 0 ? profile.max_shells
+                                                       : std::numeric_limits<int>::max();
+        rep.removed_shells = limit_shells(mesh, shell_limit, opts.min_shell_area_share,
                                           rep.symmetry_applied ? &symmetry : nullptr,
                                           // A share of this mesh, not of the budget: the
                                           // re-fit grows and shrinks the budget, every
@@ -1089,7 +1099,11 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
                                           // culled on three attempts of one run.
                                           int(float(mesh.triangle_count()) *
                                               opts.secondary_shell_budget_share));
-        if (rep.removed_shells) {
+        if (rep.removed_shells && profile.max_shells <= 0) {
+            rep.note(format("dropped %zu triangles in the smallest loose pieces to fit the "
+                            "budget; the bake paints them onto what they sit on",
+                            rep.removed_shells));
+        } else if (rep.removed_shells) {
             rep.note(format("dropped %zu triangles in loose shells (profile allows %d)",
                             rep.removed_shells, profile.max_shells));
 
