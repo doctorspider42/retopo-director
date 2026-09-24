@@ -54,6 +54,11 @@ struct HardRuleOptions {
     // ranks a cart's wheels with its cups; the director knows which is which.
     // Empty ranks by area.
     std::vector<float> region_keep_priority;
+    // Loose pieces with more than 16 triangles and four times their share of
+    // the budget become a box (proxy_expensive_pieces); pieces under this
+    // share of the surface are left to the rules that remove them.
+    bool  proxy_expensive_pieces = true;
+    float proxy_min_area_share   = 0.002f;
     // Upper bound on triangles added by the joint loop rule, as a fraction of
     // the profile budget.
     float joint_split_headroom = 0.08f;

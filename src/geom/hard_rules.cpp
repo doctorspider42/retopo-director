@@ -6,6 +6,7 @@
 #include "mesh/visibility.h"
 
 #include <algorithm>
+#include <numeric>
 #include <limits>
 #include <functional>
 #include <map>
@@ -891,6 +892,161 @@ bool source_shell_is_droppable(const MeshAnalysis& analysis, uint32_t shell,
 }
 
 // ---------------------------------------------------------------------------
+// Loose pieces that cost far more than their share, replaced by a box.
+//
+// A carafe with a handle is a torus to the simplifier: it cannot collapse
+// past the handle without folding a face, and on a coffee cart two carafes
+// kept 113 triangles against a budget of 8 while the frame they stand on went
+// without legs. What such a piece is worth at this budget is its volume and
+// its place, which a box along its principal axes keeps in twelve triangles;
+// the bake paints the carafe onto it. Pieces too small to matter are left to
+// the rules that remove them, and the largest piece is the asset, never this.
+size_t proxy_expensive_pieces(Mesh& mesh, int budget, float min_area_share)
+{
+    const size_t tcount = mesh.triangle_count();
+    if (tcount == 0 || budget <= 0) return 0;
+    const size_t vcount = mesh.vertex_count();
+    std::vector<uint32_t> parent(vcount);
+    std::iota(parent.begin(), parent.end(), 0u);
+    std::function<uint32_t(uint32_t)> find = [&](uint32_t x) {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    };
+    for (size_t t = 0; t < tcount; ++t)
+        for (int i = 1; i < 3; ++i) {
+            const uint32_t a = find(mesh.indices[t * 3]), b = find(mesh.indices[t * 3 + i]);
+            if (a != b) parent[b] = a;
+        }
+    std::map<uint32_t, std::vector<uint32_t>> shell_tris;
+    std::map<uint32_t, double> shell_area;
+    double total = 0.0;
+    for (size_t t = 0; t < tcount; ++t) {
+        const uint32_t r = find(mesh.indices[t * 3]);
+        shell_tris[r].push_back(uint32_t(t));
+        const double a = mesh.triangle_area(t);
+        shell_area[r] += a;
+        total += a;
+    }
+    if (shell_tris.size() < 2 || total <= 0.0) return 0;
+    uint32_t largest = shell_area.begin()->first;
+    for (const auto& [r, a] : shell_area) if (a > shell_area[largest]) largest = r;
+
+    constexpr int kBox = 12;
+    std::vector<uint8_t> drop(tcount, 0);
+    std::vector<uint32_t> add_idx;
+    std::vector<uint16_t> add_region;
+    const bool regions = mesh.tri_region.size() == tcount;
+    size_t replaced = 0;
+    for (const auto& [r, tris] : shell_tris) {
+        if (r == largest) continue;
+        const double share = shell_area[r] / total;
+        if (share < double(min_area_share)) continue;
+        const double fair = double(budget) * share;
+        if (int(tris.size()) <= std::max(16.0, 4.0 * fair)) continue;
+
+        // Principal axes of the piece's surface, by area.
+        Vec3 c{};
+        double w = 0.0;
+        std::vector<uint32_t> verts;
+        for (uint32_t t : tris) {
+            const double a = mesh.triangle_area(t);
+            c += mesh.triangle_centroid(t) * float(a);
+            w += a;
+            for (int i = 0; i < 3; ++i) verts.push_back(mesh.indices[t * 3 + i]);
+        }
+        if (w <= 0.0) continue;
+        c = c / float(w);
+        std::sort(verts.begin(), verts.end());
+        verts.erase(std::unique(verts.begin(), verts.end()), verts.end());
+        double cov[3][3] = {};
+        for (uint32_t v : verts) {
+            const Vec3 d = mesh.positions[v] - c;
+            const float e[3] = {d.x, d.y, d.z};
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) cov[i][j] += double(e[i]) * e[j];
+        }
+        // Power iteration for the two largest axes; the third is their cross.
+        auto dominant = [&](const Vec3& avoid) {
+            Vec3 v = std::fabs(avoid.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+            for (int it = 0; it < 32; ++it) {
+                v = v - avoid * dot(v, avoid);
+                const Vec3 n{float(cov[0][0] * v.x + cov[0][1] * v.y + cov[0][2] * v.z),
+                             float(cov[1][0] * v.x + cov[1][1] * v.y + cov[1][2] * v.z),
+                             float(cov[2][0] * v.x + cov[2][1] * v.y + cov[2][2] * v.z)};
+                if (length2(n) < 1e-30f) break;
+                v = normalize(n);
+            }
+            return normalize(v - avoid * dot(v, avoid));
+        };
+        const Vec3 ax = dominant(Vec3{0, 0, 0});
+        const Vec3 ay = dominant(ax);
+        const Vec3 az = normalize(cross(ax, ay));
+        if (length2(ax) < 0.5f || length2(ay) < 0.5f || length2(az) < 0.5f) continue;
+        Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+        for (uint32_t v : verts) {
+            const Vec3 d = mesh.positions[v] - c;
+            const Vec3 q{dot(d, ax), dot(d, ay), dot(d, az)};
+            lo = {std::min(lo.x, q.x), std::min(lo.y, q.y), std::min(lo.z, q.z)};
+            hi = {std::max(hi.x, q.x), std::max(hi.y, q.y), std::max(hi.z, q.z)};
+        }
+        // A box that holds the piece stands proud of its curved sides; pulled
+        // in to the extent that keeps the same volume as the round thing it
+        // replaces would be, roughly, it reads as the piece rather than its crate.
+        const float shrink = 0.85f;
+        const Vec3 mid = (lo + hi) * 0.5f, half = (hi - lo) * (0.5f * shrink);
+        // Only a compact piece: a cable's box is a slab the size of the cart
+        // that it drew right across the frame. The box's surface has to be
+        // near the piece's own; a carafe's is, a coiled cord's is not.
+        const double box_area = 8.0 * (double(half.x) * half.y + double(half.y) * half.z +
+                                       double(half.z) * half.x);
+        if (box_area > 2.0 * shell_area[r]) continue;
+        uint16_t region = kNoRegion;
+        if (regions) {
+            std::map<uint16_t, int> votes;
+            for (uint32_t t : tris) ++votes[mesh.tri_region[t]];
+            int best = -1;
+            for (const auto& [rg, n] : votes) if (n > best) { best = n; region = rg; }
+        }
+        const uint32_t base = uint32_t(mesh.positions.size());
+        for (int k = 0; k < 8; ++k) {
+            const Vec3 q{mid.x + ((k & 1) ? half.x : -half.x), mid.y + ((k & 2) ? half.y : -half.y),
+                         mid.z + ((k & 4) ? half.z : -half.z)};
+            mesh.positions.push_back(c + ax * q.x + ay * q.y + az * q.z);
+        }
+        // Faces wound outward for a right handed (ax, ay, az).
+        static const int kFaces[6][4] = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4},
+                                         {2, 6, 7, 3}, {0, 4, 6, 2}, {1, 3, 7, 5}};
+        for (const auto& f : kFaces) {
+            add_idx.insert(add_idx.end(), {base + f[0], base + f[1], base + f[2],
+                                           base + f[0], base + f[2], base + f[3]});
+            add_region.push_back(region);
+            add_region.push_back(region);
+        }
+        for (uint32_t t : tris) drop[t] = 1;
+        replaced += tris.size() - kBox;
+    }
+    if (add_idx.empty()) return 0;
+
+    std::vector<uint32_t> kept;
+    std::vector<uint16_t> kept_regions;
+    for (size_t t = 0; t < tcount; ++t) {
+        if (drop[t]) continue;
+        for (int i = 0; i < 3; ++i) kept.push_back(mesh.indices[t * 3 + i]);
+        if (regions) kept_regions.push_back(mesh.tri_region[t]);
+    }
+    kept.insert(kept.end(), add_idx.begin(), add_idx.end());
+    if (regions) kept_regions.insert(kept_regions.end(), add_region.begin(), add_region.end());
+    mesh.indices.swap(kept);
+    if (regions) mesh.tri_region.swap(kept_regions);
+    if (!mesh.normals.empty()) mesh.normals.resize(mesh.positions.size(), Vec3{0, 1, 0});
+    if (!mesh.uvs.empty())     mesh.uvs.resize(mesh.positions.size());
+    if (!mesh.colors.empty())  mesh.colors.resize(mesh.positions.size(), Vec4{1, 1, 1, 1});
+    if (!mesh.skin.empty())    mesh.skin.resize(mesh.positions.size());
+    mesh.compact();
+    return replaced;
+}
+
+// ---------------------------------------------------------------------------
 size_t drop_hidden_shells(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis& analysis,
                           float max_visible_share, float max_area_share,
                           float decal_max_offset_rel)
@@ -1122,6 +1278,15 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
         rep.removed_nonmanifold = repair_nonmanifold(mesh);
         if (rep.removed_nonmanifold)
             rep.note(format("removed %zu non manifold faces", rep.removed_nonmanifold));
+    }
+
+    // --- 2b. pieces that cost far more than they are worth -------------------
+    if (opts.proxy_expensive_pieces) {
+        const size_t saved = proxy_expensive_pieces(mesh, profile.max_triangles,
+                                                    opts.proxy_min_area_share);
+        if (saved)
+            rep.note(format("replaced loose pieces that would not simplify with boxes, saving %zu "
+                            "triangles; the bake paints them", saved));
     }
 
     // The budget re-fit sets secondary_shell_budget_share when shrinking the
