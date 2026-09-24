@@ -39,6 +39,8 @@ struct PartsUnwrapResult {
     int         charts = 0;
     int         splits = 0;       // charts split again because they folded or stretched
     int         merges = 0;       // neighbouring charts joined afterwards
+    float       seam = 0.0f;          // total length of chart borders on the surface
+    float       visible_seam = 0.0f;  // the same, weighted by visibility
     std::vector<uint32_t> tri_chart;   // per triangle of the rebuilt mesh
     std::string error;
 };

@@ -869,10 +869,18 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
     if (!carried_layout && profile.texture.uv_layout == "parts" &&
         mesh.tri_region.size() == mesh.triangle_count()) {
         report(0.02f, "cutting uv charts by part");
-        // How much each vertex is seen: the source's ambient term where it
-        // lands, halved on surface that faces the ground. Seams go where this
-        // is low - crevices, undersides, the inside of a limb.
+        // How much each vertex is seen: by the profile's cameras, each by its
+        // weight and by how squarely it faces the vertex, with anything the
+        // source hides from it not counting; then the ambient term, so a
+        // crevice every camera can see into still counts as out of the way.
+        // Seams go where this is low - the inside of a limb, an underside, the
+        // back of the head for a camera that only ever looks at the face.
+        // The ambient term alone was near 1 over the whole of a convex body:
+        // ordering merges by it changed nothing, and 80% of the seams on a
+        // character counted as visible.
         std::vector<float> seen(mesh.vertex_count(), 1.0f);
+        const float eps = std::max(source_analysis.bbox_diagonal, 1e-6f) * 1e-4f;
+        float most = 0.0f;
         for (size_t v = 0; v < mesh.vertex_count(); ++v) {
             const ClosestHit hit = source_bvh.closest_point(mesh.positions[v]);
             if (!hit.hit()) continue;
@@ -882,14 +890,34 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                 for (int i = 0; i < 3; ++i)
                     ambient += source_analysis.ambient[source.indices[hit.triangle * 3 + i]] / 3.0f;
             }
-            const float down = clampf(-source_bvh.geometric_normal(hit.triangle).y, 0.0f, 1.0f);
-            seen[v] = ambient * (1.0f - 0.5f * down);
+            const Vec3 n = source_bvh.geometric_normal(hit.triangle);
+            float s = 0.0f;
+            if (opts.seam_viewpoints.empty()) {
+                s = 1.0f - 0.5f * clampf(-n.y, 0.0f, 1.0f);
+            } else {
+                double acc = 0.0, total = 0.0;
+                for (const ViewPoint& vp : opts.seam_viewpoints) {
+                    total += vp.weight;
+                    const Vec3  to_eye = vp.eye - hit.point;
+                    const float facing = dot(n, normalize(to_eye));
+                    if (facing <= 0.0f) continue;
+                    if (source_bvh.occluded(hit.point + n * eps, to_eye, 1e-4f, 1.0f)) continue;
+                    acc += vp.weight * facing;
+                }
+                s = total > 0.0 ? float(acc / total) : 1.0f;
+            }
+            seen[v] = s * (0.5f + 0.5f * ambient);
+            most = std::max(most, seen[v]);
         }
+        if (most > 0.0f)
+            for (float& x : seen) x /= most;
         Mesh candidate = mesh;
         PartsUnwrapOptions popts;
         popts.seam_visibility_weight = 8.0f * knobs.uv_seam_hiding;
         popts.region_texel_weight    = opts.region_texel_weight;
+        Stopwatch parts_watch;
         const PartsUnwrapResult parts = unwrap_by_parts(candidate, seen, popts);
+        const double parts_seconds = parts_watch.seconds();
         if (parts.ok) {
             // Each chart packs as its own island: the packer finds islands by
             // uv connectivity and material, and charts laid out side by side
@@ -902,8 +930,10 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
             if (packed.ok) {
                 mesh = std::move(candidate);
                 uv   = packed;
-                RD_INFO("uv charts by part: %d charts (%d split, %d joined), %zu vertices",
-                        parts.charts, parts.splits, parts.merges, mesh.vertex_count());
+                RD_INFO("uv charts by part: %d charts (%d split, %d joined), %zu vertices, seams "
+                        "%.3f long (%.3f visible) in %s",
+                        parts.charts, parts.splits, parts.merges, mesh.vertex_count(), parts.seam,
+                        parts.visible_seam, format_duration(parts_seconds).c_str());
             } else {
                 RD_WARN("packing the part charts failed (%s); unwrapping with xatlas",
                         packed.error.c_str());

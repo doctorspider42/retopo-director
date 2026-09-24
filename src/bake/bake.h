@@ -18,6 +18,12 @@
 
 namespace rd {
 
+// Where the model is looked at from, for placing uv seams out of sight.
+struct ViewPoint {
+    Vec3  eye;
+    float weight = 1.0f;
+};
+
 struct BakeOptions {
     int   texture_width  = 0;      // 0 takes the profile value
     int   texture_height = 0;
@@ -47,6 +53,8 @@ struct BakeOptions {
     // Texel density per region id (RegionKnobs::texel_weight), for the uv
     // layout that cuts charts by part. Empty means even.
     std::vector<float> region_texel_weight;
+    // The profile's cameras. Empty falls back to the ambient term alone.
+    std::vector<ViewPoint> seam_viewpoints;
 };
 
 struct BakeResult {

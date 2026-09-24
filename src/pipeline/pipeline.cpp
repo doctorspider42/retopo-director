@@ -744,6 +744,12 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             // --- bake -------------------------------------------------------
             set_stage(Stage::Baking, format("iteration %d", iteration));
             BakeOptions bake_opts = s.bake;
+            {
+                std::lock_guard lock(results_mutex_);
+                for (const ViewCamera& cam : results_.cameras)
+                    bake_opts.seam_viewpoints.push_back(
+                        {cam.eye, cam.weight * (cam.primary ? 2.0f : 1.0f)});
+            }
             for (const RegionKnobs& rk : panel.regions) {
                 if (rk.id >= bake_opts.region_texel_weight.size())
                     bake_opts.region_texel_weight.resize(size_t(rk.id) + 1, 1.0f);

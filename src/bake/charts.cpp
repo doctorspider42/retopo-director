@@ -619,19 +619,117 @@ PartsUnwrapResult unwrap_by_parts(Mesh& mesh, const std::vector<float>& visibili
                 if (d > best) { best = d; sb = t; }
             }
         }
+        // Where the cut goes: a minimum cut on the chart's dual graph, an edge
+        // costing its length times how visible it is, between the 30% of the
+        // chart nearest each seed. Growing the halves from the two seeds put
+        // the new seam wherever the fronts met - across the middle of a chest
+        // as often as not; this puts it in the least visible band between them.
         std::unordered_map<uint32_t, int> side;
-        std::deque<uint32_t> front{sa, sb};
-        side[sa] = 0;
-        side[sb] = 1;
-        while (!front.empty()) {
-            const uint32_t t = front.front();
-            front.pop_front();
-            for (int i = 0; i < 3; ++i) {
-                const uint32_t o = across(topo, t, mesh.indices[t * 3 + i], mesh.indices[t * 3 + (i + 1) % 3],
-                                          chart_of, cid);
-                if (o == kInvalidIndex || side.count(o)) continue;
-                side[o] = side[t];
-                front.push_back(o);
+        {
+            const size_t nt = c.tris.size();
+            std::unordered_map<uint32_t, uint32_t> local;
+            for (uint32_t k = 0; k < nt; ++k) local[c.tris[k]] = k;
+            struct Arc { uint32_t to; float cap; uint32_t rev; };
+            std::vector<std::vector<Arc>> g(nt + 2);
+            const uint32_t S = uint32_t(nt), T = uint32_t(nt + 1);
+            auto add = [&](uint32_t u, uint32_t v, float cu, float cv) {
+                g[u].push_back({v, cu, uint32_t(g[v].size())});
+                g[v].push_back({u, cv, uint32_t(g[u].size() - 1)});
+            };
+            // Geodesic-ish distance from each seed over triangle centroids.
+            auto grow = [&](uint32_t seed) {
+                std::vector<float> d(nt, std::numeric_limits<float>::max());
+                using E = std::pair<float, uint32_t>;
+                std::priority_queue<E, std::vector<E>, std::greater<E>> q;
+                d[local[seed]] = 0.0f;
+                q.push({0.0f, local[seed]});
+                while (!q.empty()) {
+                    const auto [dv, k] = q.top();
+                    q.pop();
+                    if (dv > d[k]) continue;
+                    const uint32_t t = c.tris[k];
+                    for (int i = 0; i < 3; ++i) {
+                        const uint32_t o = across(topo, t, mesh.indices[t * 3 + i],
+                                                  mesh.indices[t * 3 + (i + 1) % 3], chart_of, cid);
+                        if (o == kInvalidIndex) continue;
+                        const uint32_t ko = local[o];
+                        const float nd = dv + length(mesh.triangle_centroid(o) - mesh.triangle_centroid(t));
+                        if (nd < d[ko]) { d[ko] = nd; q.push({nd, ko}); }
+                    }
+                }
+                return d;
+            };
+            const std::vector<float> da = grow(sa), db = grow(sb);
+            const float inf = std::numeric_limits<float>::max() / 4.0f;
+            bool connected = true;
+            for (uint32_t k = 0; k < nt; ++k) {
+                if (da[k] >= inf || db[k] >= inf) { connected = false; break; }
+                const float r = da[k] / std::max(da[k] + db[k], 1e-12f);
+                if (r < 0.3f) add(S, k, inf, 0.0f);
+                else if (r > 0.7f) add(k, T, inf, 0.0f);
+                const uint32_t t = c.tris[k];
+                for (int i = 0; i < 3; ++i) {
+                    const uint32_t va = mesh.indices[t * 3 + i], vb = mesh.indices[t * 3 + (i + 1) % 3];
+                    const uint32_t o = across(topo, t, va, vb, chart_of, cid);
+                    if (o == kInvalidIndex || local[o] < k) continue;   // each edge once
+                    const float cap = length(mesh.positions[va] - mesh.positions[vb]) *
+                                      (0.05f + 0.5f * (vis(va) + vis(vb)));
+                    add(k, local[o], cap, cap);
+                }
+            }
+            if (connected) {
+                // Edmonds-Karp: charts are a few hundred triangles.
+                for (int iter = 0; iter < 10000; ++iter) {
+                    std::vector<std::pair<uint32_t, uint32_t>> parent(nt + 2, {kInvalidIndex, 0});
+                    std::deque<uint32_t> bfs{S};
+                    parent[S] = {S, 0};
+                    while (!bfs.empty() && parent[T].first == kInvalidIndex) {
+                        const uint32_t u = bfs.front();
+                        bfs.pop_front();
+                        for (uint32_t ai = 0; ai < g[u].size(); ++ai) {
+                            const Arc& arc = g[u][ai];
+                            if (arc.cap <= 1e-12f || parent[arc.to].first != kInvalidIndex) continue;
+                            parent[arc.to] = {u, ai};
+                            bfs.push_back(arc.to);
+                        }
+                    }
+                    if (parent[T].first == kInvalidIndex) break;
+                    float push = inf;
+                    for (uint32_t v = T; v != S; v = parent[v].first)
+                        push = std::min(push, g[parent[v].first][parent[v].second].cap);
+                    for (uint32_t v = T; v != S; v = parent[v].first) {
+                        Arc& arc = g[parent[v].first][parent[v].second];
+                        arc.cap -= push;
+                        g[arc.to][arc.rev].cap += push;
+                    }
+                }
+                // The source side of the cut: everything still reachable.
+                std::vector<uint8_t> reach(nt + 2, 0);
+                std::deque<uint32_t> bfs{S};
+                reach[S] = 1;
+                while (!bfs.empty()) {
+                    const uint32_t u = bfs.front();
+                    bfs.pop_front();
+                    for (const Arc& arc : g[u])
+                        if (arc.cap > 1e-12f && !reach[arc.to]) { reach[arc.to] = 1; bfs.push_back(arc.to); }
+                }
+                for (uint32_t k = 0; k < nt; ++k) side[c.tris[k]] = reach[k] ? 0 : 1;
+            }
+        }
+        if (side.empty()) {
+            std::deque<uint32_t> front{sa, sb};
+            side[sa] = 0;
+            side[sb] = 1;
+            while (!front.empty()) {
+                const uint32_t t = front.front();
+                front.pop_front();
+                for (int i = 0; i < 3; ++i) {
+                    const uint32_t o = across(topo, t, mesh.indices[t * 3 + i], mesh.indices[t * 3 + (i + 1) % 3],
+                                              chart_of, cid);
+                    if (o == kInvalidIndex || side.count(o)) continue;
+                    side[o] = side[t];
+                    front.push_back(o);
+                }
             }
         }
         Chart halves[2];
@@ -665,7 +763,10 @@ PartsUnwrapResult unwrap_by_parts(Mesh& mesh, const std::vector<float>& visibili
                 const uint32_t o = it->second[0] == t ? it->second[1] : it->second[0];
                 const int ca = owner[t], cb = owner[o];
                 if (ca < 0 || cb < 0 || ca >= cb) continue;
-                shared[(uint64_t(ca) << 32) | uint32_t(cb)] += length(mesh.positions[a] - mesh.positions[b]);
+                // Weighted by how much of the seam shows: a border across the
+                // back is worth joining before one along the belly.
+                const float len = length(mesh.positions[a] - mesh.positions[b]);
+                shared[(uint64_t(ca) << 32) | uint32_t(cb)] += len * (0.25f + 0.5f * (vis(a) + vis(b)));
             }
         std::vector<std::pair<float, uint64_t>> pairs;
         for (const auto& [k, len] : shared) pairs.push_back({len, k});
@@ -732,6 +833,19 @@ PartsUnwrapResult unwrap_by_parts(Mesh& mesh, const std::vector<float>& visibili
         }
     }
     res.charts = int(done.size());
+    // Seam length that shows: every chart border that is not an open edge of
+    // the mesh, by length and visibility.
+    {
+        std::vector<int> owner(tcount, -1);
+        for (size_t ci = 0; ci < done.size(); ++ci)
+            for (uint32_t t : done[ci].tris) owner[t] = int(ci);
+        for (const auto& [k, tris] : topo.edge_tris) {
+            if (tris.size() != 2 || owner[tris[0]] == owner[tris[1]]) continue;
+            const uint32_t a = uint32_t(k >> 32), b = uint32_t(k & 0xffffffffu);
+            res.visible_seam += length(mesh.positions[a] - mesh.positions[b]) * 0.5f * (vis(a) + vis(b));
+            res.seam += length(mesh.positions[a] - mesh.positions[b]);
+        }
+    }
     res.ok     = true;
     mesh       = std::move(out);
     return res;
