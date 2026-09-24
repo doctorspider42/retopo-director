@@ -57,6 +57,9 @@ struct HardRuleOptions {
     // Loose pieces with more than 16 triangles and four times their share of
     // the budget become a box (proxy_expensive_pieces); pieces under this
     // share of the surface are left to the rules that remove them.
+    // This attempt's triangle budget, which loose pieces may not take past
+    // once the body is in; 0 uses the profile's.
+    int   total_triangle_cap = 0;
     bool  proxy_expensive_pieces = true;
     float proxy_min_area_share   = 0.002f;
     // Upper bound on triangles added by the joint loop rule, as a fraction of
@@ -112,7 +115,8 @@ size_t repair_nonmanifold(Mesh& mesh);
 // the simplifier cannot go under, and past the cap the body would starve.
 size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
                     const SymmetryPlane* mirror = nullptr, int secondary_triangle_cap = 0,
-                    const std::vector<float>* region_keep_priority = nullptr);
+                    const std::vector<float>* region_keep_priority = nullptr,
+                    int total_triangle_cap = 0);
 size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& source_bvh,
                           float density, int max_new_triangles);
 

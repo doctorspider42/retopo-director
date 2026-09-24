@@ -657,6 +657,37 @@ QuadricResult quadric_simplify(const Mesh& mesh, const MeshAnalysis& analysis,
     for (const RegionKnobs& k : panel.regions)
         if (k.id < budgets.size()) budgets[k.id] = std::max(2, k.triangle_budget);
 
+    // A region that is a whole loose piece gets enough for a box or nothing
+    // at all: the director gave a coffee cart's casters five triangles each
+    // and its canisters four, and a closed piece at four is a tetrahedron -
+    // black spikes all over the top - while at five a caster simplified into
+    // nothing and the cart floated. Twelve is a box. Where that is more than
+    // the budget holds, the re-fit's shell cap drops whole pieces, supports
+    // last, rather than every piece shrinking into a shard.
+    if (seg.tri_region.size() == mesh.triangle_count() &&
+        analysis.tri_shell.size() == mesh.triangle_count()) {
+        constexpr int kPieceFloor = 12;
+        constexpr uint32_t kMixed = std::numeric_limits<uint32_t>::max();
+        std::vector<uint32_t> region_shell(budgets.size(), kInvalidIndex);
+        std::unordered_map<uint32_t, uint32_t> shell_region;   // kMixed when shared
+        for (size_t t = 0; t < mesh.triangle_count(); ++t) {
+            const uint16_t r = seg.tri_region[t];
+            const uint32_t sh = analysis.tri_shell[t];
+            if (r >= region_shell.size()) continue;
+            if (region_shell[r] == kInvalidIndex) region_shell[r] = sh;
+            else if (region_shell[r] != sh) region_shell[r] = kMixed;
+            const auto it = shell_region.find(sh);
+            if (it == shell_region.end()) shell_region[sh] = r;
+            else if (it->second != r) it->second = kMixed;
+        }
+        for (size_t r = 0; r < budgets.size(); ++r) {
+            const uint32_t sh = region_shell[r];
+            if (sh == kInvalidIndex || sh == kMixed || sh == analysis.largest_shell) continue;
+            if (shell_region[sh] != uint32_t(r)) continue;   // the piece is shared with another region
+            if (budgets[r] < kPieceFloor) budgets[r] = kPieceFloor;
+        }
+    }
+
     return quadric_simplify(mesh, analysis, seg, density, budgets, symmetry, opts, progress);
 }
 

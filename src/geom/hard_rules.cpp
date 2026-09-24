@@ -447,7 +447,7 @@ size_t repair_nonmanifold(Mesh& mesh)
 
 size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
                     const SymmetryPlane* mirror, int secondary_triangle_cap,
-                    const std::vector<float>* region_keep_priority)
+                    const std::vector<float>* region_keep_priority, int total_triangle_cap)
 {
     if (max_shells <= 0 || mesh.empty()) return 0;
 
@@ -575,15 +575,17 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
 
     std::unordered_set<uint32_t> keep;
     int secondary_tris = 0;
+    int anchor_tris    = 0;
     for (size_t i = 0; i < ranked.size(); ++i) {
         const uint32_t root = ranked[i].second;
         if (keep.count(root)) continue;
 
         const double share = total_area > 0.0 ? shell_area[root] / total_area : 0.0;
+        const bool support = shell_low[root] - lowest <= support_band;
         // Debris is passed over rather than ending the list: the order is no
         // longer by area, and a small support ahead of the big pieces cut a
-        // cart down to one caster.
-        if (!keep.empty() && share < double(min_area_share)) continue;
+        // cart down to one caster. A support is never debris.
+        if (!keep.empty() && !support && share < double(min_area_share)) continue;
 
         const auto it = partner.find(root);
         const int  needed = (it != partner.end() && !keep.count(it->second)) ? 2 : 1;
@@ -594,13 +596,19 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
             break;
         }
         const int cost = shell_tris[root] + (needed == 2 ? shell_tris[it->second] : 0);
+        // What the profile leaves once the body is in.
+        int cap = secondary_triangle_cap;
+        if (!keep.empty() && total_triangle_cap > 0 && secondary_triangle_cap > 0) {
+            const int room = std::max(0, total_triangle_cap - anchor_tris);
+            cap = std::min(cap, room);
+        }
         // A piece too dear for what is left of the cap is passed over, not
         // the end of the list: a rack of 88 triangles and no area stopped a
         // cart's admission there, with thirty cheaper pieces still to come.
-        if (!keep.empty() && secondary_triangle_cap > 0 &&
-            secondary_tris + cost > secondary_triangle_cap)
+        if (!keep.empty() && cap > 0 && secondary_tris + cost > cap)
             continue;
         if (!keep.empty()) secondary_tris += cost;
+        else anchor_tris = cost;
         keep.insert(root);
         if (needed == 2) keep.insert(it->second);
     }
@@ -1309,7 +1317,17 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
                                           // culled on three attempts of one run.
                                           int(float(mesh.triangle_count()) *
                                               opts.secondary_shell_budget_share),
-                                          &opts.region_keep_priority);
+                                          &opts.region_keep_priority,
+                                          // And never more than this attempt's budget
+                                          // leaves once the body is in: pieces held at a
+                                          // floor of twelve do not shrink with the
+                                          // budget, and a cart's share of its own mesh
+                                          // sat at 785 triangles of loose pieces for a
+                                          // 400 limit. The attempt's budget, not the
+                                          // profile's, so the re-fit can still pull it
+                                          // in when the seams make the vertices bind.
+                                          opts.total_triangle_cap > 0 ? opts.total_triangle_cap
+                                                                      : profile.max_triangles);
         if (rep.removed_shells && profile.max_shells <= 0) {
             rep.note(format("dropped %zu triangles in the smallest loose pieces to fit the "
                             "budget; the bake paints them onto what they sit on",

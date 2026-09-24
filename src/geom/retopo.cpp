@@ -200,6 +200,7 @@ RetopoResult run_retopo(const Mesh& source, const MeshAnalysis& analysis,
     // --- hard rules ---------------------------------------------------------
     report(0.72f, "hard rules");
     HardRuleOptions hopts = opts.hard_rules;
+    hopts.total_triangle_cap = panel.total_budget();
     for (const RegionKnobs& k : panel.regions) {
         if (k.id >= hopts.region_keep_priority.size())
             hopts.region_keep_priority.resize(size_t(k.id) + 1, 0.5f);
