@@ -238,7 +238,15 @@ struct Simplifier {
         if (locked_u && locked_v)      candidate = (pos[u] + pos[v]) * 0.5f;
         else if (locked_u)             candidate = pos[u];
         else if (locked_v)             candidate = pos[v];
-        else if (!q.optimum(candidate)) {
+        else if (!q.optimum(candidate) ||
+                 // Well conditioned by the determinant and still nowhere near
+                 // the edge: the quadric of a thin piece - a cable, a rail, a
+                 // cup handle - is nearly a line, and its "minimum" can sit
+                 // anywhere along it. On a coffee cart that put vertices at
+                 // three times the model's size and drew blades across the
+                 // frame. A collapse never moves a vertex further than the
+                 // edge it removes is long.
+                 length(candidate - (pos[u] + pos[v]) * 0.5f) > length(pos[u] - pos[v])) {
             // Ill conditioned: pick whichever of the three obvious points is best.
             const Vec3 mid = (pos[u] + pos[v]) * 0.5f;
             const double eu = q.error(pos[u].x, pos[u].y, pos[u].z);
