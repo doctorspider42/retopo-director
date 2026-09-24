@@ -44,6 +44,9 @@ struct BakeOptions {
     int   palette_colors = 0;
     bool  dither         = true;
     bool  write_indexed  = true;
+    // Texel density per region id (RegionKnobs::texel_weight), for the uv
+    // layout that cuts charts by part. Empty means even.
+    std::vector<float> region_texel_weight;
 };
 
 struct BakeResult {

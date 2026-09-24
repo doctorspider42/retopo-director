@@ -886,7 +886,10 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
             seen[v] = ambient * (1.0f - 0.5f * down);
         }
         Mesh candidate = mesh;
-        const PartsUnwrapResult parts = unwrap_by_parts(candidate, seen, PartsUnwrapOptions{});
+        PartsUnwrapOptions popts;
+        popts.seam_visibility_weight = 8.0f * knobs.uv_seam_hiding;
+        popts.region_texel_weight    = opts.region_texel_weight;
+        const PartsUnwrapResult parts = unwrap_by_parts(candidate, seen, popts);
         if (parts.ok) {
             // Each chart packs as its own island: the packer finds islands by
             // uv connectivity and material, and charts laid out side by side

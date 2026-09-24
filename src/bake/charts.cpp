@@ -573,7 +573,20 @@ PartsUnwrapResult unwrap_by_parts(Mesh& mesh, const std::vector<float>& visibili
                         }
             }
             if (valid && area2 > 0.0) {
-                const float s = float(std::sqrt(area3 / area2));
+                // One density everywhere, times the weight of the regions the
+                // chart covers (by area): the packer keeps relative sizes.
+                double weight = 1.0, wsum = 0.0, asum = 0.0;
+                if (!opts.region_texel_weight.empty() && have_regions) {
+                    for (uint32_t t : c.tris) {
+                        const uint16_t r = mesh.tri_region[t];
+                        const float w = r < opts.region_texel_weight.size() ? opts.region_texel_weight[r] : 1.0f;
+                        const float a = mesh.triangle_area(t);
+                        wsum += w * a;
+                        asum += a;
+                    }
+                    if (asum > 0.0) weight = wsum / asum;
+                }
+                const float s = float(std::sqrt(area3 / area2 * weight));
                 for (Vec2& p : c.uv) p = p * s;
             }
         }

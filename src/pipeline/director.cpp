@@ -475,7 +475,7 @@ Rules for this step:
 LlmRequest build_review_request(const Mesh& source, const Segmentation& seg,
                                 const TargetProfile& profile, const KnobPanel& panel,
                                 const IterationFacts& facts, const ViewSet& reference_views,
-                                const ViewSet& candidate_views)
+                                const ViewSet& candidate_views, const ViewSet* uv_check_views)
 {
     LlmRequest req;
     req.label  = "review";
@@ -564,11 +564,31 @@ Rules for this step:
     have seen the result.
 )", facts.iteration, facts.max_iterations);
 
+    if (uv_check_views) {
+        u += R"(
+UV CHECK
+The last images are the low poly with a checker in place of its texture, from
+the same cameras. Judge the uv layout by them:
+  - Squares that stay square and the same size everywhere: sound.
+  - Squares smeared into long diamonds: stretch. The texture will blur there.
+  - Squares much bigger or smaller on one part than the rest: that part gets
+    fewer or more texels. On the face or the front that should be more, on an
+    underside or a tail tip it can be less - "texel_weight" per region moves it,
+    0.5 to 2.
+  - A break where the pattern or the tint jumps: a seam. On the front of the
+    face, the chest or anything the camera looks at straight on it will show as
+    a line in the texture; "uv_seam_hiding" (0 to 1) pushes seams into crevices
+    and undersides.
+Say what you see in the critique and patch these only when something is wrong.
+)";
+    }
+
     u += profile_advice_prompt_text(profile);
 
     req.user = u;
     attach(req, reference_views, "HIGH POLY", 6);
     attach(req, candidate_views, "LOW POLY", 6);
+    if (uv_check_views) attach(req, *uv_check_views, "UV CHECK", 3);
     return req;
 }
 

@@ -743,8 +743,14 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
 
             // --- bake -------------------------------------------------------
             set_stage(Stage::Baking, format("iteration %d", iteration));
+            BakeOptions bake_opts = s.bake;
+            for (const RegionKnobs& rk : panel.regions) {
+                if (rk.id >= bake_opts.region_texel_weight.size())
+                    bake_opts.region_texel_weight.resize(size_t(rk.id) + 1, 1.0f);
+                bake_opts.region_texel_weight[rk.id] = rk.texel_weight;
+            }
             bake = bake_all(retopo.mesh, source, analysis.bvh, analysis, s.profile,
-                            panel.global, s.bake,
+                            panel.global, bake_opts,
                             [&](float f, const char* what) { set_progress(f, what); });
             if (cancelled()) return false;
             if (!bake.ok) RD_WARN("bake failed: %s", bake.error.c_str());
@@ -902,6 +908,32 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
                                          bake.ok ? &display_tex : nullptr, true);
         if (!candidate.ok) RD_WARN("candidate renders unavailable: %s", candidate.error.c_str());
 
+        // The same views with a checker in place of the bake: squares that stay
+        // square and even say the layout is sound, a square that smears is
+        // stretch, a size jump is a density change, and a break in the pattern
+        // is a seam - which is what the director is asked to judge the uvs by.
+        // The tint runs with u and v, so a seam shows as a colour jump even
+        // where the squares happen to line up.
+        ViewSet uv_check;
+        if (bake.ok && !display_tex.empty()) {
+            Texture checker;
+            checker.resize(display_tex.width, display_tex.height);
+            const int cell = std::max(2, display_tex.height / 24);
+            for (int y = 0; y < checker.height; ++y)
+                for (int x = 0; x < checker.width; ++x) {
+                    const bool dark = ((x / cell) + (y / cell)) % 2 == 1;
+                    const float u = float(x) / float(checker.width), v = float(y) / float(checker.height);
+                    const Vec3 tint{0.35f + 0.65f * u, 0.35f + 0.65f * v, 0.35f + 0.65f * (1.0f - u)};
+                    const float l = dark ? 0.35f : 1.0f;
+                    checker.set(x, y, Vec4{tint.x * l, tint.y * l, tint.z * l, 1.0f});
+                }
+            RenderOptions copts = opts;
+            copts.wireframe_overlay = false;
+            copts.bilinear_texture  = false;
+            uv_check = render_views(display_mesh, copts, iter_dir, "uvcheck", nullptr, &checker, false);
+            if (!uv_check.ok) RD_WARN("uv checker renders unavailable: %s", uv_check.error.c_str());
+        }
+
         SilhouetteError silhouette;
         {
             std::lock_guard lock(results_mutex_);
@@ -989,7 +1021,7 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             const LlmRequest req =
                 validation.passed
                     ? build_review_request(source, seg, s.profile, panel, facts, reference,
-                                           candidate)
+                                           candidate, uv_check.ok ? &uv_check : nullptr)
                     : build_repair_request(seg, s.profile, panel, validation, retopo);
 
             const LlmResponse res = ask(req, validation.passed ? "review" : "repair");

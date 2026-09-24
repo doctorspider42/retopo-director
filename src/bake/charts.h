@@ -30,6 +30,8 @@ struct PartsUnwrapOptions {
     // How much a seam avoids visible surface: an edge costs its length times
     // (1 + weight * visibility), visibility 0 for a crevice or an underside.
     float seam_visibility_weight = 4.0f;
+    // Texel density per region id, relative to the rest; empty means 1.
+    std::vector<float> region_texel_weight;
 };
 
 struct PartsUnwrapResult {

@@ -77,6 +77,7 @@ Json RegionKnobs::to_json() const
     j["preserve_boundary"]   = preserve_boundary;
     j["symmetry_lock"]       = symmetry_lock;
     j["curvature_bias"]      = curvature_bias;
+    j["texel_weight"]        = texel_weight;
     if (!rationale.empty()) j["rationale"] = rationale;
     return j;
 }
@@ -96,6 +97,7 @@ RegionKnobs RegionKnobs::from_json(const Json& j)
     r.preserve_boundary   = json_get<bool>(j, "preserve_boundary", r.preserve_boundary);
     r.symmetry_lock       = json_get<float>(j, "symmetry_lock", r.symmetry_lock);
     r.curvature_bias      = json_get<float>(j, "curvature_bias", r.curvature_bias);
+    r.texel_weight        = json_get<float>(j, "texel_weight", r.texel_weight);
     r.rationale           = json_get<std::string>(j, "rationale", "");
     r.clamp();
     return r;
@@ -108,6 +110,7 @@ void RegionKnobs::clamp()
     hard_edge_degrees = clampf(hard_edge_degrees, 0.0f, 180.0f);
     symmetry_lock     = saturate(symmetry_lock);
     curvature_bias    = saturate(curvature_bias);
+    texel_weight      = clampf(texel_weight, 0.5f, 2.0f);
     triangle_budget   = std::max(0, triangle_budget);
     if (name.empty()) name = format("region_%u", unsigned(id));
     if (rationale.size() > 600) rationale.resize(600);
@@ -133,6 +136,7 @@ Json GlobalKnobs::to_json() const
     j["bake_vertex_colors"]        = bake_vertex_colors;
     j["uv_padding_texels"]         = uv_padding_texels;
     j["uv_stretch_tolerance"]      = uv_stretch_tolerance;
+    j["uv_seam_hiding"]            = uv_seam_hiding;
     j["request_another_iteration"] = request_another_iteration;
     if (!notes.empty()) j["notes"] = notes;
     return j;
@@ -155,6 +159,7 @@ GlobalKnobs GlobalKnobs::from_json(const Json& j)
     g.bake_vertex_colors        = json_get<bool>(j, "bake_vertex_colors", g.bake_vertex_colors);
     g.uv_padding_texels         = json_get<float>(j, "uv_padding_texels", g.uv_padding_texels);
     g.uv_stretch_tolerance      = json_get<float>(j, "uv_stretch_tolerance", g.uv_stretch_tolerance);
+    g.uv_seam_hiding            = json_get<float>(j, "uv_seam_hiding", g.uv_seam_hiding);
     g.request_another_iteration = json_get<bool>(j, "request_another_iteration", false);
     g.notes                     = json_get<std::string>(j, "notes", "");
     g.clamp();
@@ -172,6 +177,7 @@ void GlobalKnobs::clamp()
     ao_intensity         = saturate(ao_intensity);
     uv_padding_texels    = clampf(uv_padding_texels, 0.0f, 32.0f);
     uv_stretch_tolerance = clampf(uv_stretch_tolerance, 0.0f, 1.0f);
+    uv_seam_hiding       = saturate(uv_seam_hiding);
     if (notes.size() > 2000) notes.resize(2000);
 }
 
@@ -378,6 +384,7 @@ std::string KnobPanel::json_schema_text()
     "bake_vertex_colors":        "bool",
     "uv_padding_texels":         "0.0 .. 32.0",
     "uv_stretch_tolerance":      "0.0 .. 1.0 - has no measurable effect on this unwrap; leave it",
+    "uv_seam_hiding":            "0.0 .. 1.0 - how hard uv seams avoid visible surface (0 shortest cut, 1 hide them in crevices and underneath)",
     "request_another_iteration": "bool - true if you want to see the result and adjust again",
     "notes":                     "string - short explanation of the overall strategy"
   },
@@ -394,6 +401,7 @@ std::string KnobPanel::json_schema_text()
       "preserve_boundary":   "bool",
       "symmetry_lock":       "0.0 .. 1.0",
       "curvature_bias":      "0.0 .. 1.0 - follow curvature vs stay uniform",
+      "texel_weight":        "0.5 .. 2.0 - share of the texture per unit of surface, relative to the rest (2 = twice the texel density)",
       "rationale":           "string - one sentence, why this region gets this treatment"
     }
   ]
@@ -416,6 +424,7 @@ std::vector<KnobDiffEntry> knob_diff(const KnobPanel& before, const KnobPanel& a
     push_diff(out, "global", "smoothing_iterations", num_str(a.smoothing_iterations), num_str(b.smoothing_iterations));
     push_diff(out, "global", "quad_dominance", num_str(a.quad_dominance), num_str(b.quad_dominance));
     push_diff(out, "global", "ao_intensity", num_str(a.ao_intensity), num_str(b.ao_intensity));
+    push_diff(out, "global", "uv_seam_hiding", num_str(a.uv_seam_hiding), num_str(b.uv_seam_hiding));
 
     for (const RegionKnobs& rb : after.regions) {
         const RegionKnobs* ra = before.find(rb.id);
@@ -432,6 +441,7 @@ std::vector<KnobDiffEntry> knob_diff(const KnobPanel& before, const KnobPanel& a
         push_diff(out, scope, "preserve_silhouette", bool_str(ra->preserve_silhouette), bool_str(rb.preserve_silhouette));
         push_diff(out, scope, "curvature_bias", num_str(ra->curvature_bias), num_str(rb.curvature_bias));
         push_diff(out, scope, "symmetry_lock", num_str(ra->symmetry_lock), num_str(rb.symmetry_lock));
+        push_diff(out, scope, "texel_weight", num_str(ra->texel_weight), num_str(rb.texel_weight));
         if (ra->name != rb.name) push_diff(out, scope, "name", ra->name, rb.name);
     }
     return out;

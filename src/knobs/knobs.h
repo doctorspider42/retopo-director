@@ -54,6 +54,12 @@ struct RegionKnobs {
     float symmetry_lock       = 1.0f;  // 0..1, how strictly to mirror this region
     float curvature_bias      = 0.5f;  // 0..1, follow curvature vs stay uniform
 
+    // Texture. How much of the atlas this region gets for its surface: 2 is
+    // twice the texels per unit area of the rest, 0.5 half. Kept inside a
+    // factor of two so the density spread stays within what texture.stretch
+    // accepts.
+    float texel_weight        = 1.0f;
+
     // Filled by the model, shown in the report. Never read by the engine.
     std::string rationale;
 
@@ -87,6 +93,10 @@ struct GlobalKnobs {
     bool  bake_vertex_colors     = true;
     float uv_padding_texels      = 4.0f;
     float uv_stretch_tolerance   = 0.15f;
+    // How hard the uv seams avoid visible surface when charts are cut by part
+    // (texture.uv_layout "parts"): 0 takes the shortest cut, 1 goes a long way
+    // round to put it in a crevice or underneath.
+    float uv_seam_hiding         = 0.5f;
 
     // The model may ask for another pass; the pipeline still caps it.
     bool        request_another_iteration = false;

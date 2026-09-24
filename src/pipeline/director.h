@@ -79,7 +79,8 @@ LlmRequest    build_review_request(const Mesh& source, const Segmentation& seg,
                                    const TargetProfile& profile, const KnobPanel& panel,
                                    const IterationFacts& facts,
                                    const ViewSet& reference_views,
-                                   const ViewSet& candidate_views);
+                                   const ViewSet& candidate_views,
+                                   const ViewSet* uv_check_views = nullptr);
 ReviewOutcome parse_review_response(const LlmResponse& res);
 
 // --- stage 2b: the model is shown a validation failure instead of renders ---
