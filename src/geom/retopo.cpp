@@ -187,6 +187,16 @@ RetopoResult run_retopo(const Mesh& source, const MeshAnalysis& analysis,
         return result;
     }
 
+    // --- thin tubes -----------------------------------------------------------
+    // Before the hard rules, so the mirror and the manifold and winding
+    // repairs see the swept tubes like any other surface.
+    {
+        const bool mirrored = panel.global.enforce_symmetry && profile.require_symmetry;
+        const TubeReport tubes = sweep_thin_tubes(result.mesh, source, analysis, seg, mirrored,
+                                                  opts.tubes);
+        for (const std::string& n : tubes.notes) RD_DEBUG("tubes: %s", n.c_str());
+    }
+
     // --- hard rules ---------------------------------------------------------
     report(0.72f, "hard rules");
     HardRuleOptions hopts = opts.hard_rules;

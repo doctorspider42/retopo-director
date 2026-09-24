@@ -8,6 +8,7 @@
 #include "geom/hard_rules.h"
 #include "geom/quadric.h"
 #include "geom/remesh.h"
+#include "geom/tubes.h"
 #include "knobs/knobs.h"
 #include "knobs/profile.h"
 #include "mesh/analysis.h"
@@ -53,6 +54,7 @@ struct RetopoOptions {
     QuadricOptions  quadric;
     RemeshOptions   remesh;
     HardRuleOptions hard_rules;
+    TubeOptions     tubes;
     // Auto backend rule: anything skinned, or with fewer creases than this share
     // of its edges, is treated as organic and goes through the quad field. The
     // knob panel and the command line can both override it.
