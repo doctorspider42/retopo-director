@@ -216,7 +216,8 @@ LoadReport load_obj(const fs::path& path, Mesh& out, const LoadOptions& opts)
                 float u = 0, v = 0;
                 c = parse_float(c, eol, u);
                 c = parse_float(c, eol, v);
-                raw_uv.push_back({u, v});
+                // OBJ puts v = 0 at the bottom of the image; the pipeline at the top.
+                raw_uv.push_back({u, 1.0f - v});
             }
         } else if (opts.load_materials && c + 6 < eol && std::strncmp(c, "mtllib", 6) == 0) {
             mtl_name = trim(std::string(c + 6, eol));
@@ -908,7 +909,8 @@ LoadReport load_fbx(const fs::path& path, Mesh& out, const LoadOptions& opts)
                     Vec2 uv{};
                     if (mesh->vertex_uv.exists) {
                         const ufbx_vec2 t2 = ufbx_get_vertex_vec2(&mesh->vertex_uv, ix);
-                        uv = {float(t2.x), float(t2.y)};
+                        // FBX, like OBJ, has v = 0 at the bottom of the image.
+                        uv = {float(t2.x), 1.0f - float(t2.y)};
                     }
                     out.uvs.push_back(uv);
                 }
@@ -1075,8 +1077,9 @@ bool save_obj(const fs::path& path, const Mesh& mesh, const SaveOptions& opts,
     std::string text;
     text.reserve(m.vertex_count() * 48 + m.indices.size() * 12);
     text += "# Retopo Director " RD_VERSION_STRING "\n";
-    if (!opts.texture_file.empty())
-        text += "mtllib " + fs::path(opts.texture_file).stem().string() + ".mtl\n";
+    const bool paged = m.has_pages() && opts.page_textures.size() > 1;
+    if (!opts.texture_file.empty() || paged)
+        text += "mtllib " + path.stem().string() + ".mtl\n";
     text += "o " + (m.name.empty() ? std::string("lowpoly") : m.name) + "\n";
 
     char buf[192];
@@ -1094,7 +1097,8 @@ bool save_obj(const fs::path& path, const Mesh& mesh, const SaveOptions& opts,
     }
     if (m.has_uvs())
         for (const Vec2& t : m.uvs) {
-            std::snprintf(buf, sizeof(buf), "vt %.6g %.6g\n", t.x, t.y);
+            // Back to OBJ's v = 0 at the bottom of the image.
+            std::snprintf(buf, sizeof(buf), "vt %.6g %.6g\n", t.x, 1.0f - t.y);
             text += buf;
         }
     if (m.has_normals())
@@ -1103,10 +1107,15 @@ bool save_obj(const fs::path& path, const Mesh& mesh, const SaveOptions& opts,
             text += buf;
         }
 
-    if (!opts.texture_file.empty()) text += "usemtl lowpoly\n";
+    if (!opts.texture_file.empty() && !paged) text += "usemtl lowpoly\n";
 
     const bool ht = m.has_uvs(), hn = m.has_normals();
+    int current_page = -1;
     for (size_t t = 0; t < m.triangle_count(); ++t) {
+        if (paged && m.tri_page[t] != current_page) {
+            current_page = m.tri_page[t];
+            text += "usemtl page" + std::to_string(current_page) + "\n";
+        }
         const uint32_t a = m.indices[t * 3] + 1;
         const uint32_t b = m.indices[t * 3 + 1] + 1;
         const uint32_t c = m.indices[t * 3 + 2] + 1;
@@ -1123,7 +1132,16 @@ bool save_obj(const fs::path& path, const Mesh& mesh, const SaveOptions& opts,
         return false;
     }
 
-    if (!opts.texture_file.empty()) {
+    if (paged) {
+        std::string mtl;
+        for (size_t p = 0; p < opts.page_textures.size(); ++p) {
+            mtl += "newmtl page" + std::to_string(p) + "\nKa 1 1 1\nKd 1 1 1\nKs 0 0 0\nd 1\nillum 1\n";
+            if (!opts.page_textures[p].empty())
+                mtl += "map_Kd " + fs::path(opts.page_textures[p]).filename().string() + "\n";
+            mtl += "\n";
+        }
+        paths::write_file(path.parent_path() / (path.stem().string() + ".mtl"), mtl);
+    } else if (!opts.texture_file.empty()) {
         const std::string mtl =
             "newmtl lowpoly\nKa 1 1 1\nKd 1 1 1\nKs 0 0 0\nd 1\nillum 1\nmap_Kd " +
             fs::path(opts.texture_file).filename().string() + "\n";
@@ -1166,7 +1184,23 @@ bool save_gltf(const fs::path& path, const Mesh& mesh, const SaveOptions& opts,
     if (wn) v_nrm = push_view(m.normals.data(), vcount * sizeof(Vec3));
     if (wt) v_uv  = push_view(m.uvs.data(), vcount * sizeof(Vec2));
     if (wc) v_col = push_view(m.colors.data(), vcount * sizeof(Vec4));
-    const size_t v_idx = push_view(m.indices.data(), icount * sizeof(uint32_t));
+    // One index buffer view per page, in page order; a single one without pages.
+    const bool paged = m.has_pages() && opts.page_textures.size() > 1;
+    std::vector<std::vector<uint32_t>> page_indices(paged ? opts.page_textures.size() : 1);
+    if (paged) {
+        for (size_t t = 0; t < m.triangle_count(); ++t) {
+            const size_t p = std::min<size_t>(m.tri_page[t], page_indices.size() - 1);
+            page_indices[p].insert(page_indices[p].end(), m.indices.begin() + long(t * 3),
+                                   m.indices.begin() + long(t * 3 + 3));
+        }
+    } else {
+        page_indices[0] = m.indices;
+    }
+    std::vector<size_t> v_idx_pages;
+    for (const auto& pi : page_indices)
+        v_idx_pages.push_back(push_view(pi.data(), pi.size() * sizeof(uint32_t)));
+    const size_t v_idx = v_idx_pages.front();
+    (void)v_idx;
 
     const Aabb box = m.bounds();
 
@@ -1176,26 +1210,44 @@ bool save_gltf(const fs::path& path, const Mesh& mesh, const SaveOptions& opts,
     json += "  \"nodes\": [{\"mesh\": 0, \"name\": \"" +
             (m.name.empty() ? std::string("lowpoly") : m.name) + "\"}],\n";
 
-    json += "  \"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0";
+    std::string attributes = "\"POSITION\": 0";
     int accessor = 1;
     int a_nrm = -1, a_uv = -1, a_col = -1;
-    if (wn) { json += ", \"NORMAL\": " + std::to_string(accessor); a_nrm = accessor++; }
-    if (wt) { json += ", \"TEXCOORD_0\": " + std::to_string(accessor); a_uv = accessor++; }
-    if (wc) { json += ", \"COLOR_0\": " + std::to_string(accessor); a_col = accessor++; }
-    const int a_idx = accessor++;
-    json += "}, \"indices\": " + std::to_string(a_idx);
-    if (!opts.texture_file.empty()) json += ", \"material\": 0";
-    json += ", \"mode\": 4}]}],\n";
+    if (wn) { attributes += ", \"NORMAL\": " + std::to_string(accessor); a_nrm = accessor++; }
+    if (wt) { attributes += ", \"TEXCOORD_0\": " + std::to_string(accessor); a_uv = accessor++; }
+    if (wc) { attributes += ", \"COLOR_0\": " + std::to_string(accessor); a_col = accessor++; }
+    const int a_idx = accessor;
+    accessor += int(page_indices.size());
 
-    if (!opts.texture_file.empty()) {
-        const std::string tex = fs::path(opts.texture_file).filename().string();
-        json += "  \"materials\": [{\"name\": \"lowpoly\", \"pbrMetallicRoughness\": "
-                "{\"baseColorTexture\": {\"index\": 0}, \"metallicFactor\": 0.0, "
-                "\"roughnessFactor\": 1.0}}],\n";
-        json += "  \"textures\": [{\"source\": 0, \"sampler\": 0}],\n";
+    std::vector<std::string> textures;
+    if (paged) textures = opts.page_textures;
+    else if (!opts.texture_file.empty()) textures.push_back(opts.texture_file);
+
+    json += "  \"meshes\": [{\"primitives\": [";
+    for (size_t p = 0; p < page_indices.size(); ++p) {
+        if (p) json += ", ";
+        json += "{\"attributes\": {" + attributes + "}, \"indices\": " +
+                std::to_string(a_idx + int(p));
+        if (p < textures.size()) json += ", \"material\": " + std::to_string(p);
+        json += ", \"mode\": 4}";
+    }
+    json += "]}],\n";
+
+    if (!textures.empty()) {
+        std::string mats, texs, imgs;
+        for (size_t p = 0; p < textures.size(); ++p) {
+            const std::string sep = p ? ", " : "";
+            mats += sep + "{\"name\": \"page" + std::to_string(p) + "\", \"pbrMetallicRoughness\": "
+                    "{\"baseColorTexture\": {\"index\": " + std::to_string(p) +
+                    "}, \"metallicFactor\": 0.0, \"roughnessFactor\": 1.0}}";
+            texs += sep + "{\"source\": " + std::to_string(p) + ", \"sampler\": 0}";
+            imgs += sep + "{\"uri\": \"" + fs::path(textures[p]).filename().string() + "\"}";
+        }
+        json += "  \"materials\": [" + mats + "],\n";
+        json += "  \"textures\": [" + texs + "],\n";
         json += "  \"samplers\": [{\"magFilter\": 9729, \"minFilter\": 9987, "
                 "\"wrapS\": 10497, \"wrapT\": 10497}],\n";
-        json += "  \"images\": [{\"uri\": \"" + tex + "\"}],\n";
+        json += "  \"images\": [" + imgs + "],\n";
     }
 
     char minmax[256];
@@ -1216,16 +1268,19 @@ bool save_gltf(const fs::path& path, const Mesh& mesh, const SaveOptions& opts,
     if (wc) json += ",\n    {\"bufferView\": " + std::to_string(v_col) +
                     ", \"componentType\": 5126, \"count\": " + std::to_string(vcount) +
                     ", \"type\": \"VEC4\"}";
-    json += ",\n    {\"bufferView\": " + std::to_string(v_idx) +
-            ", \"componentType\": 5125, \"count\": " + std::to_string(icount) +
-            ", \"type\": \"SCALAR\"}\n  ],\n";
+    for (size_t p = 0; p < page_indices.size(); ++p)
+        json += ",\n    {\"bufferView\": " + std::to_string(v_idx_pages[p]) +
+                ", \"componentType\": 5125, \"count\": " +
+                std::to_string(page_indices[p].size()) + ", \"type\": \"SCALAR\"}";
+    json += "\n  ],\n";
+    (void)icount;
     (void)a_nrm; (void)a_uv; (void)a_col;
 
     json += "  \"bufferViews\": [\n";
     for (size_t i = 0; i < views.size(); ++i) {
         json += "    {\"buffer\": 0, \"byteOffset\": " + std::to_string(views[i].offset) +
                 ", \"byteLength\": " + std::to_string(views[i].length) +
-                ", \"target\": " + (i + 1 == views.size() ? "34963" : "34962") + "}";
+                ", \"target\": " + (i >= v_idx_pages.front() ? "34963" : "34962") + "}";
         if (i + 1 < views.size()) json += ",";
         json += "\n";
     }

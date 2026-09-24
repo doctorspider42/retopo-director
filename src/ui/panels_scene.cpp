@@ -31,7 +31,9 @@ void draw_mesh_view(AppState& app, Renderer& renderer, const GpuMesh& mesh, bool
         const ImVec2 pos = ImGui::GetCursorScreenPos();
         ImGui::GetWindowDrawList()->AddRectFilled(pos, {pos.x + size.x, pos.y + size.y},
                                                   col(p.canvas), 8.0f);
-        const char* text = valid ? "GPU renderer unavailable" : "nothing here yet";
+        const char* text = valid ? "GPU renderer unavailable"
+                                 : (app.mesh_path.empty() ? "open a mesh to see it here"
+                                                          : "not built yet");
         const ImVec2 ts  = ImGui::CalcTextSize(text);
         ImGui::GetWindowDrawList()->AddText(
             {pos.x + (size.x - ts.x) * 0.5f, pos.y + (size.y - ts.y) * 0.5f},
@@ -147,7 +149,12 @@ void panel_viewport(AppState& app)
         ImGui::PushItemWidth(toolbar_width * 0.30f);
         if (ImGui::BeginChild("##src", ImVec2(toolbar_width * 0.30f, 0),
                               ImGuiChildFlags_AutoResizeY)) {
-            if (segmented("source", &source, kSourceNames, 3)) app.source = ViewSource(source);
+            // Choosing by hand ends the automatic switching for good: after this
+            // the viewport shows what was asked for and nothing else.
+            if (segmented("source", &source, kSourceNames, 3)) {
+                app.source           = ViewSource(source);
+                app.auto_view_source = false;
+            }
         }
         ImGui::EndChild();
         ImGui::PopItemWidth();

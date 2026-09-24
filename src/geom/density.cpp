@@ -149,6 +149,9 @@ void build_density_field(const Mesh& mesh, const MeshAnalysis& analysis,
     const float joint_radius = bbox * 0.08f;
 
     std::vector<float> scale(tcount, 1.0f);
+    const float mean_edge = edge_for_area(analysis.stats.surface_area /
+                                          float(std::max(1, profile.max_triangles)));
+    const float thin_floor = mean_edge * opts.thin_floor_of_mean_edge;
 
     ThreadPool::shared().parallel_ranges(tcount, 1024, [&](size_t begin, size_t end, unsigned) {
         for (size_t t = begin; t < end; ++t) {
@@ -206,11 +209,30 @@ void build_density_field(const Mesh& mesh, const MeshAnalysis& analysis,
                 else if (k->fidelity == Fidelity::Texture) fidelity_term = opts.texture_fidelity_scale;
             }
 
+            // Thin features want an edge no longer than a fraction of their own
+            // thickness. Measured against the region's base edge, so a budget
+            // that already resolves the feature leaves it alone, and applied
+            // before calibration, so the region pays for it with coarser broad
+            // parts rather than with extra triangles.
+            float thin_term = 1.0f;
+            if (opts.thin_strength > 0.0f && analysis.thickness.size() == vcount) {
+                const auto pit = plan_of.find(region);
+                const float base = pit == plan_of.end() ? 0.0f : out.plans[pit->second].base_edge;
+                float thick = std::numeric_limits<float>::max();
+                for (int c = 0; c < 3; ++c)
+                    thick = std::min(thick, analysis.thickness[mesh.indices[t * 3 + c]]);
+                if (base > 0.0f && thick > bbox * opts.thin_sheet_cutoff_rel) {
+                    const float want = std::max(opts.thin_edge_ratio * thick, thin_floor);
+                    if (want < base)
+                        thin_term = std::pow(want / base, 0.8f * opts.thin_strength);
+                }
+            }
+
             // Merge aggressiveness globally pushes toward coarser results.
             const float merge_term = lerpf(0.9f, 1.25f, g.merge_aggressiveness);
 
             const float s = curv_term * joint_term * sil_term * cavity_term *
-                            fidelity_term * merge_term;
+                            fidelity_term * merge_term * thin_term;
             scale[t] = clampf(s, opts.min_scale, opts.max_scale);
 
             // Importance for the quadric engine: the inverse intuition.

@@ -18,6 +18,12 @@
 
 namespace rd {
 
+// Where the model is looked at from, for placing uv seams out of sight.
+struct ViewPoint {
+    Vec3  eye;
+    float weight = 1.0f;
+};
+
 struct BakeOptions {
     int   texture_width  = 0;      // 0 takes the profile value
     int   texture_height = 0;
@@ -31,18 +37,43 @@ struct BakeOptions {
     // Ray offset along the normal, relative to the bbox diagonal, to stop the
     // low poly surface from shadowing itself against the high poly.
     float ray_bias_rel = 3e-4f;
+    // Occluders nearer than this, relative to the bbox diagonal, do not count
+    // towards ambient occlusion. A sculpted source is full of millimetre
+    // grooves - veins, muscle striations - that occlude correctly and read, at
+    // 256 texels for a whole character, as thin black scribbles all over the
+    // skin. The occlusion a low poly texture can use is the armpit and the
+    // crotch, not the pore; this is the line between them.
+    float ao_min_distance_rel = 0.004f;
     // How far to search for the high poly when a texel sits off the surface.
     float projection_distance_rel = 0.05f;
     // Palette size; 0 takes the profile value, negative disables quantisation.
     int   palette_colors = 0;
     bool  dither         = true;
     bool  write_indexed  = true;
+    // Texel density per region id (RegionKnobs::texel_weight), for the uv
+    // layout that cuts charts by part. Empty means even.
+    std::vector<float> region_texel_weight;
+    // The profile's cameras. Empty falls back to the ambient term alone.
+    std::vector<ViewPoint> seam_viewpoints;
 };
 
 struct BakeResult {
+    // Page 0: the profile's main atlas.
     Texture      diffuse;
     CoverageMask coverage;
     Palette      palette;
+
+    // The profile's extra pages, in order; page i + 1 of the mesh's tri_page.
+    // Each has its own palette, as each would have its own CLUT on the target.
+    struct Page {
+        std::string  name;
+        Texture      diffuse;
+        CoverageMask coverage;
+        Palette      palette;
+        size_t       triangles = 0;
+    };
+    std::vector<Page> extra_pages;
+    size_t page0_triangles = 0;
 
     bool   ok = false;
     int    charts = 0;
@@ -62,6 +93,18 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                     const MeshAnalysis& source_analysis, const TargetProfile& profile,
                     const GlobalKnobs& knobs, const BakeOptions& opts = {},
                     const std::function<void(float, const char*)>& progress = nullptr);
+
+// Which page each triangle of `mesh` belongs on, from the profile's extra
+// pages: the regions a page's camera sees most of go to that page, whole, so
+// the back of the head travels with the face rather than being cut off by a
+// seam. Empty when the profile has no extra page or nothing qualifies.
+std::vector<uint8_t> assign_texture_pages(const Mesh& mesh, const TargetProfile& profile);
+
+// Everything the viewport and the candidate renders need to show a multi page
+// bake with one texture: the pages side by side at the height of the tallest,
+// and a copy of the mesh with its uvs moved into that layout. With one page it
+// is the diffuse and the mesh as they are. Display only - nothing ships this.
+Texture display_atlas(const Mesh& mesh, const BakeResult& bake, Mesh& display_mesh);
 
 // Unwrap on its own, for the UV preview in the viewport.
 struct UnwrapResult {

@@ -251,7 +251,7 @@ void GpuMesh::upload(const Mesh& mesh)
     index_count_  = mesh.indices.size();
     vertex_count_ = verts.size();
     bounds_       = mesh.bounds();
-    baked_colors_ = mesh.has_colors();
+    baked_colors_ = mesh.has_colors() && mesh.colors_prelit;
 }
 
 void GpuMesh::upload_attribute(const std::vector<Vec4>& colors)
@@ -284,7 +284,7 @@ void GpuMesh::upload_face_attribute(const Mesh& mesh, const std::vector<Vec4>& f
     upload_attribute(per_vertex);
 }
 
-void GpuMesh::set_texture(const Texture& tex)
+void GpuMesh::set_texture(const Texture& tex, bool bilinear)
 {
     if (!gl::loaded() || tex.empty()) return;
     if (!texture_) glGenTextures(1, &texture_);
@@ -295,7 +295,7 @@ void GpuMesh::set_texture(const Texture& tex)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, tex.width, tex.height, 0, format,
                  GL_UNSIGNED_BYTE, tex.pixels.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, bilinear ? GL_LINEAR : GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -652,7 +652,7 @@ ViewSet render_view_set(Renderer& renderer, const Mesh& mesh,
     gpu.upload(mesh);
     if (!gpu.valid()) { set.error = "mesh upload failed"; return set; }
     if (per_face_color) gpu.upload_face_attribute(mesh, *per_face_color);
-    if (diffuse && !diffuse->empty()) gpu.set_texture(*diffuse);
+    if (diffuse && !diffuse->empty()) gpu.set_texture(*diffuse, opts.bilinear_texture);
 
     for (const ViewCamera& cam : cameras) {
         ViewSet::Entry entry;
@@ -689,7 +689,7 @@ SilhouetteError compare_silhouettes(const ViewSet& reference, const ViewSet& can
     SilhouetteError err;
     if (reference.entries.empty() || candidate.entries.empty()) return err;
 
-    double weighted_sum = 0.0, weight_total = 0.0;
+    double weighted_sum = 0.0, weight_total = 0.0, outline_sum = 0.0;
 
     for (const ViewSet::Entry& ref : reference.entries) {
         const ViewSet::Entry* cand = nullptr;
@@ -708,13 +708,27 @@ SilhouetteError compare_silhouettes(const ViewSet& reference, const ViewSet& can
         const float denom = float(std::max<size_t>(covered, 1));
         const float e = float(disagree) / denom;
 
+        size_t perimeter = 0;
+        const int w = ref.mask_width, h = ref.mask_height;
+        if (w > 1 && h > 1 && size_t(w) * size_t(h) == ref.mask.size()) {
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x) {
+                    const bool here = ref.mask[size_t(y) * w + x] != 0;
+                    if (x + 1 < w && here != (ref.mask[size_t(y) * w + x + 1] != 0)) ++perimeter;
+                    if (y + 1 < h && here != (ref.mask[size_t(y + 1) * w + x] != 0)) ++perimeter;
+                }
+        }
+        const float px = float(disagree) / float(std::max<size_t>(perimeter, 1));
+        outline_sum += double(px) * double(ref.weight);
+
         err.per_view.emplace_back(ref.name, e);
         weighted_sum += double(e) * double(ref.weight);
         weight_total += double(ref.weight);
         if (e > err.worst) { err.worst = e; err.worst_view = ref.name; }
     }
 
-    err.mean = weight_total > 0.0 ? float(weighted_sum / weight_total) : 0.0f;
+    err.mean       = weight_total > 0.0 ? float(weighted_sum / weight_total) : 0.0f;
+    err.outline_px = weight_total > 0.0 ? float(outline_sum / weight_total) : 0.0f;
     return err;
 }
 

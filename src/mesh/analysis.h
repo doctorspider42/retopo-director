@@ -39,6 +39,10 @@ struct MeshAnalysis {
     std::vector<float> joint_distance;   // to nearest joint pivot, model units
     std::vector<int>   nearest_joint;    // -1 when there is no armature
     std::vector<float> ambient;          // cheap AO proxy, 0 = crevice, 1 = exposed
+    // Distance through the model to the opposite wall, model units: the
+    // diameter of a finger, the depth of an ear. bbox_diagonal where the inward
+    // ray leaves the model without hitting anything (an open sheet).
+    std::vector<float> thickness;
     std::vector<float> vertex_area;      // one third of incident triangle area
 
     // --- per triangle ------------------------------------------------------
@@ -46,9 +50,27 @@ struct MeshAnalysis {
     std::vector<float> tri_area;
     std::vector<Vec3>  tri_normal;
 
+    // Triangles no ray from outside reaches from either side (mesh/visibility.h).
+    std::vector<uint8_t>  tri_hidden;
+    // Connected piece each triangle belongs to, and per piece its share of the
+    // surface and the share of its own area that can be seen.
+    std::vector<uint32_t> tri_shell;
+    std::vector<float>    shell_area_share;
+    std::vector<float>    shell_visible_share;
+    // How far each piece stands off the largest one: the 90th percentile of
+    // its vertices' distances to that surface, in model units. 0 for the
+    // largest piece itself. An eyebrow card sits a few millimetres off the
+    // skin; a hood stands centimetres clear of the head.
+    std::vector<float>    shell_offset;
+    uint32_t              largest_shell = 0;
+
     // --- per edge ----------------------------------------------------------
     std::vector<float> edge_dihedral;    // radians, signed
-    std::vector<bool>  edge_sharp;
+    // Bytes, not std::vector<bool>: it is filled from a parallel loop, and the
+    // packed form puts 64 edges in one word, so two lanes writing neighbouring
+    // edges lose each other's bits. TSan caught it as a race; the symptom was
+    // a crease that came and went between runs of the same mesh.
+    std::vector<uint8_t> edge_sharp;
 
     // --- per joint ---------------------------------------------------------
     // How far the skin reaches from each pivot. The hard rules use it to size
@@ -77,10 +99,30 @@ struct AnalysisOptions {
     // Cheap ambient term: rays per vertex. 0 disables it.
     int   ambient_rays            = 24;
     float ambient_ray_length_rel  = 0.25f;
+    // Rays per vertex for the thickness estimate, in a narrow cone around the
+    // inward normal; the median is kept so one ray down a crevice does not
+    // decide it. 0 disables it.
+    int   thickness_rays          = 5;
+    // Visibility of each triangle from outside the model. 0 skips it, which
+    // leaves every piece counted as fully visible.
+    int   visibility_rays         = 48;
     // Curvature is normalised against this percentile so a handful of spikes
     // does not flatten the whole field.
     float curvature_percentile    = 0.97f;
 };
+
+// How far one surface is from another, independent of any camera: points
+// sampled over each by area, measured to the nearest point of the other, both
+// ways, as a share of the source's height. The silhouette metric moves with
+// the set of views it is measured from; this does not, which is what makes it
+// the number to compare runs that were rendered from different angles.
+struct SurfaceError {
+    float mean = 0.0f;   // mean of both directions
+    float p95  = 0.0f;   // 95th percentile of both directions
+    bool  valid = false;
+};
+SurfaceError measure_surface_error(const Mesh& source, const Bvh& source_bvh, const Mesh& low,
+                                   int samples = 20000);
 
 // Runs the full analysis. `progress` is called with 0..1 and may be null.
 void analyse_mesh(const Mesh& mesh, MeshAnalysis& out,

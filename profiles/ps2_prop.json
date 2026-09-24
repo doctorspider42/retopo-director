@@ -4,6 +4,7 @@
   "geometry": {
     "max_triangles": 400,
     "max_vertices": 380,
+    "budget_tolerance": 0.03,
     "max_shells": 0,
     "max_bone_influences": 0,
     "require_manifold": true,
@@ -40,6 +41,28 @@
         "height_m": 0.5,
         "fov_degrees": 45.0,
         "primary": true
+      },
+      {
+        "name": "underside",
+        "description": "From below, auto framed: the base of a prop that gets knocked over, picked up or seen from a stairwell. Without it nothing judges or protects the underside.",
+        "yaw_degrees": 200.0,
+        "pitch_degrees": -65.0,
+        "distance_m": 0.0,
+        "height_m": 0.0,
+        "fov_degrees": 40.0,
+        "fit_fraction": 0.9,
+        "primary": false
+      },
+      {
+        "name": "top",
+        "description": "From above, auto framed: a prop on a table or the floor is mostly seen from here.",
+        "yaw_degrees": 20.0,
+        "pitch_degrees": 65.0,
+        "distance_m": 0.0,
+        "height_m": 0.0,
+        "fov_degrees": 40.0,
+        "fit_fraction": 0.9,
+        "primary": false
       }
     ]
   },

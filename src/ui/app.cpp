@@ -55,14 +55,13 @@ void build_default_layout(ImGuiID dockspace)
     const ImGuiID bottom = ImGui::DockBuilderSplitNode(centre, ImGuiDir_Down, 0.26f, nullptr, &centre);
 
     ImGui::DockBuilderDockWindow("Pipeline", left);
-    ImGui::DockBuilderDockWindow("Target profile", left);
     ImGui::DockBuilderDockWindow("Viewport", centre);
     ImGui::DockBuilderDockWindow("Renders", centre);
     ImGui::DockBuilderDockWindow("Knob panel", right);
-    ImGui::DockBuilderDockWindow("Director", right);
     ImGui::DockBuilderDockWindow("Statistics", right);
-    ImGui::DockBuilderDockWindow("Log", bottom);
     ImGui::DockBuilderDockWindow("Validation", bottom);
+    ImGui::DockBuilderDockWindow("Director", bottom);
+    ImGui::DockBuilderDockWindow("Log", bottom);
 
     ImGui::DockBuilderFinish(dockspace);
 }
@@ -76,25 +75,27 @@ void draw_menu_bar(ui::AppState& app, bool& want_quit, bool& want_reset_layout)
         if (ImGui::MenuItem("Open mesh...", "Ctrl+O")) ui::action_open_mesh(app);
 
         if (ImGui::BeginMenu("Open recent", !app.recent_meshes.empty())) {
-            for (const auto& path : app.recent_meshes)
-                if (ImGui::MenuItem(path.filename().string().c_str())) {
-                    app.mesh_path = path;
-                    app.push_recent(path);
-                }
+            // PushID per row because two files can share a name, and the label
+            // is what ImGui hashes into the item id otherwise. Acting on the
+            // choice waits until the loop is over: open_mesh rewrites the very
+            // vector being walked.
+            fs::path chosen;
+            for (size_t i = 0; i < app.recent_meshes.size(); ++i) {
+                ImGui::PushID(int(i));
+                if (ImGui::MenuItem(app.recent_label(i).c_str()))
+                    chosen = app.recent_meshes[i];
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", app.recent_meshes[i].string().c_str());
+                ImGui::PopID();
+            }
             ImGui::EndMenu();
+            if (!chosen.empty()) app.open_mesh(chosen);
         }
 
         ImGui::Separator();
-        if (ImGui::MenuItem("Set project folder...")) {
-            const auto chosen = ui::pick_folder_dialog("Where should this run write?",
-                                                       paths::project_dir());
-            if (!chosen.empty()) {
-                paths::set_project_dir(chosen);
-                app.notify("Project folder: " + chosen.string());
-            }
-        }
         if (ImGui::MenuItem("Open project folder"))
             ui::reveal_in_file_manager(paths::project_dir());
+        if (ImGui::MenuItem("Options...", "Ctrl+,")) app.show_options = true;
 
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Alt+F4")) want_quit = true;
@@ -103,11 +104,14 @@ void draw_menu_bar(ui::AppState& app, bool& want_quit, bool& want_reset_layout)
 
     if (ImGui::BeginMenu("Run")) {
         const bool running = app.pipeline.running();
-        if (ImGui::MenuItem("Run the director", "F5", false, !running && !app.mesh_path.empty()))
+        if (ImGui::MenuItem(app.settings.use_llm ? "Run with the director" : "Run",
+                            "F5", false, !running && !app.mesh_path.empty()))
             ui::action_run(app);
-        if (ImGui::MenuItem("Rebuild geometry", "F6", false, !running))
+        if (ImGui::MenuItem("Rebuild the low poly", "F6", false, !running))
             ui::action_rebuild(app);
-        if (ImGui::MenuItem("Cancel", "Esc", false, running)) app.pipeline.cancel();
+        if (ImGui::MenuItem("Stop", "Esc", false, running)) app.pipeline.cancel();
+        ImGui::Separator();
+        ImGui::MenuItem("Let the director decide", nullptr, &app.settings.use_llm);
         ImGui::Separator();
         if (ImGui::MenuItem("Apply knob panel", "Ctrl+Return", false, app.panel_dirty))
             ui::action_apply_panel(app);
@@ -118,13 +122,13 @@ void draw_menu_bar(ui::AppState& app, bool& want_quit, bool& want_reset_layout)
         ImGui::MenuItem("Viewport", nullptr, &app.show_viewport);
         ImGui::MenuItem("Pipeline", nullptr, &app.show_pipeline);
         ImGui::MenuItem("Knob panel", nullptr, &app.show_regions);
-        ImGui::MenuItem("Target profile", nullptr, &app.show_profile);
-        ImGui::MenuItem("Director", nullptr, &app.show_director);
+        ImGui::MenuItem("Director transcript", nullptr, &app.show_director);
         ImGui::MenuItem("Validation", nullptr, &app.show_validation);
         ImGui::MenuItem("Renders", nullptr, &app.show_gallery);
         ImGui::MenuItem("Statistics", nullptr, &app.show_stats);
         ImGui::MenuItem("Log", nullptr, &app.show_log);
         ImGui::Separator();
+        ImGui::MenuItem("Options window", "Ctrl+,", &app.show_options);
         if (ImGui::MenuItem("Reset layout")) want_reset_layout = true;
         ImGui::MenuItem("ImGui demo", nullptr, &app.show_demo);
         ImGui::EndMenu();
@@ -135,27 +139,101 @@ void draw_menu_bar(ui::AppState& app, bool& want_quit, bool& want_reset_layout)
         ImGui::EndMenu();
     }
 
-    // Right aligned status: what the pipeline is doing right now.
+    // Right aligned: the file, since the stage and the progress now have a bar
+    // of their own along the bottom.
     {
         const ui::Palette& p = ui::palette();
         const Stage stage = app.pipeline.stage();
-        const std::string text =
-            app.pipeline.running()
-                ? format("%s  %.0f%%", stage_name(stage), app.pipeline.progress() * 100.0f)
-                : std::string(stage_name(stage));
+        const std::string text = app.mesh_path.empty()
+                                     ? std::string("no mesh loaded")
+                                     : app.mesh_path.filename().string();
 
         const float width = ImGui::CalcTextSize(text.c_str()).x + 24.0f;
         ImGui::SetCursorPosX(ImGui::GetWindowWidth() - width);
-        ImVec4 tint = p.text_faint;
-        if (stage == Stage::Failed)      tint = p.danger;
-        else if (stage == Stage::Done)   tint = p.success;
-        else if (app.pipeline.running()) tint = p.accent;
-        ImGui::PushStyleColor(ImGuiCol_Text, tint);
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              stage == Stage::Failed ? p.danger : p.text_faint);
         ImGui::TextUnformatted(text.c_str());
         ImGui::PopStyleColor();
+        if (!app.mesh_path.empty() && ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", app.mesh_path.string().c_str());
     }
 
     ImGui::EndMainMenuBar();
+}
+
+// ---------------------------------------------------------------------------
+// One bar along the bottom for the whole run.
+//
+// A per stage bar tucked inside a panel answers "what is it doing"; nobody was
+// asking that. The question during the two minutes this takes is how much is
+// left, so the answer sits across the bottom of the window where it cannot be
+// docked away, scrolled past or covered up.
+// ---------------------------------------------------------------------------
+void draw_status_bar(ui::AppState& app)
+{
+    const ui::Palette& p = ui::palette();
+    const float height = ImGui::GetFrameHeight() + 14.0f;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 7));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, p.surface);
+    // Like Begin, this has to be closed whether or not it returned true.
+    const bool open = ImGui::BeginViewportSideBar(
+        "##status_bar", ImGui::GetMainViewport(), ImGuiDir_Down, height,
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar);
+
+    if (open) {
+        const Stage stage   = app.pipeline.stage();
+        const bool  running = app.pipeline.running();
+        const float overall = ui::overall_progress(app);
+
+        ImVec4 tint = p.text_faint;
+        if (stage == Stage::Failed)         tint = p.danger;
+        else if (stage == Stage::Cancelled) tint = p.warning;
+        else if (stage == Stage::Done)      tint = p.success;
+        else if (running)                   tint = p.accent;
+
+        ImGui::AlignTextToFramePadding();
+        ui::dot(tint, 5.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, tint);
+        ImGui::TextUnformatted(running || stage != Stage::Idle ? stage_name(stage)
+                               : (app.mesh_path.empty() ? "Waiting for a mesh" : "Ready"));
+        ImGui::PopStyleColor();
+
+        const int iteration = app.pipeline.iteration();
+        if (running && iteration > 0) {
+            ImGui::SameLine(0.0f, 10.0f);
+            ui::badge(format("iteration %d", iteration).c_str(), p.accent);
+        }
+
+        // Reserve the right hand side before measuring what is left, so the
+        // readout and the stop button never get pushed off the edge.
+        const float tail = running ? 148.0f : 64.0f;
+        ImGui::SameLine(0.0f, 16.0f);
+        const float bar = std::max(80.0f, ImGui::GetContentRegionAvail().x - tail);
+
+        // The last stage message is only worth repeating while something is
+        // happening; at rest it is the name of a file already on screen twice.
+        const std::string msg = running ? app.pipeline.message() : std::string{};
+        const float y = ImGui::GetCursorPosY();
+        ImGui::SetCursorPosY(y + 5.0f);
+        ui::progress_bar(overall, msg.empty() ? nullptr : msg.c_str(), 16.0f, bar);
+        ImGui::SetCursorPosY(y);
+
+        ImGui::SameLine(0.0f, 12.0f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, p.text_dim);
+        ImGui::TextUnformatted(format("%3.0f%%", overall * 100.0f).c_str());
+        ImGui::PopStyleColor();
+
+        if (running) {
+            ImGui::SameLine(0.0f, 10.0f);
+            if (ui::danger_button("Stop", ImVec2(70, 0))) app.pipeline.cancel();
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
 }
 
 void draw_toast(ui::AppState& app)
@@ -195,6 +273,7 @@ void handle_shortcuts(ui::AppState& app, bool& want_quit, bool& want_screenshot)
 
     const bool ctrl = io.KeyCtrl;
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_O, false)) ui::action_open_mesh(app);
+    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Comma, false)) app.show_options = !app.show_options;
     if (ImGui::IsKeyPressed(ImGuiKey_F5, false))        ui::action_run(app);
     if (ImGui::IsKeyPressed(ImGuiKey_F6, false))        ui::action_rebuild(app);
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) ui::action_apply_panel(app);
@@ -397,7 +476,8 @@ int run_application(const AppOptions& opts)
     if (opts.verbose) log::set_echo_stderr(true);
 
     app->settings.profile = TargetProfile::ps2_character_default();
-    app->load_settings();
+    if (opts.no_settings) RD_INFO("saved settings ignored (--no-settings)");
+    else                  app->load_settings();
 
     // After load_settings, not before: the stored project directory is the one
     // the window was last pointed at, and it would otherwise quietly win over
@@ -427,8 +507,17 @@ int run_application(const AppOptions& opts)
             RD_WARN("unknown segmenter '%s', keeping %s", opts.segmenter.c_str(),
                     segmenter_kind_name(app->settings.segmenter.kind));
     }
+    if (!opts.llm_model.empty()) app->settings.llm.claude_model = opts.llm_model;
+    if (!opts.llm_path.empty())  app->settings.llm.claude_path  = opts.llm_path;
     if (!opts.sam_checkpoint.empty()) app->settings.segmenter.sam.checkpoint = opts.sam_checkpoint;
     if (!opts.sam_device.empty())     app->settings.segmenter.sam.device     = opts.sam_device;
+
+    if (opts.keep_hidden) app->settings.retopo.hard_rules.drop_hidden_shells = false;
+    if (!opts.replay.empty()) {
+        app->settings.llm.kind       = LlmBackendKind::Replay;
+        app->settings.llm.replay_dir = opts.replay;
+        app->settings.use_llm        = true;
+    }
 
     // --no-llm wins over --llm: the one that takes something away is the safe
     // reading of a contradictory command line.
@@ -517,6 +606,11 @@ int run_application(const AppOptions& opts)
     bool layout_built      = false;
     bool autorun_pending   = opts.autorun && !app->mesh_path.empty();
 
+    // A mesh named on the command line goes on screen before anything is
+    // pressed, exactly like one picked from the dialog. Not when the run starts
+    // by itself: that would load the same file twice.
+    if (!app->mesh_path.empty() && !autorun_pending) app->open_mesh(app->mesh_path);
+
     // Screenshots are taken from the back buffer, so they need neither focus
     // nor an unobstructed window. F12 takes one at any time; the command line
     // options exist so a script can drive the interface unattended.
@@ -584,13 +678,14 @@ int run_application(const AppOptions& opts)
         ui::panel_viewport(*app);
         ui::panel_pipeline(*app);
         ui::panel_regions(*app);
-        ui::panel_profile(*app);
         ui::panel_director(*app);
         ui::panel_validation(*app);
         ui::panel_gallery(*app);
         ui::panel_stats(*app);
         ui::panel_log(*app);
+        ui::panel_options(*app);
         ui::draw_about_modal(*app);
+        draw_status_bar(*app);
         draw_toast(*app);
 
         if (app->show_demo) ImGui::ShowDemoWindow(&app->show_demo);

@@ -10,9 +10,15 @@
 namespace rd {
 namespace fs = std::filesystem;
 
-// How many times the engine may shrink its own budget before it gives up and
-// reports the overshoot as a validation failure instead.
+// How many times the engine may re-fit its own budget before it gives up and
+// keeps the best attempt it has.
 constexpr int kBudgetAttempts = 6;
+// A run that lands below this share of its binding limit tries again with a
+// bigger budget. The backends undershoot on their own - the quad field rarely
+// lands within 20% of its target - and the unwrap's seam vertices eat into
+// the vertex limit unpredictably, so without a second look a quarter of the
+// budget the profile allows is routinely left unspent.
+constexpr float kBudgetFillTarget = 0.96f;
 
 const char* stage_name(Stage s)
 {
@@ -41,6 +47,66 @@ const char* stage_name(Stage s)
 bool stage_is_terminal(Stage s)
 {
     return s == Stage::Done || s == Stage::Failed || s == Stage::Cancelled || s == Stage::Idle;
+}
+
+// Where each stage starts and ends in a whole run. The numbers are wall clock
+// shares measured on a 300k triangle character with the quad field backend and
+// the geometric split; they are rough on purpose, because the point is a bar
+// that keeps moving, not a time estimate.
+namespace {
+
+struct StageSpan { float begin, end; };
+
+StageSpan span_of(Stage s)
+{
+    switch (s) {
+    case Stage::Loading:          return {0.00f, 0.04f};
+    case Stage::Analysing:        return {0.04f, 0.11f};
+    case Stage::ReferenceRenders: return {0.11f, 0.18f};
+    case Stage::Segmenting:       return {0.18f, 0.28f};
+    case Stage::NamingRegions:    return {0.28f, 0.33f};
+    case Stage::AllocatingBudget: return {0.33f, 0.36f};
+    // The loop, from here to the end of the review.
+    case Stage::BuildingDensity:  return {0.36f, 0.44f};
+    case Stage::Retopologising:   return {0.44f, 0.62f};
+    case Stage::Baking:           return {0.62f, 0.76f};
+    case Stage::Validating:       return {0.76f, 0.80f};
+    case Stage::CandidateRenders: return {0.80f, 0.86f};
+    case Stage::Reviewing:        return {0.86f, 0.92f};
+    case Stage::Exporting:        return {0.92f, 0.97f};
+    case Stage::Reporting:        return {0.97f, 1.00f};
+    case Stage::Done:             return {1.00f, 1.00f};
+    default:                      return {0.00f, 0.00f};
+    }
+}
+
+constexpr float kLoopBegin = 0.36f;
+constexpr float kLoopEnd   = 0.92f;
+
+bool stage_in_loop(Stage s)
+{
+    return s >= Stage::BuildingDensity && s <= Stage::Reviewing;
+}
+
+} // namespace
+
+float stage_overall_progress(Stage s, float within, int iteration, int total_iterations)
+{
+    if (s == Stage::Failed || s == Stage::Cancelled) return 0.0f;
+    if (s == Stage::Done) return 1.0f;
+
+    const StageSpan span = span_of(s);
+    float f = span.begin + (span.end - span.begin) * clampf(within, 0.0f, 1.0f);
+
+    // Squeeze the loop stages into the slice of the loop window that belongs to
+    // this iteration. Without it the bar snaps back to 36% every time the
+    // director asks for another pass, which reads as the run starting over.
+    if (stage_in_loop(s) && total_iterations > 1 && iteration > 0) {
+        const float slice = (kLoopEnd - kLoopBegin) / float(total_iterations);
+        const float local = (f - kLoopBegin) / (kLoopEnd - kLoopBegin);
+        f = kLoopBegin + slice * (float(std::min(iteration, total_iterations) - 1) + local);
+    }
+    return clampf(f, 0.0f, 1.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +183,13 @@ void Pipeline::set_panel(const KnobPanel& panel)
 
 bool Pipeline::start(const fs::path& mesh_path, const PipelineSettings& settings)
 {
-    if (running_.load()) return false;
+    if (running_.load()) {
+        // A preview is a courtesy and a run is not, so the run takes the thread.
+        // It only loads a file, so this waits for a fraction of a second. Without
+        // it, pressing Run on a mesh picked a moment ago quietly does nothing.
+        if (!preview_.load()) return false;
+        cancel();
+    }
     join();
     launch(Entry::Full, mesh_path, settings);
     return true;
@@ -132,6 +204,14 @@ bool Pipeline::rebuild_geometry(const PipelineSettings& settings)
     }
     join();
     launch(Entry::GeometryOnly, {}, settings);
+    return true;
+}
+
+bool Pipeline::preview(const fs::path& mesh_path, const PipelineSettings& settings)
+{
+    if (running_.load()) return false;
+    join();
+    launch(Entry::PreviewOnly, mesh_path, settings);
     return true;
 }
 
@@ -217,6 +297,10 @@ LlmResponse Pipeline::ask(const LlmRequest& req, const char* stage_label)
     res = llm_->complete(req, &cancel_);
 
     if (!res.raw.empty()) paths::write_file(dir / (base + "_reply.txt"), res.raw);
+    // The reply as the director layer saw it, without the backend's envelope.
+    // This is what the Replay backend reads back, so a run can be repeated
+    // exactly without the model: --replay <this run>/reports/prompts.
+    if (res.ok) paths::write_file(dir / (base + "_text.txt"), res.text);
 
     LlmExchange exchange;
     exchange.stage  = stage_label;
@@ -387,6 +471,7 @@ bool Pipeline::stage_segment(const PipelineSettings& s)
         fail("segmentation produced no regions");
         return false;
     }
+    measure_region_tubes(copy, analysis_copy, seg, TubeOptions{});
 
     // Visibility per region, straight off the reference masks when we have them.
     {
@@ -554,6 +639,30 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
     const int max_iterations = std::max(
         1, s.max_iterations > 0 ? s.max_iterations : s.profile.max_iterations);
 
+    // The best iteration so far, which is what the run hands back. The director
+    // steers by taste and its next panel is a guess: a later pass is often worse
+    // than an earlier one (a head it re-budgeted into a bucket, arms it bloated),
+    // and exporting the last pass regardless threw away the good one.
+    struct Kept {
+        int              iteration = 0;
+        Mesh             lowpoly;
+        DensityField     density;
+        RetopoResult     retopo;
+        BakeResult       bake;
+        ValidationReport validation;
+        ViewSet          candidate;
+        SilhouetteError  silhouette;
+        KnobPanel        panel;
+    };
+    Kept kept;
+    // Passing validation first, then the silhouette, then the latest: without
+    // renders every silhouette is zero and the director's latest word stands.
+    auto better = [](const ValidationReport& v, const SilhouetteError& sil, const Kept& than) {
+        if (than.iteration == 0) return true;
+        if (v.passed != than.validation.passed) return v.passed;
+        return sil.mean <= than.silhouette.mean;
+    };
+
     for (int iteration = 1; iteration <= max_iterations; ++iteration) {
         if (cancelled()) return false;
         iteration_.store(iteration);
@@ -595,8 +704,19 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         KnobPanel        best_panel;
         int              best_score = std::numeric_limits<int>::max();
         bool             have_best  = false;
+        // Largest budget known to land legal, smallest known to land over.
+        int              legal_budget   = -1;
+        int              illegal_budget = std::numeric_limits<int>::max();
+        // Triangles the previous over-budget attempt came back with, and
+        // whether the shell cap has been engaged because shrinking stopped
+        // doing anything.
+        int              previous_over_tris = -1;
+        float            shell_cap_share    = s.retopo.hard_rules.secondary_shell_budget_share;
 
-        for (int attempt = 0; attempt < kBudgetAttempts; ++attempt) {
+        // Engaging the shell cap starts the search over, so it earns the
+        // attempts back rather than spending the few that are left.
+        int attempts_allowed = kBudgetAttempts;
+        for (int attempt = 0; attempt < attempts_allowed; ++attempt) {
             panel.resolve_budgets(effective_budget);
 
             // --- density ----------------------------------------------------
@@ -608,6 +728,7 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             // --- retopo -----------------------------------------------------
             set_stage(Stage::Retopologising, format("iteration %d", iteration));
             RetopoOptions ropts = s.retopo;
+            ropts.hard_rules.secondary_shell_budget_share = shell_cap_share;
             if (s.force_backend) {
                 ropts.forced_backend_valid = true;
                 ropts.forced_backend       = s.backend;
@@ -622,8 +743,20 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
 
             // --- bake -------------------------------------------------------
             set_stage(Stage::Baking, format("iteration %d", iteration));
+            BakeOptions bake_opts = s.bake;
+            {
+                std::lock_guard lock(results_mutex_);
+                for (const ViewCamera& cam : results_.cameras)
+                    bake_opts.seam_viewpoints.push_back(
+                        {cam.eye, cam.weight * (cam.primary ? 2.0f : 1.0f)});
+            }
+            for (const RegionKnobs& rk : panel.regions) {
+                if (rk.id >= bake_opts.region_texel_weight.size())
+                    bake_opts.region_texel_weight.resize(size_t(rk.id) + 1, 1.0f);
+                bake_opts.region_texel_weight[rk.id] = rk.texel_weight;
+            }
             bake = bake_all(retopo.mesh, source, analysis.bvh, analysis, s.profile,
-                            panel.global, s.bake,
+                            panel.global, bake_opts,
                             [&](float f, const char* what) { set_progress(f, what); });
             if (cancelled()) return false;
             if (!bake.ok) RD_WARN("bake failed: %s", bake.error.c_str());
@@ -657,15 +790,24 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
 
             const int tris  = int(retopo.mesh.triangle_count());
             const int verts = int(retopo.mesh.vertex_count());
-            const bool over_tri  = tris  > s.profile.max_triangles;
-            const bool over_vert = verts > s.profile.max_vertices;
+            // Legal is judged against the ceiling, the limit plus the profile's
+            // tolerance; the aim below stays on the limit itself, so the
+            // margin is left for the fixes that come after it.
+            const bool over_tri  = tris  > s.profile.triangle_ceiling();
+            const bool over_vert = verts > s.profile.vertex_ceiling();
 
             // Score this attempt so the run can fall back to the best one. The
             // unwrap is not a smooth function of the triangle budget - the seam
             // count jumps around - so the last attempt is often not the best.
-            const int overshoot = std::max(0, tris - s.profile.max_triangles) +
-                                  std::max(0, verts - s.profile.max_vertices);
-            const int score = overshoot * 10000 - tris;   // legal first, then fullest
+            const int overshoot = std::max(0, tris - s.profile.triangle_ceiling()) +
+                                  std::max(0, verts - s.profile.vertex_ceiling());
+            // Legal first, then inside the budget proper, then fullest. The
+            // tolerance is for the fixes that come after the aim - closing a
+            // hole - not budget to spend: an attempt that fits the limit
+            // itself always beats one that only fits the ceiling.
+            const int over_limit = std::max(0, tris - s.profile.max_triangles) +
+                                   std::max(0, verts - s.profile.max_vertices);
+            const int score = overshoot * 100000 + (over_limit > 0 ? 50000 + over_limit : 0) - tris;
             if (score < best_score) {
                 best_score      = score;
                 best_density    = density;
@@ -677,26 +819,70 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
                 have_best       = true;
             }
 
-            if (!over_tri && !over_vert) break;
+            // How full the tighter of the two limits is. Whichever binds decides.
+            const float fill = std::max(float(tris) / float(std::max(1, s.profile.max_triangles)),
+                                        float(verts) / float(std::max(1, s.profile.max_vertices)));
+            const bool legal = !over_tri && !over_vert;
+            // For the bracket, past the limit counts as over even inside the
+            // tolerance: the search is for the biggest budget that fits the
+            // limit itself.
+            const bool past_limit = tris > s.profile.max_triangles ||
+                                    verts > s.profile.max_vertices;
+            if (legal && !past_limit) legal_budget   = std::max(legal_budget, effective_budget);
+            else                      illegal_budget = std::min(illegal_budget, effective_budget);
 
-            if (attempt + 1 >= kBudgetAttempts) {
-                RD_WARN("still over budget after %d attempts (%d tri, %d vtx); keeping the "
-                        "closest attempt and letting validation say so",
-                        kBudgetAttempts, tris, verts);
+            // A smaller budget that barely moved the triangle count means the
+            // count has a floor: dozens of separate pieces, each already as
+            // small as a closed piece can be. Shrinking further only starves
+            // the body, so the next attempt caps what the pieces may hold.
+            if (!legal && previous_over_tris > 0 && shell_cap_share <= 0.0f &&
+                tris * 10 > previous_over_tris * 9) {
+                shell_cap_share = 0.4f;
+                RD_INFO("budget re-fit stalled at %d triangles; capping the loose pieces at "
+                        "%.0f%% of the budget", tris, shell_cap_share * 100.0f);
+                // What was learnt about budgets no longer holds with fewer
+                // pieces, so the bracket starts over at the profile's own.
+                legal_budget       = -1;
+                illegal_budget     = std::numeric_limits<int>::max();
+                previous_over_tris = -1;
+                effective_budget   = s.profile.max_triangles;
+                attempts_allowed = attempt + 1 + kBudgetAttempts / 2 + 1;
+                continue;
+            }
+            if (!legal) previous_over_tris = tris;
+
+            if (legal && !past_limit && fill >= kBudgetFillTarget) break;
+            // Past the limit but inside the tolerance: legal, but the next
+            // attempt aims back under the limit rather than further up.
+
+            if (attempt + 1 >= attempts_allowed) {
+                if (!legal || !have_best)
+                    RD_WARN("still over budget after %d attempts (%d tri, %d vtx); keeping the "
+                            "closest attempt and letting validation say so",
+                            kBudgetAttempts, tris, verts);
                 break;
             }
 
-            float scale = 1.0f;
-            if (over_tri)  scale = std::min(scale, float(s.profile.max_triangles) / float(tris));
-            if (over_vert) scale = std::min(scale, float(s.profile.max_vertices) / float(verts));
-            // Undershoot on purpose: the seam count does not scale linearly with
-            // the triangle count, so aiming exactly at the limit overshoots again.
-            const int next = std::max(16, int(float(effective_budget) * scale * 0.92f));
-            if (next >= effective_budget) break;
+            // Both directions are a proportional step on the binding limit,
+            // bracketed by what has already been tried: never back up to a
+            // budget known to be over, never down to one known to be legal.
+            // Aim a little short, because the seam count does not scale
+            // linearly with the triangle count and aiming at the limit
+            // overshoots it again.
+            const float scale = std::min(float(s.profile.max_triangles) / float(std::max(1, tris)),
+                                         float(s.profile.max_vertices) / float(std::max(1, verts)));
+            int next = legal && !past_limit
+                           ? int(float(effective_budget) * std::min(scale * 0.97f, 2.0f))
+                           : int(float(effective_budget) * scale * 0.92f);
+            if (next >= illegal_budget) next = (std::max(legal_budget, effective_budget) + illegal_budget) / 2;
+            if (next <= legal_budget)   next = (legal_budget + std::min(illegal_budget, effective_budget)) / 2;
+            next = std::max(16, next);
+            // Less than two percent apart is noise in the backend, not a step.
+            if (std::abs(next - effective_budget) * 50 < effective_budget) break;
 
-            RD_INFO("budget re-fit: %d tri / %d vtx against limits %d / %d, retrying with "
-                    "a %d triangle budget", tris, verts, s.profile.max_triangles,
-                    s.profile.max_vertices, next);
+            RD_INFO("budget re-fit: %d tri / %d vtx against limits %d / %d (%.0f%% full), "
+                    "retrying with a %d triangle budget", tris, verts, s.profile.max_triangles,
+                    s.profile.max_vertices, fill * 100.0f, next);
             effective_budget = next;
         }
 
@@ -717,11 +903,42 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         opts.samples = s.render_samples;
         opts.mode    = RenderMode::Shaded;
         opts.wireframe_overlay = true;
+        opts.bilinear_texture  = s.profile.texture.bilinear;
 
         const fs::path iter_dir = paths::iteration_dir(iteration);
-        ViewSet candidate = render_views(retopo.mesh, opts, iter_dir, "lowpoly", nullptr,
-                                         bake.ok ? &bake.diffuse : nullptr, true);
+        // One texture for the renderer: the pages laid side by side.
+        Mesh    display_mesh;
+        Texture display_tex = bake.ok ? display_atlas(retopo.mesh, bake, display_mesh) : Texture{};
+        if (!bake.ok) display_mesh = retopo.mesh;
+        ViewSet candidate = render_views(display_mesh, opts, iter_dir, "lowpoly", nullptr,
+                                         bake.ok ? &display_tex : nullptr, true);
         if (!candidate.ok) RD_WARN("candidate renders unavailable: %s", candidate.error.c_str());
+
+        // The same views with a checker in place of the bake: squares that stay
+        // square and even say the layout is sound, a square that smears is
+        // stretch, a size jump is a density change, and a break in the pattern
+        // is a seam - which is what the director is asked to judge the uvs by.
+        // The tint runs with u and v, so a seam shows as a colour jump even
+        // where the squares happen to line up.
+        ViewSet uv_check;
+        if (bake.ok && !display_tex.empty()) {
+            Texture checker;
+            checker.resize(display_tex.width, display_tex.height);
+            const int cell = std::max(2, display_tex.height / 24);
+            for (int y = 0; y < checker.height; ++y)
+                for (int x = 0; x < checker.width; ++x) {
+                    const bool dark = ((x / cell) + (y / cell)) % 2 == 1;
+                    const float u = float(x) / float(checker.width), v = float(y) / float(checker.height);
+                    const Vec3 tint{0.35f + 0.65f * u, 0.35f + 0.65f * v, 0.35f + 0.65f * (1.0f - u)};
+                    const float l = dark ? 0.35f : 1.0f;
+                    checker.set(x, y, Vec4{tint.x * l, tint.y * l, tint.z * l, 1.0f});
+                }
+            RenderOptions copts = opts;
+            copts.wireframe_overlay = false;
+            copts.bilinear_texture  = false;
+            uv_check = render_views(display_mesh, copts, iter_dir, "uvcheck", nullptr, &checker, false);
+            if (!uv_check.ok) RD_WARN("uv checker renders unavailable: %s", uv_check.error.c_str());
+        }
 
         SilhouetteError silhouette;
         {
@@ -731,6 +948,8 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
 
         if (bake.ok && !bake.diffuse.empty())
             bake.diffuse.save_png(iter_dir / "diffuse.png");
+        for (const BakeResult::Page& pg : bake.extra_pages)
+            if (!pg.diffuse.empty()) pg.diffuse.save_png(iter_dir / (slugify(pg.name) + "_diffuse.png"));
         {
             std::string err;
             json_save_file((iter_dir / "knobs.json").string(), panel.to_json(), err);
@@ -744,6 +963,7 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         record.triangles  = retopo.mesh.triangle_count();
         record.vertices   = retopo.mesh.vertex_count();
         record.silhouette = silhouette;
+        record.surface    = measure_surface_error(source, analysis.bvh, retopo.mesh);
         record.validation_passed = validation.passed;
         record.errors     = validation.errors;
         record.warnings   = validation.warnings;
@@ -761,6 +981,17 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             results_.candidate_views = candidate;
             results_.silhouette      = silhouette;
             results_.panel           = panel;
+            if (better(validation, silhouette, kept)) {
+                kept.iteration  = iteration;
+                kept.lowpoly    = results_.lowpoly;
+                kept.density    = results_.density;
+                kept.retopo     = retopo;
+                kept.bake       = bake;
+                kept.validation = validation;
+                kept.candidate  = candidate;
+                kept.silhouette = silhouette;
+                kept.panel      = panel;
+            }
         }
         bump();
 
@@ -780,6 +1011,8 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             facts.max_iterations = max_iterations;
             facts.triangles      = record.triangles;
             facts.vertices       = record.vertices;
+            facts.max_triangles  = s.profile.max_triangles;
+            facts.max_vertices   = s.profile.max_vertices;
             facts.silhouette     = silhouette;
             facts.retopo         = &retopo;
             facts.validation     = &validation;
@@ -794,7 +1027,7 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             const LlmRequest req =
                 validation.passed
                     ? build_review_request(source, seg, s.profile, panel, facts, reference,
-                                           candidate)
+                                           candidate, uv_check.ok ? &uv_check : nullptr)
                     : build_repair_request(seg, s.profile, panel, validation, retopo);
 
             const LlmResponse res = ask(req, validation.passed ? "review" : "repair");
@@ -841,6 +1074,29 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
 
         if (stop) break;
     }
+
+    {
+        std::lock_guard lock(results_mutex_);
+        const int last = results_.iterations.empty() ? 0 : results_.iterations.back().index;
+        results_.kept_iteration = kept.iteration;
+        for (const IterationRecord& it : results_.iterations)
+            if (it.index == kept.iteration) results_.surface = it.surface;
+        if (kept.iteration != 0 && kept.iteration != last) {
+            RD_INFO("keeping iteration %d (silhouette %.4f) over the last one, %d (%.4f)",
+                    kept.iteration, kept.silhouette.mean, last, results_.silhouette.mean);
+            results_.lowpoly         = std::move(kept.lowpoly);
+            results_.density         = std::move(kept.density);
+            results_.retopo          = std::move(kept.retopo);
+            results_.bake            = std::move(kept.bake);
+            results_.validation      = std::move(kept.validation);
+            results_.candidate_views = std::move(kept.candidate);
+            results_.silhouette      = kept.silhouette;
+            // The panel that built it, so Rebuild reproduces what is on screen
+            // rather than the director's untried next guess.
+            results_.panel           = std::move(kept.panel);
+        }
+    }
+    bump();
     return true;
 }
 
@@ -852,11 +1108,13 @@ bool Pipeline::stage_export(const PipelineSettings& s)
     Mesh    mesh;
     Texture diffuse;
     Palette palette;
+    std::vector<BakeResult::Page> pages;
     {
         std::lock_guard lock(results_mutex_);
         mesh    = results_.lowpoly;
         diffuse = results_.bake.diffuse;
         palette = results_.bake.palette;
+        pages   = results_.bake.extra_pages;
     }
     if (mesh.empty()) {
         RD_WARN("nothing to export");
@@ -871,7 +1129,7 @@ bool Pipeline::stage_export(const PipelineSettings& s)
     }
 
     ExportResult exported = export_asset(mesh, diffuse, palette, s.profile,
-                                         paths::export_dir(), opts);
+                                         paths::export_dir(), opts, pages);
     if (!exported.ok) RD_WARN("export incomplete: %s", exported.error.c_str());
 
     {
@@ -900,7 +1158,58 @@ bool Pipeline::stage_report(const PipelineSettings& s)
     j["validation"] = r.validation.to_json();
     j["silhouette"] = Json{{"mean", r.silhouette.mean},
                            {"worst", r.silhouette.worst},
+                           {"outline_px", r.silhouette.outline_px},
                            {"worst_view", r.silhouette.worst_view}};
+    // One flat block with the numbers a run is judged by, so tools/bench.py can
+    // compare two runs without knowing the shape of the rest of this file.
+    {
+        int budget_sum = 0, budget_used = 0;
+        for (const RegionKnobs& k : r.panel.regions) {
+            budget_sum += k.triangle_budget;
+            if (k.id < r.retopo.region_triangles.size())
+                budget_used += r.retopo.region_triangles[k.id];
+        }
+        // Triangle shape, which no other number here sees: a fan of slivers can
+        // hold the silhouette perfectly and still look shattered.
+        std::vector<float> shapes;
+        shapes.reserve(r.lowpoly.triangle_count());
+        for (size_t t = 0; t < r.lowpoly.triangle_count(); ++t) {
+            Vec3 a, b, c;
+            r.lowpoly.tri_positions(t, a, b, c);
+            shapes.push_back(triangle_quality(a, b, c));
+        }
+        float median_shape = 0.0f, sliver_share = 0.0f;
+        if (!shapes.empty()) {
+            std::nth_element(shapes.begin(), shapes.begin() + shapes.size() / 2, shapes.end());
+            median_shape = shapes[shapes.size() / 2];
+            sliver_share = float(std::count_if(shapes.begin(), shapes.end(),
+                                               [](float q) { return q < 0.2f; })) /
+                           float(shapes.size());
+        }
+        j["summary"] = Json{
+            {"median_triangle_quality", median_shape},
+            {"sliver_share", sliver_share},
+            {"highpoly_triangles", r.highpoly.triangle_count()},
+            {"highpoly_vertices", r.highpoly.vertex_count()},
+            {"lowpoly_triangles", r.lowpoly.triangle_count()},
+            {"lowpoly_vertices", r.lowpoly.vertex_count()},
+            {"max_triangles", s.profile.max_triangles},
+            {"max_vertices", s.profile.max_vertices},
+            {"regions", r.panel.regions.size()},
+            {"region_budget_sum", budget_sum},
+            {"region_triangles_sum", budget_used},
+            {"silhouette_mean", r.silhouette.mean},
+            {"silhouette_worst", r.silhouette.worst},
+            {"outline_px", r.silhouette.outline_px},
+            {"surface_error_mean", r.surface.mean},
+            {"surface_error_p95", r.surface.p95},
+            {"validation_passed", r.validation.passed},
+            {"errors", r.validation.errors},
+            {"warnings", r.validation.warnings},
+            {"iterations", r.iterations.size()},
+            {"kept_iteration", r.kept_iteration},
+        };
+    }
 
     Json iterations = Json::array();
     for (const IterationRecord& it : r.iterations) {
@@ -911,6 +1220,7 @@ bool Pipeline::stage_report(const PipelineSettings& s)
         e["backend"]    = backend_name(it.backend);
         e["silhouette_mean"]  = it.silhouette.mean;
         e["silhouette_worst"] = it.silhouette.worst;
+        e["outline_px"]       = it.silhouette.outline_px;
         e["validation_passed"] = it.validation_passed;
         e["errors"]     = it.errors;
         e["warnings"]   = it.warnings;
@@ -938,9 +1248,12 @@ bool Pipeline::stage_report(const PipelineSettings& s)
     md += format("- high poly: %zu triangles\n", r.highpoly.triangle_count());
     md += format("- low poly: %zu triangles, %zu vertices\n", r.lowpoly.triangle_count(),
                  r.lowpoly.vertex_count());
-    md += format("- silhouette error: mean %.4f, worst %.4f%s%s\n", r.silhouette.mean,
-                 r.silhouette.worst, r.silhouette.worst_view.empty() ? "" : " on ",
-                 r.silhouette.worst_view.c_str());
+    md += format("- silhouette error: mean %.4f, worst %.4f%s%s; outline off by %.2f px\n",
+                 r.silhouette.mean, r.silhouette.worst,
+                 r.silhouette.worst_view.empty() ? "" : " on ", r.silhouette.worst_view.c_str(),
+                 r.silhouette.outline_px);
+    if (r.iterations.size() > 1)
+        md += format("- kept iteration %d of %zu\n", r.kept_iteration, r.iterations.size());
     md += format("- validation: **%s** (%d errors, %d warnings)\n\n",
                  r.validation.passed ? "passed" : "failed", r.validation.errors,
                  r.validation.warnings);
@@ -1004,6 +1317,20 @@ bool Pipeline::stage_report(const PipelineSettings& s)
 void Pipeline::run(Entry entry, fs::path mesh_path, PipelineSettings settings)
 {
     Stopwatch watch;
+
+    // A preview is not a run: no model, no project folders, no report. It exists
+    // so that picking a file puts something on screen straight away.
+    if (entry == Entry::PreviewOnly) {
+        preview_.store(true);
+        const bool loaded = stage_load(mesh_path, settings);
+        if (loaded) set_stage(Stage::Idle, mesh_path.filename().string());
+        progress_.store(0.0f);
+        bump();
+        preview_.store(false);
+        running_.store(false);
+        return;
+    }
+
     llm_ = settings.use_llm ? make_llm_backend(settings.llm) : nullptr;
 
     if (llm_) {
@@ -1021,19 +1348,32 @@ void Pipeline::run(Entry entry, fs::path mesh_path, PipelineSettings settings)
     paths::ensure_dir(paths::renders_dir());
     paths::ensure_dir(paths::reports_dir());
 
+    // The engine path returns result structs rather than throwing, but it calls
+    // into third party loaders and the standard library, and an exception that
+    // reaches the top of this thread is std::terminate - the window vanishes
+    // with nothing on screen and nothing in the log. Turn it into the failure it
+    // is, so the message lands in the Pipeline panel like any other.
     bool ok = true;
-    if (entry == Entry::Full) {
-        ok = stage_load(mesh_path, settings) &&
-             stage_analyse(settings) &&
-             stage_reference_renders(settings) &&
-             stage_segment(settings) &&
-             stage_name_regions(settings) &&
-             stage_allocate_budget(settings);
-    }
+    try {
+        if (entry == Entry::Full) {
+            ok = stage_load(mesh_path, settings) &&
+                 stage_analyse(settings) &&
+                 stage_reference_renders(settings) &&
+                 stage_segment(settings) &&
+                 stage_name_regions(settings) &&
+                 stage_allocate_budget(settings);
+        }
 
-    if (ok && !cancelled()) ok = stage_iterate(settings);
-    if (ok && !cancelled()) ok = stage_export(settings);
-    if (ok && !cancelled()) ok = stage_report(settings);
+        if (ok && !cancelled()) ok = stage_iterate(settings);
+        if (ok && !cancelled()) ok = stage_export(settings);
+        if (ok && !cancelled()) ok = stage_report(settings);
+    } catch (const std::exception& e) {
+        fail(std::string("the run hit an unexpected error: ") + e.what());
+        ok = false;
+    } catch (...) {
+        fail("the run hit an unexpected error of unknown type");
+        ok = false;
+    }
 
     {
         std::lock_guard lock(results_mutex_);

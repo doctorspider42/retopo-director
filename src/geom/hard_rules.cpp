@@ -3,8 +3,11 @@
 #include "core/log.h"
 #include "core/util.h"
 #include "mesh/topology.h"
+#include "mesh/visibility.h"
 
 #include <algorithm>
+#include <numeric>
+#include <limits>
 #include <functional>
 #include <map>
 #include <unordered_map>
@@ -443,7 +446,8 @@ size_t repair_nonmanifold(Mesh& mesh)
 }
 
 size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
-                    const SymmetryPlane* mirror)
+                    const SymmetryPlane* mirror, int secondary_triangle_cap,
+                    const std::vector<float>* region_keep_priority, int total_triangle_cap)
 {
     if (max_shells <= 0 || mesh.empty()) return 0;
 
@@ -466,6 +470,7 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
     }
 
     std::map<uint32_t, double> shell_area;
+    std::map<uint32_t, int>    shell_tris;
     std::vector<uint32_t>      tri_shell(tcount);
     double                     total_area = 0.0;
     for (size_t t = 0; t < tcount; ++t) {
@@ -473,13 +478,53 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
         tri_shell[t] = root;
         const double a = mesh.triangle_area(t);
         shell_area[root] += a;
+        ++shell_tris[root];
         total_area += a;
     }
-    if (shell_area.size() <= size_t(max_shells)) return 0;
+    // Under the count, only a triangle cap can still ask for something to go.
+    if (shell_area.size() <= size_t(max_shells) && secondary_triangle_cap <= 0) return 0;
 
+    // Ranked by area, scaled by the priority of the regions a piece covers:
+    // 0.5, the default, leaves the area as it is; 1 counts a piece nearly
+    // double, 0 at a quarter. Without priorities this is area alone.
+    std::map<uint32_t, double> shell_weight;
+    const bool weighted = region_keep_priority && !region_keep_priority->empty() &&
+                          mesh.tri_region.size() == tcount;
+    if (weighted)
+        for (size_t t = 0; t < tcount; ++t) {
+            const uint16_t r = mesh.tri_region[t];
+            const float pri = r < region_keep_priority->size() ? (*region_keep_priority)[r] : 0.5f;
+            shell_weight[tri_shell[t]] += mesh.triangle_area(t) * (0.25 + 1.5 * double(pri));
+        }
+    // What the model stands on goes first. A cart's casters, a table's feet,
+    // a statue's plinth are small next to its body and ranked with its cups
+    // by area - tripling it still left the casters behind forty other pieces
+    // - and without them the asset floats, the one change of outline nobody
+    // fails to notice. A piece reaching down to within 2% of the height of
+    // the lowest point is a support.
+    std::map<uint32_t, float> shell_low;
+    float lowest = std::numeric_limits<float>::max(), highest = -lowest;
+    for (size_t v = 0; v < vcount; ++v) {
+        lowest  = std::min(lowest, mesh.positions[v].y);
+        highest = std::max(highest, mesh.positions[v].y);
+    }
+    for (size_t t = 0; t < tcount; ++t)
+        for (int i = 0; i < 3; ++i) {
+            const float y = mesh.positions[mesh.indices[t * 3 + i]].y;
+            const auto it = shell_low.find(tri_shell[t]);
+            if (it == shell_low.end() || y < it->second) shell_low[tri_shell[t]] = y;
+        }
+    const float support_band = 0.02f * std::max(highest - lowest, 1e-6f);
+    double largest_area = 0.0;
+    for (const auto& [root, area] : shell_area) largest_area = std::max(largest_area, area);
     std::vector<std::pair<double, uint32_t>> ranked;
     ranked.reserve(shell_area.size());
-    for (const auto& [root, area] : shell_area) ranked.push_back({area, root});
+    for (const auto& [root, area] : shell_area) {
+        double rank = weighted ? shell_weight[root] : area;
+        if (shell_low[root] - lowest <= support_band) rank += total_area * 2.0;
+        if (area >= largest_area) rank += total_area * 4.0;   // the body stays the anchor
+        ranked.push_back({rank, root});
+    }
     std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
         if (a.first != b.first) return a.first > b.first;
         return a.second < b.second;
@@ -529,12 +574,18 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
     }
 
     std::unordered_set<uint32_t> keep;
+    int secondary_tris = 0;
+    int anchor_tris    = 0;
     for (size_t i = 0; i < ranked.size(); ++i) {
         const uint32_t root = ranked[i].second;
         if (keep.count(root)) continue;
 
-        const double share = total_area > 0.0 ? ranked[i].first / total_area : 0.0;
-        if (!keep.empty() && share < double(min_area_share)) break;
+        const double share = total_area > 0.0 ? shell_area[root] / total_area : 0.0;
+        const bool support = shell_low[root] - lowest <= support_band;
+        // Debris is passed over rather than ending the list: the order is no
+        // longer by area, and a small support ahead of the big pieces cut a
+        // cart down to one caster. A support is never debris.
+        if (!keep.empty() && !support && share < double(min_area_share)) continue;
 
         const auto it = partner.find(root);
         const int  needed = (it != partner.end() && !keep.count(it->second)) ? 2 : 1;
@@ -544,6 +595,20 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
             // order would drop a bigger piece of the asset for a smaller one.
             break;
         }
+        const int cost = shell_tris[root] + (needed == 2 ? shell_tris[it->second] : 0);
+        // What the profile leaves once the body is in.
+        int cap = secondary_triangle_cap;
+        if (!keep.empty() && total_triangle_cap > 0 && secondary_triangle_cap > 0) {
+            const int room = std::max(0, total_triangle_cap - anchor_tris);
+            cap = std::min(cap, room);
+        }
+        // A piece too dear for what is left of the cap is passed over, not
+        // the end of the list: a rack of 88 triangles and no area stopped a
+        // cart's admission there, with thirty cheaper pieces still to come.
+        if (!keep.empty() && cap > 0 && secondary_tris + cost > cap)
+            continue;
+        if (!keep.empty()) secondary_tris += cost;
+        else anchor_tris = cost;
         keep.insert(root);
         if (needed == 2) keep.insert(it->second);
     }
@@ -591,6 +656,29 @@ size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& s
         for (const Vec3& p : mesh.positions)
             if (length(p - pivot) <= band) ++nearby;
         if (nearby >= required) continue;
+
+        // A loop is only a loop if the band is wider than the triangles
+        // around it. A finger joint's band is a centimetre across on a hand
+        // made of a dozen triangles: the mesh has no finger to bend, and
+        // splitting "the longest edge inside the band" over and over just
+        // bisects the same few triangles into a fan of slivers - fifteen joints
+        // a hand, and the hands came out shattered. Measure the edges that
+        // reach into the band and skip the joint when they outsize it.
+        {
+            double edge_sum = 0.0;
+            int    edge_n   = 0;
+            for (size_t t = 0; t < mesh.triangle_count(); ++t)
+                for (int i = 0; i < 3; ++i) {
+                    const Vec3 a = mesh.positions[mesh.indices[t * 3 + i]];
+                    const Vec3 b = mesh.positions[mesh.indices[t * 3 + (i + 1) % 3]];
+                    if (length(a - pivot) > band * 2.0f && length(b - pivot) > band * 2.0f)
+                        continue;
+                    edge_sum += length(b - a);
+                    ++edge_n;
+                }
+            const float local_edge = edge_n > 0 ? float(edge_sum / edge_n) : 0.0f;
+            if (local_edge <= 0.0f || band * 2.0f < local_edge * 1.5f) continue;
+        }
 
         // Split the longest edges inside the band until the ring is dense
         // enough, or until we run out of headroom.
@@ -660,6 +748,504 @@ size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& s
 }
 
 // ---------------------------------------------------------------------------
+size_t fill_small_holes(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis& analysis,
+                        int max_edges)
+{
+    if (mesh.empty() || max_edges < 3) return 0;
+
+    // Boundary half edges: a -> b inside a triangle, with no b -> a anywhere.
+    std::unordered_map<uint64_t, int> directed;
+    const size_t tcount = mesh.triangle_count();
+    for (size_t t = 0; t < tcount; ++t)
+        for (int c = 0; c < 3; ++c) {
+            const uint32_t a = mesh.indices[t * 3 + c], b = mesh.indices[t * 3 + (c + 1) % 3];
+            ++directed[(uint64_t(a) << 32) | b];
+        }
+    std::unordered_map<uint32_t, uint32_t> next;   // a -> b along the boundary
+    std::unordered_map<uint32_t, int>      out_degree;
+    for (const auto& [key, n] : directed) {
+        const uint32_t a = uint32_t(key >> 32), b = uint32_t(key & 0xFFFFFFFFu);
+        if (directed.count((uint64_t(b) << 32) | a)) continue;
+        next[a] = b;
+        ++out_degree[a];
+    }
+    if (next.empty()) return 0;
+
+    // Open edges of the source, as points to measure against: a low poly hole
+    // near one is the source's own opening and is left alone.
+    std::vector<Vec3> source_open;
+    if (const Mesh* src = source_bvh.mesh()) {
+        for (const MeshTopology::Edge& e : analysis.topology.edges)
+            if (e.tri1 == kInvalidIndex)
+                source_open.push_back((src->positions[e.v0] + src->positions[e.v1]) * 0.5f);
+    }
+
+    // Every undirected edge already in the mesh. A patch may only add edges
+    // that do not exist yet: a quad's diagonal that already runs elsewhere
+    // would be used by three triangles, which is a non manifold edge the
+    // validator fails - trading a hole for a worse fault.
+    std::unordered_set<uint64_t> edges;
+    auto ekey = [](uint32_t a, uint32_t b) {
+        return a < b ? (uint64_t(a) << 32) | b : (uint64_t(b) << 32) | a;
+    };
+    for (const auto& [key, n] : directed)
+        edges.insert(ekey(uint32_t(key >> 32), uint32_t(key & 0xFFFFFFFFu)));
+
+    std::unordered_set<uint32_t> visited;
+    std::vector<uint32_t> added;
+    std::vector<uint16_t> added_regions;
+    const bool keep_regions = mesh.tri_region.size() == tcount;
+    size_t filled_loops = 0;
+
+    for (const auto& [start, unused] : next) {
+        if (visited.count(start)) continue;
+        // Walk the loop. A vertex with two outgoing boundary edges is a pinch
+        // this cannot resolve cleanly; skip any loop that touches one.
+        std::vector<uint32_t> loop;
+        uint32_t v = start;
+        bool clean = true;
+        while (true) {
+            if (out_degree[v] != 1) clean = false;
+            loop.push_back(v);
+            visited.insert(v);
+            const auto it = next.find(v);
+            if (it == next.end()) { clean = false; break; }
+            v = it->second;
+            if (v == start) break;
+            if (visited.count(v) || int(loop.size()) > max_edges) { clean = false; break; }
+        }
+        if (!clean || loop.size() < 3 || int(loop.size()) > max_edges) continue;
+
+        Vec3 centre{};
+        float perimeter = 0.0f;
+        for (size_t i = 0; i < loop.size(); ++i) {
+            centre = centre + mesh.positions[loop[i]];
+            perimeter += length(mesh.positions[loop[(i + 1) % loop.size()]] -
+                                mesh.positions[loop[i]]);
+        }
+        centre = centre * (1.0f / float(loop.size()));
+        const float reach = perimeter / float(loop.size());
+        bool authored = false;
+        for (const Vec3& p : source_open)
+            if (length2(p - centre) < reach * reach) { authored = true; break; }
+        if (authored) continue;
+
+        const uint16_t region = [&] {
+            if (!keep_regions) return kNoRegion;
+            // Borrow the region of any triangle on the rim.
+            for (size_t t = 0; t < tcount; ++t)
+                for (int c = 0; c < 3; ++c)
+                    if (mesh.indices[t * 3 + c] == loop[0]) return mesh.tri_region[t];
+            return kNoRegion;
+        }();
+        auto emit = [&](uint32_t a, uint32_t b, uint32_t c) {
+            added.insert(added.end(), {a, b, c});
+            if (keep_regions) added_regions.push_back(region);
+        };
+
+        // The loop runs the way the rim triangles do, so the patch runs back.
+        const size_t n = loop.size();
+        const bool free02 = n == 4 && !edges.count(ekey(loop[0], loop[2]));
+        const bool free13 = n == 4 && !edges.count(ekey(loop[1], loop[3]));
+        if (n == 3) {
+            emit(loop[0], loop[2], loop[1]);
+        } else if (n == 4 && (free02 || free13)) {
+            const float d02 = length2(mesh.positions[loop[0]] - mesh.positions[loop[2]]);
+            const float d13 = length2(mesh.positions[loop[1]] - mesh.positions[loop[3]]);
+            const bool use02 = free02 && (!free13 || d02 <= d13);
+            if (use02) {
+                emit(loop[0], loop[2], loop[1]); emit(loop[0], loop[3], loop[2]);
+                edges.insert(ekey(loop[0], loop[2]));
+            } else {
+                emit(loop[1], loop[3], loop[2]); emit(loop[1], loop[0], loop[3]);
+                edges.insert(ekey(loop[1], loop[3]));
+            }
+        } else {
+            // A fan around a new centre adds only new edges, so it is always
+            // safe; it is the fallback for a quad whose diagonals are taken.
+            Vec3 c = centre;
+            const ClosestHit hit = source_bvh.closest_point(centre, reach * 2.0f);
+            if (hit.hit()) c = hit.point;
+            const uint32_t ci = uint32_t(mesh.positions.size());
+            mesh.positions.push_back(c);
+            if (mesh.has_normals() || !mesh.normals.empty()) mesh.normals.push_back(Vec3{0, 1, 0});
+            if (!mesh.uvs.empty())    mesh.uvs.push_back(mesh.uvs[loop[0]]);
+            if (!mesh.colors.empty()) mesh.colors.push_back(mesh.colors[loop[0]]);
+            if (!mesh.skin.empty())   mesh.skin.push_back(mesh.skin[loop[0]]);
+            for (size_t i = 0; i < n; ++i) emit(loop[(i + 1) % n], loop[i], ci);
+        }
+        ++filled_loops;
+    }
+
+    if (added.empty()) return 0;
+    mesh.indices.insert(mesh.indices.end(), added.begin(), added.end());
+    if (keep_regions)
+        mesh.tri_region.insert(mesh.tri_region.end(), added_regions.begin(), added_regions.end());
+    RD_DEBUG("filled %zu holes with %zu triangles", filled_loops, added.size() / 3);
+    return added.size() / 3;
+}
+
+// ---------------------------------------------------------------------------
+bool source_shell_is_droppable(const MeshAnalysis& analysis, uint32_t shell,
+                               const HardRuleOptions& opts)
+{
+    if (!opts.drop_hidden_shells) return false;
+    if (shell >= analysis.shell_area_share.size() || shell == analysis.largest_shell) return false;
+    if (analysis.shell_area_share[shell] >= opts.hidden_max_area_share) return false;
+    const bool hidden = analysis.shell_visible_share[shell] < opts.hidden_visible_share;
+    const bool decal  = shell < analysis.shell_offset.size() &&
+                       analysis.shell_offset[shell] <
+                           opts.decal_max_offset_rel * analysis.bbox_diagonal;
+    return hidden || decal;
+}
+
+// ---------------------------------------------------------------------------
+// Loose pieces that cost far more than their share, replaced by a box.
+//
+// A carafe with a handle is a torus to the simplifier: it cannot collapse
+// past the handle without folding a face, and on a coffee cart two carafes
+// kept 113 triangles against a budget of 8 while the frame they stand on went
+// without legs. What such a piece is worth at this budget is its volume and
+// its place, which a box along its principal axes keeps in twelve triangles;
+// the bake paints the carafe onto it. Pieces too small to matter are left to
+// the rules that remove them, and the largest piece is the asset, never this.
+size_t proxy_expensive_pieces(Mesh& mesh, int budget, float min_area_share)
+{
+    const size_t tcount = mesh.triangle_count();
+    if (tcount == 0 || budget <= 0) return 0;
+    const size_t vcount = mesh.vertex_count();
+    std::vector<uint32_t> parent(vcount);
+    std::iota(parent.begin(), parent.end(), 0u);
+    std::function<uint32_t(uint32_t)> find = [&](uint32_t x) {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    };
+    for (size_t t = 0; t < tcount; ++t)
+        for (int i = 1; i < 3; ++i) {
+            const uint32_t a = find(mesh.indices[t * 3]), b = find(mesh.indices[t * 3 + i]);
+            if (a != b) parent[b] = a;
+        }
+    std::map<uint32_t, std::vector<uint32_t>> shell_tris;
+    std::map<uint32_t, double> shell_area;
+    double total = 0.0;
+    for (size_t t = 0; t < tcount; ++t) {
+        const uint32_t r = find(mesh.indices[t * 3]);
+        shell_tris[r].push_back(uint32_t(t));
+        const double a = mesh.triangle_area(t);
+        shell_area[r] += a;
+        total += a;
+    }
+    if (shell_tris.size() < 2 || total <= 0.0) return 0;
+    uint32_t largest = shell_area.begin()->first;
+    for (const auto& [r, a] : shell_area) if (a > shell_area[largest]) largest = r;
+
+    constexpr int kBox = 12;
+    std::vector<uint8_t> drop(tcount, 0);
+    std::vector<uint32_t> add_idx;
+    std::vector<uint16_t> add_region;
+    const bool regions = mesh.tri_region.size() == tcount;
+    size_t replaced = 0;
+    for (const auto& [r, tris] : shell_tris) {
+        if (r == largest) continue;
+        const double share = shell_area[r] / total;
+        if (share < double(min_area_share)) continue;
+        const double fair = double(budget) * share;
+        if (int(tris.size()) <= std::max(16.0, 4.0 * fair)) continue;
+
+        // Principal axes of the piece's surface, by area.
+        Vec3 c{};
+        double w = 0.0;
+        std::vector<uint32_t> verts;
+        for (uint32_t t : tris) {
+            const double a = mesh.triangle_area(t);
+            c += mesh.triangle_centroid(t) * float(a);
+            w += a;
+            for (int i = 0; i < 3; ++i) verts.push_back(mesh.indices[t * 3 + i]);
+        }
+        if (w <= 0.0) continue;
+        c = c / float(w);
+        std::sort(verts.begin(), verts.end());
+        verts.erase(std::unique(verts.begin(), verts.end()), verts.end());
+        double cov[3][3] = {};
+        for (uint32_t v : verts) {
+            const Vec3 d = mesh.positions[v] - c;
+            const float e[3] = {d.x, d.y, d.z};
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) cov[i][j] += double(e[i]) * e[j];
+        }
+        // Power iteration for the two largest axes; the third is their cross.
+        auto dominant = [&](const Vec3& avoid) {
+            Vec3 v = std::fabs(avoid.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+            for (int it = 0; it < 32; ++it) {
+                v = v - avoid * dot(v, avoid);
+                const Vec3 n{float(cov[0][0] * v.x + cov[0][1] * v.y + cov[0][2] * v.z),
+                             float(cov[1][0] * v.x + cov[1][1] * v.y + cov[1][2] * v.z),
+                             float(cov[2][0] * v.x + cov[2][1] * v.y + cov[2][2] * v.z)};
+                if (length2(n) < 1e-30f) break;
+                v = normalize(n);
+            }
+            return normalize(v - avoid * dot(v, avoid));
+        };
+        const Vec3 ax = dominant(Vec3{0, 0, 0});
+        const Vec3 ay = dominant(ax);
+        const Vec3 az = normalize(cross(ax, ay));
+        if (length2(ax) < 0.5f || length2(ay) < 0.5f || length2(az) < 0.5f) continue;
+        Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+        for (uint32_t v : verts) {
+            const Vec3 d = mesh.positions[v] - c;
+            const Vec3 q{dot(d, ax), dot(d, ay), dot(d, az)};
+            lo = {std::min(lo.x, q.x), std::min(lo.y, q.y), std::min(lo.z, q.z)};
+            hi = {std::max(hi.x, q.x), std::max(hi.y, q.y), std::max(hi.z, q.z)};
+        }
+        // A box that holds the piece stands proud of its curved sides; pulled
+        // in to the extent that keeps the same volume as the round thing it
+        // replaces would be, roughly, it reads as the piece rather than its crate.
+        const float shrink = 0.85f;
+        const Vec3 mid = (lo + hi) * 0.5f, half = (hi - lo) * (0.5f * shrink);
+        // Only a compact piece: a cable's box is a slab the size of the cart
+        // that it drew right across the frame. The box's surface has to be
+        // near the piece's own; a carafe's is, a coiled cord's is not.
+        const double box_area = 8.0 * (double(half.x) * half.y + double(half.y) * half.z +
+                                       double(half.z) * half.x);
+        if (box_area > 2.0 * shell_area[r]) continue;
+        uint16_t region = kNoRegion;
+        if (regions) {
+            std::map<uint16_t, int> votes;
+            for (uint32_t t : tris) ++votes[mesh.tri_region[t]];
+            int best = -1;
+            for (const auto& [rg, n] : votes) if (n > best) { best = n; region = rg; }
+        }
+        const uint32_t base = uint32_t(mesh.positions.size());
+        for (int k = 0; k < 8; ++k) {
+            const Vec3 q{mid.x + ((k & 1) ? half.x : -half.x), mid.y + ((k & 2) ? half.y : -half.y),
+                         mid.z + ((k & 4) ? half.z : -half.z)};
+            mesh.positions.push_back(c + ax * q.x + ay * q.y + az * q.z);
+        }
+        // Faces wound outward for a right handed (ax, ay, az).
+        static const int kFaces[6][4] = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4},
+                                         {2, 6, 7, 3}, {0, 4, 6, 2}, {1, 3, 7, 5}};
+        for (const auto& f : kFaces) {
+            add_idx.insert(add_idx.end(), {base + f[0], base + f[1], base + f[2],
+                                           base + f[0], base + f[2], base + f[3]});
+            add_region.push_back(region);
+            add_region.push_back(region);
+        }
+        for (uint32_t t : tris) drop[t] = 1;
+        replaced += tris.size() - kBox;
+    }
+    if (add_idx.empty()) return 0;
+
+    std::vector<uint32_t> kept;
+    std::vector<uint16_t> kept_regions;
+    for (size_t t = 0; t < tcount; ++t) {
+        if (drop[t]) continue;
+        for (int i = 0; i < 3; ++i) kept.push_back(mesh.indices[t * 3 + i]);
+        if (regions) kept_regions.push_back(mesh.tri_region[t]);
+    }
+    kept.insert(kept.end(), add_idx.begin(), add_idx.end());
+    if (regions) kept_regions.insert(kept_regions.end(), add_region.begin(), add_region.end());
+    mesh.indices.swap(kept);
+    if (regions) mesh.tri_region.swap(kept_regions);
+    if (!mesh.normals.empty()) mesh.normals.resize(mesh.positions.size(), Vec3{0, 1, 0});
+    if (!mesh.uvs.empty())     mesh.uvs.resize(mesh.positions.size());
+    if (!mesh.colors.empty())  mesh.colors.resize(mesh.positions.size(), Vec4{1, 1, 1, 1});
+    if (!mesh.skin.empty())    mesh.skin.resize(mesh.positions.size());
+    mesh.compact();
+    return replaced;
+}
+
+// ---------------------------------------------------------------------------
+size_t drop_hidden_shells(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis& analysis,
+                          float max_visible_share, float max_area_share,
+                          float decal_max_offset_rel)
+{
+    if (mesh.empty() || source_bvh.empty() || analysis.tri_shell.empty()) return 0;
+    const size_t source_shells = analysis.shell_area_share.size();
+
+    // Which source piece is each low poly piece a simplification of? Every
+    // vertex votes with the piece of the source triangle nearest to it.
+    std::vector<uint32_t> low_shell;
+    const uint32_t low_count = label_shells(mesh, low_shell);
+    if (low_count < 2) return 0;
+    std::vector<std::vector<uint32_t>> votes(low_count, std::vector<uint32_t>(source_shells, 0));
+    for (size_t t = 0; t < mesh.triangle_count(); ++t) {
+        const ClosestHit hit = source_bvh.closest_point(mesh.triangle_centroid(t));
+        if (!hit.hit() || hit.triangle >= analysis.tri_shell.size()) continue;
+        ++votes[low_shell[t]][analysis.tri_shell[hit.triangle]];
+    }
+
+    // Never the piece that carries most of the model, whatever it scores.
+    std::vector<size_t> low_tris(low_count, 0);
+    for (uint32_t s : low_shell) ++low_tris[s];
+    const uint32_t largest = uint32_t(std::max_element(low_tris.begin(), low_tris.end()) -
+                                      low_tris.begin());
+
+    std::vector<bool> drop(low_count, false);
+    for (uint32_t s = 0; s < low_count; ++s) {
+        if (s == largest) continue;
+        // A piece lying on the main surface is nearest to that surface for
+        // half its triangles, so the main piece is left out of the count: a
+        // low poly piece that is a fair share made of some small source piece
+        // is that piece.
+        const auto& v = votes[s];
+        size_t src = analysis.largest_shell, best = 0;
+        for (size_t k = 0; k < v.size(); ++k)
+            if (k != analysis.largest_shell && v[k] > best) { best = v[k]; src = k; }
+        if (best * 4 < low_tris[s]) continue;
+        HardRuleOptions o;
+        o.hidden_visible_share  = max_visible_share;
+        o.hidden_max_area_share = max_area_share;
+        o.decal_max_offset_rel  = decal_max_offset_rel;
+        drop[s] = source_shell_is_droppable(analysis, uint32_t(src), o);
+    }
+
+    std::vector<uint32_t> kept;
+    std::vector<uint16_t> kept_regions;
+    const bool keep_regions = mesh.tri_region.size() == mesh.triangle_count();
+    size_t removed = 0;
+    for (size_t t = 0; t < mesh.triangle_count(); ++t) {
+        if (drop[low_shell[t]]) { ++removed; continue; }
+        for (int i = 0; i < 3; ++i) kept.push_back(mesh.indices[t * 3 + i]);
+        if (keep_regions) kept_regions.push_back(mesh.tri_region[t]);
+    }
+    if (removed == 0) return 0;
+    mesh.indices.swap(kept);
+    if (keep_regions) mesh.tri_region.swap(kept_regions);
+    mesh.compact();
+    return removed;
+}
+
+// ---------------------------------------------------------------------------
+float fit_to_surface(Mesh& mesh, const Bvh& source_bvh, int passes,
+                     const SymmetryPlane* symmetry, float symmetry_epsilon)
+{
+    if (mesh.empty() || source_bvh.empty() || passes <= 0) return 0.0f;
+
+    const size_t vcount = mesh.vertex_count();
+    const size_t tcount = mesh.triangle_count();
+
+    // Mirror partners, found once: the moves below are computed per vertex and
+    // would drift a symmetric mesh apart by float noise, so each pass averages
+    // a vertex with its partner's reflection and pins plane vertices to it.
+    std::vector<uint32_t> partner(vcount, kInvalidIndex);
+    std::vector<bool>     on_plane(vcount, false);
+    if (symmetry) {
+        std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+        const float cell = std::max(symmetry_epsilon * 2.0f, 1e-7f);
+        auto key = [&](Vec3 p) {
+            const int64_t x = int64_t(std::floor(p.x / cell));
+            const int64_t y = int64_t(std::floor(p.y / cell));
+            const int64_t z = int64_t(std::floor(p.z / cell));
+            return uint64_t(x * 73856093) ^ uint64_t(y * 19349663) ^ uint64_t(z * 83492791);
+        };
+        for (uint32_t v = 0; v < vcount; ++v) grid[key(mesh.positions[v])].push_back(v);
+        for (uint32_t v = 0; v < vcount; ++v) {
+            const Vec3 p = mesh.positions[v];
+            if (std::fabs(dot(symmetry->normal, p) - symmetry->offset) <= symmetry_epsilon) {
+                on_plane[v] = true;
+                continue;
+            }
+            const Vec3 m = symmetry->mirror(p);
+            float best = symmetry_epsilon * symmetry_epsilon;
+            for (int dx = -1; dx <= 1; ++dx)
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        const auto it =
+                            grid.find(key(m + Vec3(float(dx), float(dy), float(dz)) * cell));
+                        if (it == grid.end()) continue;
+                        for (uint32_t w : it->second) {
+                            const float d2 = length2(mesh.positions[w] - m);
+                            if (d2 <= best) { best = d2; partner[v] = w; }
+                        }
+                    }
+        }
+    }
+
+    // Where each face is sampled: the centroid and a point toward each corner,
+    // with the share of each sample that goes to each corner.
+    static const float kSample[4][3] = {{1.f / 3, 1.f / 3, 1.f / 3},
+                                        {4.f / 6, 1.f / 6, 1.f / 6},
+                                        {1.f / 6, 4.f / 6, 1.f / 6},
+                                        {1.f / 6, 1.f / 6, 4.f / 6}};
+
+    float last_move = 0.0f;
+    std::vector<double> push(vcount), weight(vcount), edge_sum(vcount);
+    std::vector<int>    edge_n(vcount);
+
+    for (int pass = 0; pass < passes; ++pass) {
+        mesh.compute_normals();
+        std::fill(push.begin(), push.end(), 0.0);
+        std::fill(weight.begin(), weight.end(), 0.0);
+        std::fill(edge_sum.begin(), edge_sum.end(), 0.0);
+        std::fill(edge_n.begin(), edge_n.end(), 0);
+
+        for (size_t t = 0; t < tcount; ++t) {
+            const uint32_t idx[3] = {mesh.indices[t * 3], mesh.indices[t * 3 + 1],
+                                     mesh.indices[t * 3 + 2]};
+            const Vec3 a = mesh.positions[idx[0]], b = mesh.positions[idx[1]],
+                       c = mesh.positions[idx[2]];
+            const Vec3  cr   = cross(b - a, c - a);
+            const float area = 0.5f * length(cr);
+            if (area < 1e-14f) continue;
+            const Vec3  n    = cr / (2.0f * area);
+            const float edge = (length(b - a) + length(c - b) + length(a - c)) / 3.0f;
+            for (int k = 0; k < 3; ++k) { edge_sum[idx[k]] += edge; ++edge_n[idx[k]]; }
+
+            // Only look as far as a face could plausibly be off its own surface.
+            // Further than that the nearest surface is some other part - the
+            // torso beside an arm, the far side of a thin plate - and pulling
+            // toward it is how faces end up bridging a gap.
+            const float reach = edge * 0.75f;
+            for (const auto& w : kSample) {
+                const Vec3 s = a * w[0] + b * w[1] + c * w[2];
+                const ClosestHit hit = source_bvh.closest_point(s, reach);
+                if (!hit.hit()) continue;
+                // A surface facing the other way is the back of something thin.
+                if (dot(source_bvh.geometric_normal(hit.triangle), n) < 0.3f) continue;
+                const float d = dot(hit.point - s, n);
+                for (int k = 0; k < 3; ++k) {
+                    push[idx[k]]   += double(d) * w[k] * area;
+                    weight[idx[k]] += double(w[k]) * area;
+                }
+            }
+        }
+
+        // Move, damped and capped. The cap is a fraction of the local edge
+        // length, which is what keeps a vertex from stepping past a neighbour
+        // and folding a face over.
+        std::vector<Vec3> moved = mesh.positions;
+        double pass_move = 0.0;
+        for (size_t v = 0; v < vcount; ++v) {
+            if (weight[v] <= 0.0 || edge_n[v] == 0 || !mesh.has_normals()) continue;
+            const float mean_edge = float(edge_sum[v] / edge_n[v]);
+            const float offset = clampf(float(push[v] / weight[v]) * 0.8f,
+                                        -0.2f * mean_edge, 0.2f * mean_edge);
+            moved[v] = mesh.positions[v] + mesh.normals[v] * offset;
+            pass_move += std::fabs(offset);
+        }
+        if (symmetry) {
+            for (size_t v = 0; v < vcount; ++v) {
+                if (on_plane[v]) {
+                    moved[v] = moved[v] - symmetry->normal *
+                                              (dot(symmetry->normal, moved[v]) - symmetry->offset);
+                } else if (partner[v] != kInvalidIndex && partner[partner[v]] == uint32_t(v)) {
+                    const uint32_t w = partner[v];
+                    if (w > v) {
+                        const Vec3 avg = (moved[v] + symmetry->mirror(moved[w])) * 0.5f;
+                        moved[v] = avg;
+                        moved[w] = symmetry->mirror(avg);
+                    }
+                }
+            }
+        }
+        mesh.positions.swap(moved);
+        last_move = float(pass_move / double(std::max<size_t>(1, vcount)));
+    }
+    mesh.compute_normals(60.0f);
+    return last_move;
+}
+
+// ---------------------------------------------------------------------------
 HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                                 const MeshAnalysis& analysis, const TargetProfile& profile,
                                 const GlobalKnobs& knobs, const SymmetryPlane& symmetry,
@@ -702,11 +1288,51 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
             rep.note(format("removed %zu non manifold faces", rep.removed_nonmanifold));
     }
 
-    if (profile.max_shells > 0) {
+    // --- 2b. pieces that cost far more than they are worth -------------------
+    if (opts.proxy_expensive_pieces) {
+        const size_t saved = proxy_expensive_pieces(mesh, profile.max_triangles,
+                                                    opts.proxy_min_area_share);
+        if (saved)
+            rep.note(format("replaced loose pieces that would not simplify with boxes, saving %zu "
+                            "triangles; the bake paints them", saved));
+    }
+
+    // The budget re-fit sets secondary_shell_budget_share when shrinking the
+    // budget stops shrinking the mesh: the loose pieces have a floor of a few
+    // triangles each, and a coffee cart of 255 pieces cannot come under 800
+    // however small the budget. That has to hold on a profile with no shell
+    // limit too - there the re-fit used to announce the cap and nothing read
+    // it. Largest pieces first; the bake paints what goes onto what stays.
+    if (profile.max_shells > 0 || opts.secondary_shell_budget_share > 0.0f) {
         const size_t before_shell_cull = mesh.triangle_count();
-        rep.removed_shells = limit_shells(mesh, profile.max_shells, opts.min_shell_area_share,
-                                          rep.symmetry_applied ? &symmetry : nullptr);
-        if (rep.removed_shells) {
+        const int shell_limit = profile.max_shells > 0 ? profile.max_shells
+                                                       : std::numeric_limits<int>::max();
+        rep.removed_shells = limit_shells(mesh, shell_limit, opts.min_shell_area_share,
+                                          rep.symmetry_applied ? &symmetry : nullptr,
+                                          // A share of this mesh, not of the budget: the
+                                          // re-fit grows and shrinks the budget, every
+                                          // piece grows and shrinks with it, and a fixed
+                                          // count admitted fewer pieces the bigger the
+                                          // budget got - 2428, 2966, 3462 triangles
+                                          // culled on three attempts of one run.
+                                          int(float(mesh.triangle_count()) *
+                                              opts.secondary_shell_budget_share),
+                                          &opts.region_keep_priority,
+                                          // And never more than this attempt's budget
+                                          // leaves once the body is in: pieces held at a
+                                          // floor of twelve do not shrink with the
+                                          // budget, and a cart's share of its own mesh
+                                          // sat at 785 triangles of loose pieces for a
+                                          // 400 limit. The attempt's budget, not the
+                                          // profile's, so the re-fit can still pull it
+                                          // in when the seams make the vertices bind.
+                                          opts.total_triangle_cap > 0 ? opts.total_triangle_cap
+                                                                      : profile.max_triangles);
+        if (rep.removed_shells && profile.max_shells <= 0) {
+            rep.note(format("dropped %zu triangles in the smallest loose pieces to fit the "
+                            "budget; the bake paints them onto what they sit on",
+                            rep.removed_shells));
+        } else if (rep.removed_shells) {
             rep.note(format("dropped %zu triangles in loose shells (profile allows %d)",
                             rep.removed_shells, profile.max_shells));
 
@@ -728,6 +1354,26 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
         }
     }
 
+    // --- 3b. pieces nobody can see ------------------------------------------
+    if (opts.drop_hidden_shells) {
+        const size_t hidden = drop_hidden_shells(mesh, source_bvh, analysis,
+                                                 opts.hidden_visible_share,
+                                                 opts.hidden_max_area_share,
+                                                 opts.decal_max_offset_rel);
+        if (hidden)
+            rep.note(format("dropped %zu triangles in small pieces that are out of sight or "
+                            "lie flat on the surface (eyeballs, brows, straps); the bake "
+                            "paints them instead", hidden));
+    }
+
+    // --- 3c. close the holes the steps above opened ---------------------------
+    if (opts.fill_holes_max_edges >= 3) {
+        const size_t added = fill_small_holes(mesh, source_bvh, analysis,
+                                              opts.fill_holes_max_edges);
+        if (added)
+            rep.note(format("closed holes the source does not have with %zu triangles", added));
+    }
+
     // --- 4. deformation loops ----------------------------------------------
     if (opts.enforce_joint_loops && !mesh.armature.empty() && knobs.joint_loop_density > 0.0f) {
         const int headroom = std::max(
@@ -740,7 +1386,17 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
                             rep.joint_splits));
     }
 
-    // --- 5. final tidy ------------------------------------------------------
+    // --- 5. fit the faces, not just the vertices ------------------------------
+    if (opts.fit_surface_passes > 0) {
+        const float moved = fit_to_surface(mesh, source_bvh, opts.fit_surface_passes,
+                                           rep.symmetry_applied ? &symmetry : nullptr, eps);
+        if (moved > 0.0f)
+            rep.note(format("fitted the faces to the surface, last pass moved %.3f%% of the "
+                            "model's size on average",
+                            100.0f * moved / std::max(analysis.bbox_diagonal, kEps)));
+    }
+
+    // --- 6. final tidy ------------------------------------------------------
     rep.removed_degenerate += mesh.remove_degenerate();
     mesh.compact();
 
@@ -756,6 +1412,7 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
     if (!profile.allow_ngons) rep.note("triangles only, as the profile requires");
 
     rep.seconds = watch.seconds();
+    for (const std::string& m : rep.messages) RD_DEBUG("hard rules: %s", m.c_str());
     RD_INFO("hard rules: %zu tri after %s in %s", mesh.triangle_count(),
             rep.symmetry_applied ? "mirroring" : "cleanup",
             format_duration(rep.seconds).c_str());

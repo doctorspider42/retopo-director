@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <map>
 
 namespace rd {
 namespace {
@@ -89,8 +90,15 @@ public:
         if (p.cancelled) { res.error = "cancelled"; return res; }
         if (p.timed_out) { res.error = format("timed out after %d s", cfg_.timeout_seconds); return res; }
         if (p.exit_code != 0) {
-            res.error = format("claude exited with %d: %s", p.exit_code,
-                               trim(p.err).substr(0, 400).c_str());
+            // With --output-format json the CLI reports its own errors - an
+            // unsupported model, an expired login - in the envelope on stdout
+            // and leaves stderr empty, which logged "claude exited with 1: ".
+            std::string why = trim(p.err);
+            std::string envelope_error;
+            const Json failed = json_parse_lenient(p.out, envelope_error);
+            if (failed.is_object() && failed.contains("result"))
+                why = json_get<std::string>(failed, "result", why);
+            res.error = format("claude exited with %d: %s", p.exit_code, why.substr(0, 400).c_str());
             return res;
         }
 
@@ -123,7 +131,7 @@ private:
     std::vector<std::string> build_args() const
     {
         std::vector<std::string> args = {"-p", "--output-format", "json"};
-        if (!cfg_.claude_model.empty()) {
+        if (!cfg_.claude_model.empty() && cfg_.claude_model != "default") {
             args.push_back("--model");
             args.push_back(cfg_.claude_model);
         }
@@ -348,6 +356,65 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+class ReplayBackend final : public ILlmBackend {
+public:
+    explicit ReplayBackend(const LlmConfig& c) : dir_(c.replay_dir) {}
+
+    bool available(std::string* reason) const override
+    {
+        std::error_code ec;
+        if (dir_.empty() || !std::filesystem::is_directory(dir_, ec)) {
+            if (reason) *reason = "no replay folder: point it at a run's reports/prompts";
+            return false;
+        }
+        for (const auto& e : std::filesystem::directory_iterator(dir_, ec))
+            if (ends_with(e.path().filename().string(), "_text.txt")) return true;
+        if (reason) *reason = "the replay folder holds no recorded replies (*_text.txt)";
+        return false;
+    }
+    const char*    name() const override { return "Replay"; }
+    LlmBackendKind kind() const override { return LlmBackendKind::Replay; }
+    std::string    describe() const override { return "replaying " + dir_.string(); }
+
+    LlmResponse complete(const LlmRequest& req, const std::atomic<bool>*) override
+    {
+        LlmResponse res;
+        res.command = describe();
+        // Recorded as NN_<label>_text.txt, NN being the iteration; sorting the
+        // names puts them back in the order they were asked.
+        const std::string suffix = "_" + slugify(req.label) + "_text.txt";
+        std::vector<std::filesystem::path> matches;
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(dir_, ec)) {
+            const std::string f = e.path().filename().string();
+            if (ends_with(f, suffix)) matches.push_back(e.path());
+        }
+        std::sort(matches.begin(), matches.end());
+
+        const size_t k = asked_[req.label]++;
+        if (k >= matches.size()) {
+            res.error = format("no recorded reply #%zu for '%s' (%zu recorded)", k + 1,
+                               req.label.c_str(), matches.size());
+            return res;
+        }
+        std::string text;
+        if (!paths::read_file(matches[k], text)) {
+            res.error = "cannot read " + matches[k].string();
+            return res;
+        }
+        res.text = text;
+        res.raw  = text;
+        res.ok   = true;
+        finish(res, req);
+        return res;
+    }
+
+private:
+    std::filesystem::path             dir_;
+    std::map<std::string, size_t>     asked_;
+};
+
+// ---------------------------------------------------------------------------
 class DisabledBackend final : public ILlmBackend {
 public:
     bool available(std::string* reason) const override
@@ -376,6 +443,7 @@ const char* llm_backend_name(LlmBackendKind k)
     case LlmBackendKind::ClaudeCli: return "claude_cli";
     case LlmBackendKind::CodexCli:  return "codex_cli";
     case LlmBackendKind::OpenAiApi: return "openai_api";
+    case LlmBackendKind::Replay:    return "replay";
     default:                        return "disabled";
     }
 }
@@ -386,6 +454,7 @@ const char* llm_backend_label(LlmBackendKind k)
     case LlmBackendKind::ClaudeCli: return "Claude CLI";
     case LlmBackendKind::CodexCli:  return "Codex CLI";
     case LlmBackendKind::OpenAiApi: return "OpenAI API";
+    case LlmBackendKind::Replay:    return "Replay";
     default:                        return "Disabled";
     }
 }
@@ -395,6 +464,7 @@ LlmBackendKind llm_backend_from_name(std::string_view s)
     if (iequals(s, "claude_cli") || iequals(s, "claude")) return LlmBackendKind::ClaudeCli;
     if (iequals(s, "codex_cli")  || iequals(s, "codex"))  return LlmBackendKind::CodexCli;
     if (iequals(s, "openai_api") || iequals(s, "openai")) return LlmBackendKind::OpenAiApi;
+    if (iequals(s, "replay"))                             return LlmBackendKind::Replay;
     return LlmBackendKind::Disabled;
 }
 
@@ -424,6 +494,7 @@ Json LlmConfig::to_json() const
     j["openai_api"]  = o;
 
     j["timeout_seconds"] = timeout_seconds;
+    j["replay_dir"]      = replay_dir;
     j["save_transcript"] = save_transcript;
     return j;
 }
@@ -435,7 +506,10 @@ LlmConfig LlmConfig::from_json(const Json& j)
 
     const Json& cc = json_object_or_empty(j, "claude_cli");
     c.claude_path  = json_get<std::string>(cc, "path", c.claude_path);
-    c.claude_model = json_get<std::string>(cc, "model", "");
+    // Earlier versions saved an empty model, meaning "no preference"; it still
+    // does, and gets the pinned default rather than whatever the CLI is set to.
+    const std::string saved_model = json_get<std::string>(cc, "model", "");
+    if (!saved_model.empty()) c.claude_model = saved_model;
     c.claude_extra_args = json_get<std::vector<std::string>>(cc, "extra_args", {});
 
     const Json& xx = json_object_or_empty(j, "codex_cli");
@@ -449,6 +523,7 @@ LlmConfig LlmConfig::from_json(const Json& j)
     c.openai_send_images = json_get<bool>(oo, "send_images", c.openai_send_images);
 
     c.timeout_seconds = std::clamp(json_get<int>(j, "timeout_seconds", c.timeout_seconds), 10, 3600);
+    c.replay_dir      = json_get<std::string>(j, "replay_dir", "");
     c.save_transcript = json_get<bool>(j, "save_transcript", c.save_transcript);
     return c;
 }
@@ -459,6 +534,7 @@ std::unique_ptr<ILlmBackend> make_llm_backend(const LlmConfig& config)
     case LlmBackendKind::ClaudeCli: return std::make_unique<ClaudeCliBackend>(config);
     case LlmBackendKind::CodexCli:  return std::make_unique<CodexCliBackend>(config);
     case LlmBackendKind::OpenAiApi: return std::make_unique<OpenAiBackend>(config);
+    case LlmBackendKind::Replay:    return std::make_unique<ReplayBackend>(config);
     default:                        return std::make_unique<DisabledBackend>();
     }
 }

@@ -5,6 +5,7 @@
 // ordering and triangle strips, all of which the PS2 class target cares about
 // far more than any modern GPU does.
 
+#include "bake/bake.h"
 #include "bake/texture.h"
 #include "knobs/profile.h"
 #include "mesh/mesh.h"
@@ -24,6 +25,10 @@ struct StripData {
     size_t   strip_count   = 0;
     float    average_length = 0.0f;   // triangles per strip
     size_t   degenerate_count = 0;
+    // With more than one texture page each page is its own draw, so strips
+    // never cross pages: page p's strips are indices[first, first + count).
+    struct PageRange { uint32_t first_triangle, triangle_count, first_index, index_count; };
+    std::vector<PageRange> pages;
 };
 
 // Splits a restart-separated strip buffer into individual runs.
@@ -69,9 +74,12 @@ struct ExportResult {
 
 // `mesh` is modified in place when `optimise` is set, because the exported
 // index order has to match the file that ships.
+// `extra_pages` are the bake's pages after the first, written beside it as
+// <base>_<page>_diffuse.png, each with its own material.
 ExportResult export_asset(Mesh& mesh, const Texture& diffuse, const Palette& palette,
                           const TargetProfile& profile, const fs::path& directory,
-                          const ExportOptions& opts = {});
+                          const ExportOptions& opts = {},
+                          const std::vector<BakeResult::Page>& extra_pages = {});
 
 // The .rdmesh container, documented in docs/FORMATS.md.
 bool write_rdmesh(const fs::path& path, const Mesh& mesh, const StripData& strips,

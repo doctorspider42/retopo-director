@@ -1,7 +1,9 @@
 #include "bake/bake.h"
+#include "bake/charts.h"
 
 #include "core/log.h"
 #include "mesh/topology.h"
+#include "render/camera.h"
 #include "core/thread_pool.h"
 #include "core/util.h"
 
@@ -11,11 +13,30 @@
 #include <functional>
 #include <atomic>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 
 namespace rd {
 namespace {
+
+// Occlusion for a ray that may start just under the source's skin. The low
+// poly cuts beneath the source wherever it is convex - under a kneecap, the
+// point of an elbow - and a ray from there meets the inside of the skin
+// first: every ray blocked, a black oval on both knees of every character
+// the director built. A first hit seen from behind, near the start, is the
+// ray leaving the skin, not something covering the point; the ray carries on
+// past it. Later hits count whichever way they face, so a cape or a sleeve
+// still shades what is under it.
+bool occluded_from_under(const Bvh& bvh, Vec3 origin, Vec3 dir, float tmin, float tmax,
+                         float skin)
+{
+    const RayHit first = bvh.intersect(origin, dir, tmin, tmax);
+    if (!first.hit()) return false;
+    const float len = std::max(length(dir), 1e-12f);
+    if (first.t * len > skin || dot(bvh.geometric_normal(first.triangle), dir) <= 0.0f) return true;
+    return bvh.occluded(origin, dir, first.t + tmin, tmax);
+}
 
 struct TexelJob {
     int      x, y;
@@ -678,6 +699,7 @@ UnwrapResult unwrap_uvs(Mesh& mesh, int width, int height, int padding,
     rebuilt.indices.assign(out.indexArray, out.indexArray + out.indexCount);
     if (mesh.tri_region.size() == mesh.triangle_count())
         rebuilt.tri_region = mesh.tri_region;   // face order is preserved by xatlas
+    if (mesh.has_pages()) rebuilt.tri_page = mesh.tri_page;
 
     // xatlas splits a vertex per chart it belongs to, but a vertex interior to
     // one chart can still come back duplicated. Every duplicate is a vertex the
@@ -755,10 +777,14 @@ UnwrapResult unwrap_uvs(Mesh& mesh, int width, int height, int padding,
 }
 
 // ---------------------------------------------------------------------------
-BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
-                    const MeshAnalysis& source_analysis, const TargetProfile& profile,
-                    const GlobalKnobs& knobs, const BakeOptions& opts,
-                    const std::function<void(float, const char*)>& progress)
+namespace {
+
+// One page: unwrap `mesh` into a width x height atlas and bake it. bake_all
+// calls this once per page with that page's triangles.
+BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
+                       const MeshAnalysis& source_analysis, const TargetProfile& profile,
+                       const GlobalKnobs& knobs, const BakeOptions& opts,
+                       const std::function<void(float, const char*)>& progress)
 {
     Stopwatch watch;
     BakeResult result;
@@ -812,14 +838,28 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
             // vertex count is the limit that actually binds. So the transfer
             // has to answer to the profile like everything else, and hand back
             // to the unwrap when it cannot.
+            //
+            // Fitting is not enough either. A layout that fits by tripling the
+            // vertex count has spent the vertex limit on seams, and the budget
+            // re-fit then stops with two thirds of the triangle budget unused,
+            // because the vertex limit is the one that binds. A fresh unwrap
+            // costs 30 to 45 per cent; 1.6 times the welded count is as much as
+            // keeping the artist's layout is worth. At 2.0 a character's body,
+            // once its head went to a page of its own, slipped under the line
+            // at 1.9 and came back as 209 charts with strips half as long.
+            const float overhead =
+                float(candidate.vertex_count()) / float(std::max<size_t>(1, mesh.vertex_count()));
+            constexpr float kMaxCarriedOverhead = 1.6f;
             const bool affordable =
                 packed.ok && profile.max_vertices > 0 &&
-                candidate.vertex_count() <= size_t(profile.max_vertices);
+                candidate.vertex_count() <= size_t(profile.max_vertices) &&
+                overhead <= kMaxCarriedOverhead;
 
             if (packed.ok && !affordable) {
-                RD_INFO("the source uv layout needs %zu vertices against a budget of %d "
-                        "(%d charts); unwrapping fresh instead",
-                        candidate.vertex_count(), profile.max_vertices, packed.charts);
+                RD_INFO("the source uv layout needs %zu vertices (%.1fx the welded %zu) against "
+                        "a budget of %d (%d charts); unwrapping fresh instead",
+                        candidate.vertex_count(), overhead, mesh.vertex_count(),
+                        profile.max_vertices, packed.charts);
                 result.messages.push_back(
                     format("kept the generated uv layout: carrying the source layout over would "
                            "have cost %zu vertices of %d allowed",
@@ -844,7 +884,83 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
         }
     }
 
-    if (!carried_layout) {
+    if (!carried_layout && profile.texture.uv_layout == "parts" &&
+        mesh.tri_region.size() == mesh.triangle_count()) {
+        report(0.02f, "cutting uv charts by part");
+        // How much each vertex is seen: by the profile's cameras, each by its
+        // weight and by how squarely it faces the vertex, with anything the
+        // source hides from it not counting; then the ambient term, so a
+        // crevice every camera can see into still counts as out of the way.
+        // Seams go where this is low - the inside of a limb, an underside, the
+        // back of the head for a camera that only ever looks at the face.
+        // The ambient term alone was near 1 over the whole of a convex body:
+        // ordering merges by it changed nothing, and 80% of the seams on a
+        // character counted as visible.
+        std::vector<float> seen(mesh.vertex_count(), 1.0f);
+        const float eps = std::max(source_analysis.bbox_diagonal, 1e-6f) * 1e-4f;
+        float most = 0.0f;
+        for (size_t v = 0; v < mesh.vertex_count(); ++v) {
+            const ClosestHit hit = source_bvh.closest_point(mesh.positions[v]);
+            if (!hit.hit()) continue;
+            float ambient = 1.0f;
+            if (source_analysis.ambient.size() == source.vertex_count()) {
+                ambient = 0.0f;
+                for (int i = 0; i < 3; ++i)
+                    ambient += source_analysis.ambient[source.indices[hit.triangle * 3 + i]] / 3.0f;
+            }
+            const Vec3 n = source_bvh.geometric_normal(hit.triangle);
+            float s = 0.0f;
+            if (opts.seam_viewpoints.empty()) {
+                s = 1.0f - 0.5f * clampf(-n.y, 0.0f, 1.0f);
+            } else {
+                double acc = 0.0, total = 0.0;
+                for (const ViewPoint& vp : opts.seam_viewpoints) {
+                    total += vp.weight;
+                    const Vec3  to_eye = vp.eye - hit.point;
+                    const float facing = dot(n, normalize(to_eye));
+                    if (facing <= 0.0f) continue;
+                    if (source_bvh.occluded(hit.point + n * eps, to_eye, 1e-4f, 1.0f)) continue;
+                    acc += vp.weight * facing;
+                }
+                s = total > 0.0 ? float(acc / total) : 1.0f;
+            }
+            seen[v] = s * (0.5f + 0.5f * ambient);
+            most = std::max(most, seen[v]);
+        }
+        if (most > 0.0f)
+            for (float& x : seen) x /= most;
+        Mesh candidate = mesh;
+        PartsUnwrapOptions popts;
+        popts.seam_visibility_weight = 8.0f * knobs.uv_seam_hiding;
+        popts.region_texel_weight    = opts.region_texel_weight;
+        Stopwatch parts_watch;
+        const PartsUnwrapResult parts = unwrap_by_parts(candidate, seen, popts);
+        const double parts_seconds = parts_watch.seconds();
+        if (parts.ok) {
+            // Each chart packs as its own island: the packer finds islands by
+            // uv connectivity and material, and charts laid out side by side
+            // must not be merged where they happen to touch.
+            const std::vector<uint16_t> materials = candidate.tri_material;
+            candidate.tri_material.assign(parts.tri_chart.begin(), parts.tri_chart.end());
+            UnwrapResult packed = repack_uvs(candidate, nullptr, width, height, padding);
+            candidate.tri_material = materials.size() == candidate.triangle_count()
+                                         ? materials : std::vector<uint16_t>{};
+            if (packed.ok) {
+                mesh = std::move(candidate);
+                uv   = packed;
+                RD_INFO("uv charts by part: %d charts (%d split, %d joined), %zu vertices, seams "
+                        "%.3f long (%.3f visible) in %s",
+                        parts.charts, parts.splits, parts.merges, mesh.vertex_count(), parts.seam,
+                        parts.visible_seam, format_duration(parts_seconds).c_str());
+            } else {
+                RD_WARN("packing the part charts failed (%s); unwrapping with xatlas",
+                        packed.error.c_str());
+            }
+        } else {
+            RD_WARN("uv charts by part failed (%s); unwrapping with xatlas", parts.error.c_str());
+        }
+    }
+    if (!carried_layout && !uv.ok) {
         report(0.02f, "unwrapping uvs");
         uv = unwrap_uvs(mesh, width, height, padding, knobs.uv_stretch_tolerance);
     }
@@ -914,6 +1030,9 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
     const float diag        = std::max(source_analysis.bbox_diagonal, kEps);
     const float bias        = diag * opts.ray_bias_rel;
     const float ao_distance = diag * clampf(opts.ao_distance_rel, 0.01f, 2.0f);
+    const float ao_near     = std::max(bias, diag * opts.ao_min_distance_rel);
+    // How deep under the source's skin the low poly can sit (occluded_from_under).
+    const float skin        = diag * 0.03f;
     const float search      = diag * clampf(opts.projection_distance_rel, 0.001f, 1.0f);
     const int   ao_rays     = opts.bake_ao && knobs.bake_ambient_occlusion
                                   ? std::max(1, opts.ao_rays) : 0;
@@ -957,11 +1076,45 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                     }
                 }
 
-                const RayHit out_hit = source_bvh.intersect(job.position + job.normal * bias,
-                                                            job.normal, bias, search);
-                const RayHit in_hit  = source_bvh.intersect(job.position - job.normal * bias,
-                                                            -job.normal, bias, search);
-                local_rays += 2;
+                // The surface this texel stands for is the one facing the same
+                // way as the low poly, not merely the nearest one. Where a low
+                // poly face cuts across a fold of the source, the nearest hit
+                // along its normal is the back of the fold: its albedo comes
+                // from the wrong place and, with the normal flipped to face
+                // out, its rays start on the inside - black texels traced along
+                // every fold, the scribbles all over the Quaternius bakes. So
+                // each probe walks past surfaces that face away (a few at most)
+                // and stops at the first that faces the low poly.
+                auto front_hit = [&](Vec3 dir) {
+                    RayHit found;
+                    Vec3   from      = job.position + dir * bias;
+                    float  travelled = 0.0f;
+                    for (int step = 0; step < 4 && travelled < search; ++step) {
+                        RayHit h = source_bvh.intersect(from, dir, bias, search - travelled);
+                        ++local_rays;
+                        if (!h.hit()) break;
+                        if (dot(source_bvh.shading_normal(h), job.normal) > 0.0f) {
+                            h.t += travelled;
+                            found = h;
+                            break;
+                        }
+                        travelled += h.t + bias;
+                        from = from + dir * (h.t + bias);
+                    }
+                    return found;
+                };
+                RayHit out_hit = front_hit(job.normal);
+                RayHit in_hit  = front_hit(-job.normal);
+                // Nothing facing the right way in reach: a source wound
+                // inconsistently, or a thin sheet. Take the nearest surface of
+                // any kind, as before.
+                if (!out_hit.hit() && !in_hit.hit()) {
+                    out_hit = source_bvh.intersect(job.position + job.normal * bias, job.normal,
+                                                   bias, search);
+                    in_hit  = source_bvh.intersect(job.position - job.normal * bias, -job.normal,
+                                                   bias, search);
+                    local_rays += 2;
+                }
 
                 const RayHit* best = nullptr;
                 if (out_hit.hit() && in_hit.hit()) best = out_hit.t <= in_hit.t ? &out_hit : &in_hit;
@@ -984,23 +1137,35 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                     }
                 }
 
-                const Vec3 origin = surface + normal * bias;
 
-                // Ambient occlusion.
+                // Occlusion and shadows are traced from the low poly, not from
+                // the point of the source the texel landed on. The low poly is
+                // what gets lit on the console, and it is a clean closed
+                // surface; a sculpted source is not. Where its folds run
+                // through each other the landing point lies inside another
+                // part of the body, every ray from it is blocked, and those
+                // texels came out as black scribbles along every fold of the
+                // Quaternius characters - then as bright ones when the other
+                // side was tried. From a point just off the low poly the rays
+                // see what the low poly sees: armpits and the crotch, not the
+                // inside of a bicep. The albedo still comes from the source.
+                const float cage   = std::max(bias, ao_near);
+                const Vec3  origin = job.position + job.normal * cage;
                 float ao = 1.0f;
                 if (ao_rays > 0) {
                     Vec3 tangent, bitangent;
-                    basis_from_normal(normal, tangent, bitangent);
+                    basis_from_normal(job.normal, tangent, bitangent);
                     int open = 0;
                     for (int r = 0; r < ao_rays; ++r) {
                         const Vec3 local = sample_cosine_hemisphere(rng.next_float(),
                                                                     rng.next_float());
-                        const Vec3 dir = tangent * local.x + bitangent * local.y + normal * local.z;
-                        if (!source_bvh.occluded(origin, dir, bias, ao_distance)) ++open;
+                        const Vec3 dir =
+                            tangent * local.x + bitangent * local.y + job.normal * local.z;
+                        if (!occluded_from_under(source_bvh, origin, dir, ao_near, ao_distance, skin))
+                            ++open;
                     }
                     local_rays += uint64_t(ao_rays);
-                    ao = float(open) / float(ao_rays);
-                    ao = lerpf(1.0f, ao, ao_strength);
+                    ao = lerpf(1.0f, float(open) / float(ao_rays), ao_strength);
                 }
 
                 // Direct lighting, flattened into the albedo.
@@ -1010,8 +1175,9 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                         const float ndl = saturate(dot(normal, l.direction));
                         if (ndl <= 0.0f) continue;
                         float shadow = 1.0f;
-                        if (l.casts_shadow) {
-                            shadow = source_bvh.occluded(origin, l.direction, bias, ao_distance * 2.0f)
+                        if (l.casts_shadow && dot(job.normal, l.direction) > 0.0f) {
+                            shadow = occluded_from_under(source_bvh, origin, l.direction, ao_near,
+                                                         ao_distance * 2.0f, skin)
                                          ? 0.25f : 1.0f;
                             ++local_rays;
                         }
@@ -1053,6 +1219,7 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
         report(0.86f, "vertex colours");
         const size_t vcount = mesh.vertex_count();
         mesh.colors.assign(vcount, Vec4{1, 1, 1, 1});
+        mesh.colors_prelit = true;
 
         ThreadPool::shared().parallel_ranges(vcount, 64, [&](size_t b, size_t e, unsigned) {
             Rng rng(0xC01Fu + uint32_t(b) * 40503u);
@@ -1064,14 +1231,14 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
 
                 Vec3 base{1, 1, 1};
                 const ClosestHit hit = source_bvh.closest_point(p, search * 2.0f);
-                Vec3 surface = p;
+                const Vec3 low_n = n;
                 if (hit.hit()) {
-                    surface = hit.point;
                     const Vec3 sn = source_bvh.geometric_normal(hit.triangle);
                     if (dot(sn, n) > 0.0f) n = normalize(n + sn * 0.5f);
                     base = sample_source_color_at(source, hit);
                 }
-                const Vec3 origin = surface + n * bias;
+                // From just off the low poly, as in the texel bake: see the note there.
+                const Vec3 origin = p + low_n * std::max(bias, ao_near);
 
                 float ao = 1.0f;
                 if (rays_per_vertex > 0) {
@@ -1081,8 +1248,11 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                     for (int r = 0; r < rays_per_vertex; ++r) {
                         const Vec3 local = sample_cosine_hemisphere(rng.next_float(),
                                                                     rng.next_float());
-                        const Vec3 dir = tangent * local.x + bitangent * local.y + n * local.z;
-                        if (!source_bvh.occluded(origin, dir, bias, ao_distance)) ++open;
+                        Vec3 dir = tangent * local.x + bitangent * local.y + n * local.z;
+                        const float below = dot(dir, low_n);
+                        if (below < 0.0f) dir = dir - low_n * (2.0f * below);
+                        if (!occluded_from_under(source_bvh, origin, dir, ao_near, ao_distance, skin))
+                            ++open;
                     }
                     ao = lerpf(1.0f, float(open) / float(rays_per_vertex), ao_strength);
                 }
@@ -1114,8 +1284,20 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
     }
 
     // --- 7. uv stretch metric ----------------------------------------------
+    // How far texel density strays from the mesh's own average, either way:
+    // more texels than average is wasted atlas and shimmer, fewer is blur.
+    //
+    // A percentile weighted by surface area, not the single worst triangle.
+    // The worst triangle is always a sliver a few millimetres across that the
+    // packer rounded up to a texel, and it swung this number from 3 to 47 on
+    // the same asset between two runs that looked identical. What an artist
+    // sees is the surface, so the surface decides: the density ratio that 98%
+    // of the model's area is within.
     {
-        float worst = 0.0f;
+        struct Sample { float deviation, area; };
+        std::vector<Sample> samples;
+        samples.reserve(tcount);
+        double uv_total = 0.0, area_total = 0.0;
         for (size_t t = 0; t < tcount; ++t) {
             const uint32_t i0 = mesh.indices[t * 3 + 0];
             const uint32_t i1 = mesh.indices[t * 3 + 1];
@@ -1125,27 +1307,23 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
             const float area2 = 0.5f * std::fabs((b.x - a.x) * (c.y - a.y) -
                                                  (b.y - a.y) * (c.x - a.x));
             if (area3 < 1e-12f || area2 < 1e-12f) continue;
-            const float ratio = (area2 / area3);
-            worst = std::max(worst, ratio);
+            uv_total   += area2;
+            area_total += area3;
+            samples.push_back({area2 / area3, area3});
         }
-        // Normalise against the median-ish scale so the number means "how much
-        // worse than the average texel density", not raw units.
-        float mean_ratio = 0.0f;
-        int   counted = 0;
-        for (size_t t = 0; t < tcount; ++t) {
-            const uint32_t i0 = mesh.indices[t * 3 + 0];
-            const uint32_t i1 = mesh.indices[t * 3 + 1];
-            const uint32_t i2 = mesh.indices[t * 3 + 2];
-            const float area3 = mesh.triangle_area(t);
-            const Vec2 a = mesh.uvs[i0], b = mesh.uvs[i1], c = mesh.uvs[i2];
-            const float area2 = 0.5f * std::fabs((b.x - a.x) * (c.y - a.y) -
-                                                 (b.y - a.y) * (c.x - a.x));
-            if (area3 < 1e-12f || area2 < 1e-12f) continue;
-            mean_ratio += area2 / area3;
-            ++counted;
+        if (!samples.empty() && uv_total > 0.0 && area_total > 0.0) {
+            const float mean = float(uv_total / area_total);
+            for (Sample& s : samples) s.deviation = std::max(s.deviation / mean, mean / s.deviation);
+            std::sort(samples.begin(), samples.end(),
+                      [](const Sample& x, const Sample& y) { return x.deviation < y.deviation; });
+            const double cutoff = 0.98 * area_total;
+            double acc = 0.0;
+            for (const Sample& s : samples) {
+                acc += s.area;
+                result.uv_max_stretch = s.deviation;
+                if (acc >= cutoff) break;
+            }
         }
-        if (counted > 0 && mean_ratio > 0.0f)
-            result.uv_max_stretch = worst / (mean_ratio / float(counted));
     }
 
     result.ok      = true;
@@ -1156,6 +1334,314 @@ BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
             width, height, result.texels_baked, result.rays_cast, result.charts,
             result.uv_utilisation * 100.0f, format_duration(result.seconds).c_str());
     return result;
+}
+
+// Appends a baked part to the whole, carrying every stream the parts share.
+void append_part(Mesh& dst, const Mesh& src, uint8_t page)
+{
+    const uint32_t offset = uint32_t(dst.positions.size());
+    const bool first = dst.positions.empty();
+    auto join = [&](auto& d, const auto& s, bool has) {
+        if (has && (first || !d.empty())) d.insert(d.end(), s.begin(), s.end());
+        else d.clear();
+    };
+    dst.positions.insert(dst.positions.end(), src.positions.begin(), src.positions.end());
+    join(dst.normals, src.normals, src.has_normals());
+    join(dst.uvs,     src.uvs,     src.has_uvs());
+    join(dst.colors,  src.colors,  src.has_colors());
+    join(dst.skin,    src.skin,    src.has_skin());
+    for (uint32_t i : src.indices) dst.indices.push_back(i + offset);
+    const size_t tris = src.triangle_count();
+    if (src.tri_region.size() == tris && (first || !dst.tri_region.empty()))
+        dst.tri_region.insert(dst.tri_region.end(), src.tri_region.begin(), src.tri_region.end());
+    else
+        dst.tri_region.clear();
+    dst.tri_page.insert(dst.tri_page.end(), tris, page);
+    dst.colors_prelit = src.colors_prelit;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> assign_texture_pages(const Mesh& mesh, const TargetProfile& profile)
+{
+    std::vector<uint8_t> page;
+    if (profile.texture.extra_pages.empty() || mesh.empty()) return page;
+    const size_t tcount = mesh.triangle_count();
+    page.assign(tcount, 0);
+
+    const std::vector<ViewCamera> rig = build_camera_rig(mesh, profile);
+    Bvh bvh;
+    bvh.build(mesh);
+    const float diag = std::max(mesh.bounds().diagonal(), 1e-6f);
+    const bool  by_region = mesh.tri_region.size() == tcount;
+
+    bool any = false;
+    for (size_t pi = 0; pi < profile.texture.extra_pages.size() && pi < 254; ++pi) {
+        const TexturePage& spec = profile.texture.extra_pages[pi];
+        const ViewCamera* cam = nullptr;
+        for (const ViewCamera& c : rig)
+            if (c.name == spec.camera) { cam = &c; break; }
+        if (!cam) {
+            RD_WARN("texture page '%s' names camera '%s', which the profile does not have",
+                    spec.name.c_str(), spec.camera.c_str());
+            continue;
+        }
+
+        // What the camera sees: facing it, inside the middle of its frame, and
+        // not behind anything else of the model.
+        const Mat4 vp = cam->view_proj(1.0f);
+        std::vector<uint8_t> seen(tcount, 0);
+        for (size_t t = 0; t < tcount; ++t) {
+            if (page[t] != 0) continue;
+            const Vec3 c = mesh.triangle_centroid(t);
+            const Vec3 n = mesh.triangle_normal(t);
+            const Vec3 to_eye = cam->eye - c;
+            const float dist = length(to_eye);
+            if (dist <= 0.0f || dot(n, to_eye) <= 0.0f) continue;
+            const Vec4 h = vp * Vec4{c.x, c.y, c.z, 1.0f};
+            if (h.w <= 0.0f) continue;
+            const float x = h.x / h.w, y = h.y / h.w;
+            // The middle half of the frame is what the shot is of; its edges
+            // are where a face shot cuts through the neck and shoulders.
+            if (std::fabs(x) > 0.5f || std::fabs(y) > 0.5f) continue;
+            const Vec3 dir = to_eye / dist;
+            if (bvh.occluded(c + n * (diag * 1e-4f), dir, diag * 1e-4f, dist)) continue;
+            seen[t] = 1;
+        }
+
+        // The page takes everything within reach of what the camera sees, back
+        // included, so a head is one piece on one page rather than a face with
+        // a seam round its ears. Reach is the seen core's own extent: the ball
+        // round a face holds the head and stops at the collar. This used to go
+        // by segmentation region, which changes with every budget attempt, so
+        // the same head came out as 3% of the surface on one attempt and 15%
+        // - half a chest - on the next.
+        std::vector<uint8_t> claim(tcount, 0);
+        {
+            Vec3   centre{};
+            double weight = 0.0;
+            for (size_t t = 0; t < tcount; ++t)
+                if (seen[t]) {
+                    const double w = mesh.triangle_area(t);
+                    centre = centre + mesh.triangle_centroid(t) * float(w);
+                    weight += w;
+                }
+            if (weight > 0.0) {
+                centre = centre * float(1.0 / weight);
+                std::vector<float> reach;
+                for (size_t t = 0; t < tcount; ++t)
+                    if (seen[t]) reach.push_back(length(mesh.triangle_centroid(t) - centre));
+                std::sort(reach.begin(), reach.end());
+                const float radius = reach[size_t(0.90 * double(reach.size() - 1))] * 1.1f;
+                for (size_t t = 0; t < tcount; ++t)
+                    if (length(mesh.triangle_centroid(t) - centre) <= radius) claim[t] = 1;
+            }
+
+            // A ball cuts through triangles wherever it happens to, leaving a
+            // ragged edge and single triangles stranded on the wrong side, and
+            // every stranded triangle is a chart of its own in one atlas or
+            // the other: the body page went from 60 charts to 190. So the edge
+            // is smoothed by majority - a triangle goes with two of its three
+            // neighbours - and only the piece holding the face is kept.
+            MeshTopology topo;
+            topo.build(mesh);
+            for (int pass = 0; pass < 3; ++pass) {
+                std::vector<uint8_t> next_claim = claim;
+                for (size_t t = 0; t < tcount; ++t) {
+                    int votes = 0, known = 0;
+                    for (int c = 0; c < 3; ++c) {
+                        const uint32_t nb = topo.neighbour(uint32_t(t), c);
+                        if (nb == kInvalidIndex) continue;
+                        ++known;
+                        votes += claim[nb];
+                    }
+                    if (known == 3 && votes >= 2) next_claim[t] = 1;
+                    if (known == 3 && votes <= 1) next_claim[t] = 0;
+                }
+                claim.swap(next_claim);
+            }
+            // Flood from the most central seen triangle.
+            size_t seed = tcount;
+            float  best = std::numeric_limits<float>::max();
+            for (size_t t = 0; t < tcount; ++t)
+                if (seen[t] && claim[t]) {
+                    const float d = length(mesh.triangle_centroid(t) - centre);
+                    if (d < best) { best = d; seed = t; }
+                }
+            std::vector<uint8_t> kept(tcount, 0);
+            if (seed < tcount) {
+                std::vector<uint32_t> stack{uint32_t(seed)};
+                kept[seed] = 1;
+                while (!stack.empty()) {
+                    const uint32_t t = stack.back();
+                    stack.pop_back();
+                    for (int c = 0; c < 3; ++c) {
+                        const uint32_t nb = topo.neighbour(t, c);
+                        if (nb != kInvalidIndex && claim[nb] && !kept[nb]) {
+                            kept[nb] = 1;
+                            stack.push_back(nb);
+                        }
+                    }
+                }
+            }
+            claim.swap(kept);
+        }
+        (void)by_region;
+
+        double claimed = 0.0, total = 0.0;
+        for (size_t t = 0; t < tcount; ++t) {
+            total += mesh.triangle_area(t);
+            if (claim[t] && page[t] == 0) claimed += mesh.triangle_area(t);
+        }
+        size_t claimed_tris = 0;
+        for (size_t t = 0; t < tcount; ++t) claimed_tris += claim[t] && page[t] == 0;
+        // A page that would take most of the model is not a close up of a
+        // part; the camera frames everything and the split buys nothing. One
+        // that takes a sliver - a statue under a face camera meant for a
+        // person - is an atlas for a dozen texels' worth of surface.
+        if (claimed <= 0.01 * total || claimed_tris < 12 || claimed > 0.5 * total) {
+            RD_INFO("texture page '%s': camera '%s' claims %.0f%% of the surface; not split",
+                    spec.name.c_str(), spec.camera.c_str(), total > 0.0 ? 100.0 * claimed / total : 0.0);
+            continue;
+        }
+        for (size_t t = 0; t < tcount; ++t)
+            if (claim[t] && page[t] == 0) page[t] = uint8_t(pi + 1);
+        any = true;
+        RD_INFO("texture page '%s' (%dx%d): %.0f%% of the surface, from camera '%s'",
+                spec.name.c_str(), spec.width, spec.height, 100.0 * claimed / total,
+                spec.camera.c_str());
+    }
+    if (!any) page.clear();
+    return page;
+}
+
+BakeResult bake_all(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
+                    const MeshAnalysis& source_analysis, const TargetProfile& profile,
+                    const GlobalKnobs& knobs, const BakeOptions& opts,
+                    const std::function<void(float, const char*)>& progress)
+{
+    const std::vector<uint8_t> page = assign_texture_pages(mesh, profile);
+    if (page.empty()) {
+        mesh.tri_page.clear();
+        BakeResult r = bake_single(mesh, source, source_bvh, source_analysis, profile, knobs,
+                                   opts, progress);
+        r.page0_triangles = mesh.triangle_count();
+        return r;
+    }
+
+    // Each page is its own unwrap and its own bake: a separate atlas, packed
+    // for its own size, with its own palette. The parts are then put back
+    // together with every triangle knowing its page.
+    const size_t pages = profile.texture.extra_pages.size() + 1;
+    Mesh merged;
+    merged.name             = mesh.name;
+    merged.armature         = mesh.armature;
+    merged.import_transform = mesh.import_transform;
+    merged.import_scale     = mesh.import_scale;
+
+    BakeResult total;
+    Stopwatch watch;
+    float worst_stretch = 0.0f;
+    for (size_t p = 0; p < pages; ++p) {
+        std::vector<bool> mask(page.size());
+        size_t count = 0;
+        for (size_t t = 0; t < page.size(); ++t) { mask[t] = page[t] == p; count += mask[t]; }
+        if (count == 0) {
+            if (p > 0) total.extra_pages.push_back({profile.texture.extra_pages[p - 1].name});
+            continue;
+        }
+        Mesh part = mesh_extract(mesh, mask);
+        part.tri_page.clear();
+
+        BakeOptions po = opts;
+        if (p > 0) {
+            po.texture_width  = profile.texture.extra_pages[p - 1].width;
+            po.texture_height = profile.texture.extra_pages[p - 1].height;
+        }
+        const float lo = float(p) / float(pages), hi = float(p + 1) / float(pages);
+        BakeResult r = bake_single(part, source, source_bvh, source_analysis, profile, knobs,
+                                   po, [&](float f, const char* what) {
+                                       if (progress) progress(lo + (hi - lo) * f, what);
+                                   });
+        if (!r.ok) return r;
+        append_part(merged, part, uint8_t(p));
+
+        worst_stretch = std::max(worst_stretch, r.uv_max_stretch);
+        total.charts       += r.charts;
+        total.texels_baked += r.texels_baked;
+        total.rays_cast    += r.rays_cast;
+        total.atlas_count  += r.atlas_count;
+        for (std::string& m : r.messages) total.messages.push_back(std::move(m));
+        if (p == 0) {
+            total.diffuse        = std::move(r.diffuse);
+            total.coverage       = std::move(r.coverage);
+            total.palette        = std::move(r.palette);
+            total.uv_utilisation = r.uv_utilisation;
+            total.page0_triangles = count;
+        } else {
+            BakeResult::Page pg;
+            pg.name      = profile.texture.extra_pages[p - 1].name;
+            pg.diffuse   = std::move(r.diffuse);
+            pg.coverage  = std::move(r.coverage);
+            pg.palette   = std::move(r.palette);
+            pg.triangles = count;
+            total.extra_pages.push_back(std::move(pg));
+        }
+    }
+
+    mesh = std::move(merged);
+    total.uv_max_stretch = worst_stretch;
+    total.ok      = true;
+    total.seconds = watch.seconds();
+    total.messages.push_back(format("%zu texture pages", pages));
+    return total;
+}
+
+Texture display_atlas(const Mesh& mesh, const BakeResult& bake, Mesh& display_mesh)
+{
+    display_mesh = mesh;
+    if (bake.extra_pages.empty() || !mesh.has_pages() || !mesh.has_uvs()) return bake.diffuse;
+
+    // Every page scaled to the tallest page's height, side by side.
+    std::vector<const Texture*> tex{&bake.diffuse};
+    for (const BakeResult::Page& p : bake.extra_pages) tex.push_back(&p.diffuse);
+    int height = 0;
+    for (const Texture* t : tex) height = std::max(height, t->height);
+    if (height <= 0) return bake.diffuse;
+    std::vector<int> x0, w;
+    int width = 0;
+    for (const Texture* t : tex) {
+        const int ww = t->empty() ? 0 : int(std::lround(float(t->width) * float(height) / float(t->height)));
+        x0.push_back(width);
+        w.push_back(ww);
+        width += ww;
+    }
+    Texture out;
+    out.resize(width, height, 4);
+    for (size_t i = 0; i < tex.size(); ++i) {
+        const Texture& t = *tex[i];
+        if (t.empty()) continue;
+        // Scaled by sampling, not by repeating texels: a 256 page shown at 512
+        // by duplication is a checkerboard of 2x2 blocks before the renderer
+        // even gets to filter it.
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < w[i]; ++x)
+                out.set(x0[i] + x, y, t.sample({(float(x) + 0.5f) / float(w[i]),
+                                                (float(y) + 0.5f) / float(height)}));
+    }
+
+    // A vertex belongs to the page of any triangle using it; the bake gave
+    // each page its own vertices, so they never disagree.
+    std::vector<int> vpage(mesh.vertex_count(), 0);
+    for (size_t t = 0; t < mesh.triangle_count(); ++t)
+        for (int c = 0; c < 3; ++c) vpage[mesh.indices[t * 3 + c]] = mesh.tri_page[t];
+    for (size_t v = 0; v < mesh.vertex_count(); ++v) {
+        const int p = std::min<int>(vpage[v], int(tex.size()) - 1);
+        display_mesh.uvs[v] = {(float(x0[p]) + mesh.uvs[v].x * float(w[p])) / float(width),
+                               mesh.uvs[v].y};
+    }
+    return out;
 }
 
 } // namespace rd

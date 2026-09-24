@@ -8,6 +8,7 @@
 #include "geom/hard_rules.h"
 #include "geom/quadric.h"
 #include "geom/remesh.h"
+#include "geom/tubes.h"
 #include "knobs/knobs.h"
 #include "knobs/profile.h"
 #include "mesh/analysis.h"
@@ -53,11 +54,16 @@ struct RetopoOptions {
     QuadricOptions  quadric;
     RemeshOptions   remesh;
     HardRuleOptions hard_rules;
+    TubeOptions     tubes;
     // Auto backend rule: anything skinned, or with fewer creases than this share
     // of its edges, is treated as organic and goes through the quad field. The
     // knob panel and the command line can both override it.
     bool  prefer_quad_for_skinned   = true;
     float hard_surface_crease_ratio = 0.18f;
+    // ...and only when this share of edges is flat as well (neighbours within
+    // a degree). Creases between flat panels are hard surface; creases all
+    // over a curved surface are a scan's fur and pores.
+    float hard_surface_flat_share = 0.30f;
     // Overrides the panel entirely when set, so the two paths can be compared
     // on one mesh without editing knobs.
     bool          forced_backend_valid = false;

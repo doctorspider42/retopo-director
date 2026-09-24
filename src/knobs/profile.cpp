@@ -90,8 +90,10 @@ TargetProfile TargetProfile::ps2_character_default()
     p.art_direction =
         "Third person playable character. The face is visible in dialogue "
         "cutscenes, so the head deserves a disproportionate share of the budget. "
-        "Hands are seen holding equipment but never in close up. Feet and the "
-        "back of the legs are almost never framed.";
+        "Hands are seen holding equipment but never in close up. The feet are in "
+        "every gameplay shot and walk the ground: they need a readable heel, instep "
+        "and toe box, about a hand's worth of triangles each, but no toes. The back "
+        "of the legs is rarely framed.";
     p.max_iterations = 4;
     return p;
 }
@@ -141,6 +143,7 @@ Json TargetProfile::to_json() const
     Json g;
     g["max_triangles"]         = max_triangles;
     g["max_vertices"]          = max_vertices;
+    g["budget_tolerance"]      = budget_tolerance;
     g["max_shells"]            = max_shells;
     g["max_bone_influences"]   = max_bone_influences;
     g["require_manifold"]      = require_manifold;
@@ -160,6 +163,15 @@ Json TargetProfile::to_json() const
     t["require_uvs"]              = require_uvs;
     t["require_vertex_colors"]    = require_vertex_colors;
     t["bake_lighting_to_diffuse"] = bake_lighting_to_diffuse;
+    if (!texture.extra_pages.empty()) {
+        Json pages = Json::array();
+        for (const TexturePage& pg : texture.extra_pages)
+            pages.push_back(Json{{"name", pg.name}, {"width", pg.width}, {"height", pg.height},
+                                 {"camera", pg.camera}});
+        t["pages"] = pages;
+    }
+    t["filtering"] = texture.bilinear ? "bilinear" : "nearest";
+    t["uv_layout"] = texture.uv_layout;
     j["texture"] = t;
 
     Json q;
@@ -170,6 +182,7 @@ Json TargetProfile::to_json() const
     Json f;
     f["reference_height_m"] = reference_height_m;
     f["turntable_views"]    = turntable_views;
+    f["turntable_pitches"]  = turntable_pitches;
     Json cams = Json::array();
     for (const ProfileCamera& c : cameras) cams.push_back(camera_to_json(c));
     f["cameras"] = cams;
@@ -197,6 +210,7 @@ TargetProfile TargetProfile::from_json(const Json& j, std::string* error)
     const Json& g = json_object_or_empty(j, "geometry");
     p.max_triangles         = json_get<int>(g, "max_triangles", p.max_triangles);
     p.max_vertices          = json_get<int>(g, "max_vertices", p.max_vertices);
+    p.budget_tolerance      = json_get<float>(g, "budget_tolerance", p.budget_tolerance);
     p.max_shells            = json_get<int>(g, "max_shells", p.max_shells);
     p.max_bone_influences   = json_get<int>(g, "max_bone_influences", p.max_bone_influences);
     p.require_manifold      = json_get<bool>(g, "require_manifold", p.require_manifold);
@@ -211,7 +225,19 @@ TargetProfile TargetProfile::from_json(const Json& j, std::string* error)
     p.texture.height         = json_get<int>(t, "height", p.texture.height);
     p.texture.palette_colors = json_get<int>(t, "palette_colors", p.texture.palette_colors);
     p.texture.dithering      = json_get<bool>(t, "dithering", p.texture.dithering);
+    p.texture.bilinear       = json_get<std::string>(t, "filtering", "bilinear") != "nearest";
+    p.texture.uv_layout      = json_get<std::string>(t, "uv_layout", p.texture.uv_layout);
     p.texture.count          = json_get<int>(t, "count", p.texture.count);
+    p.texture.extra_pages.clear();
+    for (const Json& pg : json_array_or_empty(t, "pages")) {
+        if (!pg.is_object()) continue;
+        TexturePage page;
+        page.name   = json_get<std::string>(pg, "name", page.name);
+        page.width  = std::clamp(json_get<int>(pg, "width", page.width), 16, 4096);
+        page.height = std::clamp(json_get<int>(pg, "height", page.height), 16, 4096);
+        page.camera = json_get<std::string>(pg, "camera", page.camera);
+        p.texture.extra_pages.push_back(page);
+    }
     p.require_uvs               = json_get<bool>(t, "require_uvs", p.require_uvs);
     p.require_vertex_colors     = json_get<bool>(t, "require_vertex_colors", p.require_vertex_colors);
     p.bake_lighting_to_diffuse  = json_get<bool>(t, "bake_lighting_to_diffuse", p.bake_lighting_to_diffuse);
@@ -223,6 +249,12 @@ TargetProfile TargetProfile::from_json(const Json& j, std::string* error)
     const Json& f = json_object_or_empty(j, "framing");
     p.reference_height_m = json_get<float>(f, "reference_height_m", p.reference_height_m);
     p.turntable_views    = json_get<int>(f, "turntable_views", p.turntable_views);
+    {
+        std::vector<float> pitches;
+        for (const Json& v : json_array_or_empty(f, "turntable_pitches"))
+            if (v.is_number()) pitches.push_back(std::clamp(v.get<float>(), -80.0f, 80.0f));
+        if (!pitches.empty()) p.turntable_pitches = pitches;
+    }
     const Json& cams = json_array_or_empty(f, "cameras");
     if (!cams.empty()) {
         p.cameras.clear();
@@ -241,6 +273,7 @@ void TargetProfile::clamp()
 {
     max_triangles       = std::clamp(max_triangles, 12, 2000000);
     max_vertices        = std::clamp(max_vertices, 8, 2000000);
+    budget_tolerance    = std::clamp(budget_tolerance, 0.0f, 0.25f);
     max_shells          = std::max(0, max_shells);
     max_bone_influences = std::clamp(max_bone_influences, 0, 4);
     vertex_cache_size   = std::clamp(vertex_cache_size, 4, 64);

@@ -30,13 +30,16 @@ struct RemeshOptions {
     // starting point and stable across a wide range of inputs.
     float split_ratio    = 1.333f;
     float collapse_ratio = 0.800f;
+    // A collapse that would leave an edge longer than this multiple of the
+    // target is refused (0 disables). See the collapse step for why.
+    float collapse_max_edge_ratio = 1.333f;
     // Tangential relaxation strength per pass, 0..1.
     float relax_strength = 0.6f;
     int   relax_passes   = 1;
     // Reject a flip or collapse that rotates a face more than this.
     float max_normal_flip_degrees = 70.0f;
     // Start the remesh from a quadric pass at this multiple of the budget.
-    float prepass_multiplier = 3.5f;
+    float prepass_multiplier = 6.0f;
     // Quad pairing threshold; the knob panel scales it.
     float quad_quality_floor = 0.25f;
     bool  pair_into_quads    = true;

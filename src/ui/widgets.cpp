@@ -280,13 +280,13 @@ void meter(const char* label, float value, float limit, const char* value_text)
     ImGui::Dummy({full, height});
 }
 
-void progress_bar(float fraction, const char* overlay, float height)
+void progress_bar(float fraction, const char* overlay, float height, float width)
 {
     const Palette& p = palette();
     if (height <= 0.0f) height = ImGui::GetFrameHeight() * 0.62f;
 
     const ImVec2 pos  = ImGui::GetCursorScreenPos();
-    const float  full = ImGui::GetContentRegionAvail().x;
+    const float  full = width > 0.0f ? width : ImGui::GetContentRegionAvail().x;
     const float  r    = height * 0.5f;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();

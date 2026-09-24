@@ -105,20 +105,43 @@ struct Dyn {
         return tri[t * 3] == v || tri[t * 3 + 1] == v || tri[t * 3 + 2] == v;
     }
 
-    Vec3 normal_of(uint32_t t) const
+    // Area vectors, unnormalised. normalize() has an absolute epsilon, and the
+    // loader works in metres: on a small asset every millimetre triangle came
+    // back with a zero normal and every collapse and flip was refused as a fold.
+    // The tests below compare these against their own lengths instead.
+    Vec3 area_of(uint32_t t) const
     {
         const Vec3 a = pos[tri[t * 3]], b = pos[tri[t * 3 + 1]], c = pos[tri[t * 3 + 2]];
-        return normalize(cross(b - a, c - a));
+        return cross(b - a, c - a);
     }
 
-    Vec3 normal_with(uint32_t t, uint32_t replaced, Vec3 np) const
+    Vec3 area_with(uint32_t t, uint32_t replaced, Vec3 np) const
     {
         Vec3 p[3];
         for (int i = 0; i < 3; ++i) {
             const uint32_t v = tri[t * 3 + i];
             p[i] = (v == replaced) ? np : pos[v];
         }
-        return normalize(cross(p[1] - p[0], p[2] - p[0]));
+        return cross(p[1] - p[0], p[2] - p[0]);
+    }
+
+    static Vec3 unit(Vec3 v)
+    {
+        const float l = length(v);
+        return l > 1e-30f ? v / l : Vec3{};
+    }
+
+    Vec3 normal_of(uint32_t t) const { return unit(area_of(t)); }
+
+    // True when moving a corner of `t` turns it over, or squashes it to
+    // nothing relative to what it was. A triangle that was already degenerate
+    // has no orientation to lose.
+    bool folds(Vec3 before, Vec3 after) const
+    {
+        const float lb = length2(before), la = length2(after);
+        if (lb <= 0.0f) return false;
+        if (la <= lb * 1e-10f) return true;
+        return dot(before, after) < flip_cos * std::sqrt(lb * la);
     }
 
     void compact_adjacency(uint32_t v)
@@ -240,20 +263,34 @@ struct Dyn {
         size_t common = 0;
         for (uint32_t w : nu)
             if (std::find(nv.begin(), nv.end(), w) != nv.end()) ++common;
-        return common == face_count;
+        if (common != face_count) return false;
+
+        // Nor may a face round u, renamed onto v, duplicate one v already has:
+        // that is a triangle stored twice, wound opposite ways, which the
+        // hard rules then delete as non manifold.
+        for (uint32_t t : vtri[u]) {
+            if (!tri_alive[t] || has(t, v)) continue;
+            uint32_t a = kInvalidIndex, b = kInvalidIndex;
+            for (int k = 0; k < 3; ++k) {
+                const uint32_t w = tri[t * 3 + k];
+                if (w == u) continue;
+                (a == kInvalidIndex ? a : b) = w;
+            }
+            for (uint32_t o : vtri[v])
+                if (tri_alive[o] && has(o, a) && has(o, b)) return false;
+        }
+        return true;
     }
 
     bool would_flip_normals(uint32_t u, uint32_t v, Vec3 np) const
     {
         for (uint32_t t : vtri[u]) {
             if (!tri_alive[t] || has(t, v)) continue;
-            const Vec3 after = normal_with(t, u, np);
-            if (length2(after) < 1e-16f || dot(normal_of(t), after) < flip_cos) return true;
+            if (folds(area_of(t), area_with(t, u, np))) return true;
         }
         for (uint32_t t : vtri[v]) {
             if (!tri_alive[t] || has(t, u)) continue;
-            const Vec3 after = normal_with(t, v, np);
-            if (length2(after) < 1e-16f || dot(normal_of(t), after) < flip_cos) return true;
+            if (folds(area_of(t), area_with(t, v, np))) return true;
         }
         return false;
     }
@@ -323,12 +360,12 @@ struct Dyn {
 
         // Quad boundary, counter clockwise: u, wb, v, wf.
         const Vec3 pa = pos[u], pb = pos[wb], pc = pos[v], pd = pos[wf];
-        const Vec3 before0 = normal_of(t0), before1 = normal_of(t1);
-        const Vec3 after0  = normalize(cross(pb - pa, pd - pa));   // (u, wb, wf)
-        const Vec3 after1  = normalize(cross(pc - pb, pd - pb));   // (wb, v, wf)
-        if (length2(after0) < 1e-16f || length2(after1) < 1e-16f) return false;
-        const Vec3 avg_before = normalize(before0 + before1);
-        if (dot(avg_before, after0) < flip_cos || dot(avg_before, after1) < flip_cos) return false;
+        const Vec3 before = area_of(t0) + area_of(t1);
+        const Vec3 after0 = cross(pb - pa, pd - pa);   // (u, wb, wf)
+        const Vec3 after1 = cross(pc - pb, pd - pb);   // (wb, v, wf)
+        // Each new face is judged against the pair it replaces, scaled to its
+        // own share, so a flip that leaves one sliver is refused like a fold.
+        if (folds(before * 0.5f, after0) || folds(before * 0.5f, after1)) return false;
 
         const uint16_t region = tri_region[fwd];
         kill_triangle(t0);
@@ -595,6 +632,49 @@ RemeshResult quad_field_retopo(const Mesh& mesh, const MeshAnalysis& analysis,
             Vec3 np = dyn.pinned[into] && !dyn.pinned[from] ? dyn.pos[into]
                                                            : sampler.project(mid);
             np = snap(np, plane);
+            // Botsch and Kobbelt's guard: a collapse that leaves an edge the
+            // next split pass would cut again is refused. Without it a small
+            // closed piece - a foot, a thumb - folds into a handful of long
+            // edges spanning it, the splits put their midpoints back on
+            // whichever side is nearest, and each pass erodes it further: a
+            // pair of feet the field gave sixty triangles came out with four.
+            // An edge far below the target is exempt: left alone it is a
+            // sliver, and the hard rules' weld then merges its ends with none
+            // of these checks.
+            const float cmr = opts.collapse_max_edge_ratio;
+            bool too_long = false;
+            for (uint32_t end : {from, into}) {
+                if (cmr <= 0.0f || len < target * 0.25f) break;
+                dyn.neighbours(end, neighbour_scratch);
+                for (uint32_t n : neighbour_scratch)
+                    if (n != from && n != into &&
+                        length(dyn.pos[n] - np) > target * cmr) { too_long = true; break; }
+                if (too_long) break;
+            }
+            if (too_long) continue;
+            // Nor may a face it leaves stand off the surface. Across a narrow
+            // gap - an armpit, between the legs - the nearest point of one
+            // corner is on the arm and of another on the body, and the face
+            // between them is a web over the gap: on an A-pose figure it gave
+            // the shoulder three times its area, which the mirror then kept
+            // and the unwrap cut into hundreds of charts.
+            bool stands_off = false;
+            if (cmr > 0.0f && len >= target * 0.25f) {
+                for (uint32_t end : {from, into}) {
+                    for (uint32_t t : dyn.vtri[end]) {
+                        if (!dyn.tri_alive[t] || (dyn.has(t, from) && dyn.has(t, into))) continue;
+                        Vec3 c{};
+                        for (int k = 0; k < 3; ++k) {
+                            const uint32_t w = dyn.tri[t * 3 + k];
+                            c += (w == from || w == into) ? np : dyn.pos[w];
+                        }
+                        c = c * (1.0f / 3.0f);
+                        if (length(sampler.project(c) - c) > target * 0.35f) { stands_off = true; break; }
+                    }
+                    if (stands_off) break;
+                }
+            }
+            if (stands_off) continue;
             const size_t removed = dyn.collapse_edge(from, into, np, scratch);
             if (removed) ++result.collapses;
         }
@@ -661,8 +741,18 @@ RemeshResult quad_field_retopo(const Mesh& mesh, const MeshAnalysis& analysis,
                 Vec3 delta = centroid - dyn.pos[v];
                 delta = delta - normal * dot(delta, normal);
                 Vec3 candidate = dyn.pos[v] + delta * clampf(opts.relax_strength, 0.0f, 1.0f);
-                candidate = sampler.project(candidate);
-                moved[v]  = snap(candidate, dyn.on_plane[v] != 0);
+                candidate = snap(sampler.project(candidate), dyn.on_plane[v] != 0);
+                // The nearest point on a thin limb can be on its far side, and
+                // a vertex moved there turns its faces over: the surface
+                // crumples, gains area it does not have, and the unwrap cuts
+                // it into hundreds of charts. Such a move stays where it was.
+                bool folds_over = false;
+                for (uint32_t t : dyn.vtri[v])
+                    if (dyn.tri_alive[t] && dyn.folds(dyn.area_of(t), dyn.area_with(t, v, candidate))) {
+                        folds_over = true;
+                        break;
+                    }
+                if (!folds_over) moved[v] = candidate;
             }
             dyn.pos.swap(moved);
         }
@@ -769,6 +859,21 @@ RemeshResult quad_field_retopo(const Mesh& mesh, const MeshAnalysis& analysis,
             if (keep_regions) new_regions.push_back(r);
         };
 
+        // Every edge the mesh has. Swapping a quad's diagonal is a flip, and
+        // like a flip it must not create an edge that already exists: on a
+        // thin limb the far corners of a quad are often joined round the back,
+        // and a second b-d there is a non manifold edge, which the mirror then
+        // doubles and the unwrap shatters around.
+        auto key = [](uint32_t a, uint32_t b) {
+            if (a > b) std::swap(a, b);
+            return (uint64_t(a) << 32) | b;
+        };
+        std::unordered_set<uint64_t> existing;
+        existing.reserve(out.indices.size());
+        for (size_t t = 0; t < out.triangle_count(); ++t)
+            for (int i = 0; i < 3; ++i)
+                existing.insert(key(out.indices[t * 3 + i], out.indices[t * 3 + (i + 1) % 3]));
+
         for (const Pair& p : candidates) {
             if (taken[p.t0] || taken[p.t1]) continue;
             taken[p.t0] = taken[p.t1] = 1;
@@ -782,7 +887,12 @@ RemeshResult quad_field_retopo(const Mesh& mesh, const MeshAnalysis& analysis,
             const float diag_bd = length(pd - pb);
             const uint16_t r = keep_regions ? out.tri_region[p.t0] : kNoRegion;
 
-            if (diag_ac <= diag_bd) {
+            // a-c is the edge the pair shares; b-d would be a new one.
+            bool use_ac = diag_ac <= diag_bd;
+            if (!use_ac && existing.count(key(p.b, p.d))) use_ac = true;
+            if (!use_ac) existing.insert(key(p.b, p.d));
+
+            if (use_ac) {
                 emit(p.a, p.b, p.c, r);
                 emit(p.a, p.c, p.d, r);
             } else {

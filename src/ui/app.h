@@ -12,12 +12,24 @@ struct AppOptions {
     bool        no_llm   = false;   // deterministic half only
     bool        force_llm = false;  // run the director whatever the settings say
     bool        verbose  = false;   // mirror the log to stderr
+    // Ignore settings.json. The window saves whatever was last clicked, and a
+    // headless run that quietly inherits it is not reproducible: the benchmark
+    // and the tests pass this together with an explicit --profile.
+    bool        no_settings = false;
+    // Keep small pieces the camera cannot see (eyeballs behind their lids) in
+    // the low poly. For comparing against the default, which drops them.
+    bool        keep_hidden = false;
     bool        autorun  = false;   // start the pipeline as soon as the window opens
     std::string backend;            // auto | quad_field | quadric, overrides the panel
+    // A run's reports/prompts folder: the director's replies are read back from
+    // it instead of asking a model. Implies --llm.
+    std::string replay;
 
     // Region split. Empty keeps whatever settings.json holds; the rest override
     // it for this run only, which is how the two paths get compared on one mesh.
     std::string segmenter;          // geometric | sam | auto
+    std::string llm_model;          // overrides the Claude CLI director's model
+    std::string llm_path;           // overrides the Claude CLI executable
     std::string sam_checkpoint;
     std::string sam_device;         // auto | cuda | cpu | mps
     // Fetch a checkpoint and exit. The same download the Director panel offers,

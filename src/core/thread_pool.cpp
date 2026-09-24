@@ -3,6 +3,7 @@
 #include "core/log.h"
 
 #include <algorithm>
+#include <exception>
 #include <memory>
 
 namespace rd {
@@ -46,7 +47,18 @@ void ThreadPool::worker_main(unsigned /*lane*/)
             job = std::move(jobs_.front());
             jobs_.pop();
         }
-        job();
+
+        // Nothing in the engine path is supposed to throw, but an exception
+        // reaching the top of a worker is std::terminate: the process dies with
+        // no log line, no error in the interface and nothing to go on. Whatever
+        // the job did wrong, the pool survives to report it.
+        try {
+            job();
+        } catch (const std::exception& e) {
+            RD_ERROR("worker job threw: %s", e.what());
+        } catch (...) {
+            RD_ERROR("worker job threw an unknown exception");
+        }
     }
 }
 
@@ -111,26 +123,49 @@ void ThreadPool::parallel_ranges(size_t count, size_t min_chunk,
             if (idx >= state->chunk_count) return;
             const size_t begin = idx * state->chunk;
             const size_t end   = std::min(state->count, begin + state->chunk);
+            // The chunk is counted off even if body throws. worker_main catches
+            // and logs whatever escapes a helper, and a chunk that never
+            // reported back would leave the caller waiting forever - a hang
+            // with no log line is worse than the crash the catch is there for.
+            struct Done {
+                LaneState& s;
+                ~Done()
+                {
+                    // Signalled while holding the lock, so a waiter that evaluated
+                    // the predicate just before the decrement cannot miss the wakeup.
+                    if (s.remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                        std::lock_guard lock(s.mutex);
+                        s.cv.notify_one();
+                    }
+                }
+            } done{*state};
             body(begin, end, lane);
-            // Signalled while holding the lock, so a waiter that evaluated the
-            // predicate just before the decrement cannot miss the wakeup.
-            if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                std::lock_guard lock(state->mutex);
-                state->cv.notify_one();
-            }
         }
     };
 
     const size_t helpers = std::min<size_t>(workers_.size(), chunk_count - 1);
+    if (helpers == 0) {
+        run_lane(0);
+        return;
+    }
+
     for (size_t i = 0; i < helpers; ++i) {
         const unsigned lane = static_cast<unsigned>(i + 1);
         enqueue([run_lane, lane] { run_lane(lane); });
     }
 
-    run_lane(0);
+    // If the caller's own lane throws, the helpers may still be inside `body`,
+    // which lives on the caller's side; wait them out before letting it unwind.
+    std::exception_ptr failure;
+    try {
+        run_lane(0);
+    } catch (...) {
+        failure = std::current_exception();
+    }
 
     std::unique_lock lock(state->mutex);
     state->cv.wait(lock, [&] { return state->remaining.load(std::memory_order_acquire) == 0; });
+    if (failure) std::rethrow_exception(failure);
 }
 
 void ThreadPool::parallel_for(size_t count, size_t min_chunk,

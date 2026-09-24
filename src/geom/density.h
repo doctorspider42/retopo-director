@@ -71,6 +71,23 @@ struct DensityOptions {
     // Calibration passes that rescale each region so it actually lands on
     // budget rather than near it.
     int   calibration_passes = 4;
+    // Thin features: where the edge length would outgrow the local thickness a
+    // limb collapses to a blade and a finger disappears, so thin parts take a
+    // smaller edge than broad parts of the same region. An edge of half the
+    // thickness puts about six segments around a round cross section, the
+    // fewest that still reads as round from a game camera.
+    float thin_edge_ratio = 0.5f;
+    float thin_strength   = 1.0f;
+    // Below this share of the bbox diagonal a "thickness" is two layers of a
+    // double sided sheet (a cloak, a hair card), not a volume, and is ignored:
+    // honouring it would pour the whole budget into a flat plane.
+    float thin_sheet_cutoff_rel = 0.0025f;
+    // And no feature is protected below this fraction of the edge the whole
+    // budget would give an evenly spread mesh. A whisker or the last inch of a
+    // tail is thinner than anything the budget can resolve; honouring it made
+    // the rat's whiskers a few thousand triangles too small for the weld to
+    // keep, and the rest of the rat paid for them.
+    float thin_floor_of_mean_edge = 0.15f;
     // Rays used for the silhouette visibility test.
     bool  compute_silhouette = true;
 };

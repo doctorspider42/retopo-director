@@ -28,8 +28,13 @@ void print_usage()
         "  --no-llm          Skip the director; run the deterministic half only\n"
         "  --llm             Run the director even when the saved settings turn it off\n"
         "  --backend <name>  Force auto | quad_field | quadric\n"
+        "  --replay <dir>    Answer the director from a recorded run (reports/prompts)\n"
+        "  --llm-model <id>  Claude CLI director model (default claude-opus-5-5)\n"
+        "  --llm-path <exe>  Claude CLI to run, when the one on PATH is too old for it\n"
         "  --run             Start the pipeline as soon as the window opens\n"
         "  --verbose         Mirror the log to stderr\n"
+        "  --no-settings     Ignore the saved settings (reproducible runs)\n"
+        "  --keep-hidden     Keep small, mostly hidden pieces (eyeballs) in the low poly\n"
         "  --no-gpu          Do not create a GL context, even in headless mode\n"
         "\n"
         "  --segmenter <name>       Region split: geometric | sam | auto\n"
@@ -77,10 +82,20 @@ int main(int argc, char** argv)
             opts.force_llm = true;
         } else if (!std::strcmp(a, "--verbose")) {
             opts.verbose = true;
+        } else if (!std::strcmp(a, "--keep-hidden")) {
+            opts.keep_hidden = true;
+        } else if (!std::strcmp(a, "--no-settings")) {
+            opts.no_settings = true;
         } else if (!std::strcmp(a, "--run")) {
             opts.autorun = true;
+        } else if (!std::strcmp(a, "--replay")) {
+            opts.replay = next("--replay");
         } else if (!std::strcmp(a, "--backend")) {
             opts.backend = next("--backend");
+        } else if (!std::strcmp(a, "--llm-path")) {
+            opts.llm_path = next("--llm-path");
+        } else if (!std::strcmp(a, "--llm-model")) {
+            opts.llm_model = next("--llm-model");
         } else if (!std::strcmp(a, "--segmenter")) {
             opts.segmenter = next("--segmenter");
         } else if (!std::strcmp(a, "--sam-checkpoint")) {

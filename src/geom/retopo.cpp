@@ -69,7 +69,26 @@ RetopoResult run_retopo(const Mesh& source, const MeshAnalysis& analysis,
         //
         // Quadric still wins on hard surface, where those creases are the shape
         // and an isotropic remesh would round them off.
-        const bool organic = skinned || crease_ratio < opts.hard_surface_crease_ratio;
+        //
+        // Creases alone do not make hard surface. A scanned animal trips the
+        // angle test all over its fur - the street rat is 18.7% creases, more
+        // than a car's body - and sent to the quadric it came back as fans the
+        // unwrap cut into 162 charts, 12 px off its outline; the quad field
+        // gets it to 2.6 px. What sets a machined object apart is that its
+        // creases run between flat panels: 44% of the car's and the trilobite's
+        // edges join coplanar faces, 16% of the rat's. The smooth synthetic
+        // meshes are flatter still, but have no creases to speak of.
+        size_t flat = 0, interior = 0;
+        const float flat_cos = std::cos(1.0f * kDeg2Rad);
+        for (const MeshTopology::Edge& e : analysis.topology.edges) {
+            if (e.tri1 == kInvalidIndex || e.tri1 >= analysis.tri_normal.size()) continue;
+            ++interior;
+            if (dot(analysis.tri_normal[e.tri0], analysis.tri_normal[e.tri1]) > flat_cos) ++flat;
+        }
+        const float flat_share = float(double(flat) / double(std::max<size_t>(1, interior)));
+        const bool  hard_surface = crease_ratio >= opts.hard_surface_crease_ratio &&
+                                   flat_share >= opts.hard_surface_flat_share;
+        const bool  organic = skinned || !hard_surface;
 
         // None of which matters if there is no surface to walk over. The quad
         // field is an isotropic remesh: it needs one closed manifold shell. Give
@@ -86,13 +105,38 @@ RetopoResult run_retopo(const Mesh& source, const MeshAnalysis& analysis,
         // The two losses on assembled organic sources were bad enough to fail
         // validation, so the shell test comes first and the crease ratio only
         // decides between them once the surface is actually walkable.
-        const bool walkable = analysis.stats.shells == 1 && analysis.stats.closed;
+        //
+        // What counts is the surface the low poly will actually have. Pieces
+        // the hard rules are going to drop - eyeballs, brows, straps lying on
+        // the skin - do not make a character "assembled", and a handful of
+        // open edges round an eye socket do not make its body unwalkable. On
+        // the superhero those two together sent a clean body to the quadric,
+        // which is what fanned its hands into slivers.
+        size_t kept_shells = 0;
+        for (uint32_t s = 0; s < analysis.shell_area_share.size(); ++s)
+            if (!source_shell_is_droppable(analysis, s, opts.hard_rules)) ++kept_shells;
+        if (analysis.shell_area_share.empty()) kept_shells = analysis.stats.shells;
+
+        size_t main_edges = 0, main_boundary = 0;
+        for (const MeshTopology::Edge& e : analysis.topology.edges) {
+            if (e.tri0 >= analysis.tri_shell.size() ||
+                analysis.tri_shell[e.tri0] != analysis.largest_shell)
+                continue;
+            ++main_edges;
+            if (e.tri1 == kInvalidIndex) ++main_boundary;
+        }
+        // Half a percent of open edges is a few small holes, not a costume.
+        const bool main_closed = analysis.stats.closed ||
+                                 (main_edges > 0 && main_boundary * 200 <= main_edges);
+        const bool walkable = kept_shells == 1 && main_closed;
         backend = (walkable && organic) ? RetopoBackend::QuadField : RetopoBackend::Quadric;
 
-        RD_INFO("auto backend: %zu shell%s, %s, %.1f%% of edges are creases: %s",
-                analysis.stats.shells, analysis.stats.shells == 1 ? "" : "s",
-                analysis.stats.closed ? "watertight" : "not watertight",
-                crease_ratio * 100.0f,
+        RD_INFO("auto backend: %zu shell%s (%zu kept), %s, %.1f%% of edges are creases, "
+                "%.0f%% flat: %s",
+                analysis.stats.shells, analysis.stats.shells == 1 ? "" : "s", kept_shells,
+                analysis.stats.closed ? "watertight"
+                                      : (main_closed ? "main piece nearly closed" : "not watertight"),
+                crease_ratio * 100.0f, flat_share * 100.0f,
                 backend == RetopoBackend::QuadField
                     ? "one walkable shell and organic, using the quad field"
                     : (!walkable ? "assembled from pieces, so the quad field would starve"
@@ -143,9 +187,25 @@ RetopoResult run_retopo(const Mesh& source, const MeshAnalysis& analysis,
         return result;
     }
 
+    // --- thin tubes -----------------------------------------------------------
+    // Before the hard rules, so the mirror and the manifold and winding
+    // repairs see the swept tubes like any other surface.
+    {
+        const bool mirrored = panel.global.enforce_symmetry && profile.require_symmetry;
+        const TubeReport tubes = sweep_thin_tubes(result.mesh, source, analysis, seg, mirrored,
+                                                  opts.tubes);
+        for (const std::string& n : tubes.notes) RD_DEBUG("tubes: %s", n.c_str());
+    }
+
     // --- hard rules ---------------------------------------------------------
     report(0.72f, "hard rules");
     HardRuleOptions hopts = opts.hard_rules;
+    hopts.total_triangle_cap = panel.total_budget();
+    for (const RegionKnobs& k : panel.regions) {
+        if (k.id >= hopts.region_keep_priority.size())
+            hopts.region_keep_priority.resize(size_t(k.id) + 1, 0.5f);
+        hopts.region_keep_priority[k.id] = k.detail_priority;
+    }
     result.hard_rules = apply_hard_rules(result.mesh, source, analysis.bvh, analysis,
                                          profile, panel.global, analysis.symmetry, hopts);
 

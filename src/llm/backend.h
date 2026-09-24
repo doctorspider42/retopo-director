@@ -18,7 +18,10 @@
 
 namespace rd {
 
-enum class LlmBackendKind : uint8_t { Disabled = 0, ClaudeCli, CodexCli, OpenAiApi };
+// Replay answers every request from replies a previous run recorded, in the
+// order it recorded them. No model, no network, byte-for-byte repeatable: it is
+// how the prompt layer and the director's parsing get tested.
+enum class LlmBackendKind : uint8_t { Disabled = 0, ClaudeCli, CodexCli, OpenAiApi, Replay };
 
 const char*    llm_backend_name(LlmBackendKind k);
 const char*    llm_backend_label(LlmBackendKind k);
@@ -58,7 +61,11 @@ struct LlmConfig {
 
     // Claude CLI
     std::string claude_path  = "claude";
-    std::string claude_model;                  // empty means the CLI default
+    // Pinned rather than left to the CLI: its default is whatever that install
+    // was last set to, which made two runs of the same command ask two different
+    // models - the recorded runs so far were answered by an old Opus. "default"
+    // asks for the CLI default.
+    std::string claude_model = "claude-opus-5-5";
     std::vector<std::string> claude_extra_args;
 
     // Codex CLI
@@ -71,6 +78,10 @@ struct LlmConfig {
     std::string openai_api_key;                // read from OPENAI_API_KEY when empty
     std::string openai_model    = "gpt-4o";
     bool        openai_send_images = true;
+
+    // Replay: a run's reports/prompts folder. Each request labelled L takes the
+    // next NN_L_text.txt in name order; see Pipeline::ask for the writing side.
+    std::string replay_dir;
 
     int  timeout_seconds = 300;
     bool save_transcript = true;

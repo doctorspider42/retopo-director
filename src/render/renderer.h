@@ -44,7 +44,8 @@ public:
     void upload_attribute(const std::vector<Vec4>& per_vertex_color);
     // Convenience: expands per triangle colours (region overlay) onto vertices.
     void upload_face_attribute(const Mesh& mesh, const std::vector<Vec4>& per_face_color);
-    void set_texture(const Texture& tex);
+    // `bilinear` false samples nearest, the way a target without filtering would.
+    void set_texture(const Texture& tex, bool bilinear = true);
     void clear_texture();
     void release();
 
@@ -86,6 +87,8 @@ struct RenderOptions {
     bool       flip_y          = true;   // PNG rows run top down
     // Silhouette mode renders white on black regardless of the background.
     bool       backface_cull   = true;
+    // Texture magnification, as the target does it (TextureBudget::bilinear).
+    bool       bilinear_texture = true;
 };
 
 class Renderer {
@@ -167,6 +170,12 @@ ViewSet render_view_set(Renderer& renderer, const Mesh& mesh,
 struct SilhouetteError {
     float mean  = 0.0f;
     float worst = 0.0f;
+    // The same disagreement divided by the length of the reference outline:
+    // how far, in pixels, the outline is off on average. The fraction above
+    // depends on the shape as much as on the fit - a one pixel miss is 2% of
+    // a sphere and 15% of a figure with thin arms - while this does not. Below
+    // about a pixel the fit is as close as the render can show.
+    float outline_px = 0.0f;
     std::string worst_view;
     std::vector<std::pair<std::string, float>> per_view;
 };

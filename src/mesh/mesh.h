@@ -95,13 +95,25 @@ struct Mesh {
     std::string              name;
     std::vector<Vec3>        positions;
     std::vector<Vec3>        normals;   // empty or positions.size()
-    std::vector<Vec2>        uvs;       // empty or positions.size()
+    std::vector<Vec2>        uvs;       // empty or positions.size(); v = 0 is the image's top row
     std::vector<Vec4>        colors;    // empty or positions.size(), linear RGBA
+    // True when `colors` already carry baked lighting - set by the bake, never
+    // by a loader. A source's vertex colours are albedo or, as often, a mask
+    // channel the artist painted for a shader (Quaternius ships every character
+    // with COLOR_0 all white), and drawing those unlit turned the reference
+    // renders the director judges against into a flat white cut-out.
+    bool                     colors_prelit = false;
     std::vector<SkinVertex>  skin;      // empty or positions.size()
     std::vector<uint32_t>    indices;   // 3 per triangle
 
     // Optional per triangle region assignment produced by the segmenter.
     std::vector<uint16_t>    tri_region;
+
+    // Which texture page each triangle's uvs point into, set by the bake when
+    // the profile has more than one page (a face page, say). Empty means every
+    // triangle is on page 0.
+    std::vector<uint8_t>     tri_page;
+    bool has_pages() const { return !tri_page.empty() && tri_page.size() == triangle_count(); }
 
     // Optional per triangle material index into `materials`, filled by the
     // loader. Kept per triangle rather than per vertex because that is how

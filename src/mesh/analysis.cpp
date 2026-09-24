@@ -1,5 +1,7 @@
 #include "mesh/analysis.h"
 
+#include "mesh/visibility.h"
+
 #include "core/log.h"
 #include "core/thread_pool.h"
 #include "core/util.h"
@@ -52,6 +54,13 @@ void MeshAnalysis::clear()
     joint_distance.clear();
     nearest_joint.clear();
     ambient.clear();
+    thickness.clear();
+    tri_hidden.clear();
+    tri_shell.clear();
+    shell_area_share.clear();
+    shell_visible_share.clear();
+    shell_offset.clear();
+    largest_shell = 0;
     vertex_area.clear();
     tri_curvature.clear();
     tri_area.clear();
@@ -173,7 +182,7 @@ void analyse_mesh(const Mesh& mesh, MeshAnalysis& out, const AnalysisOptions& op
     report(0.30f, "dihedral angles");
     const size_t ecount = out.topology.edges.size();
     out.edge_dihedral.assign(ecount, 0.0f);
-    out.edge_sharp.assign(ecount, false);
+    out.edge_sharp.assign(ecount, 0);
     const float sharp_limit = opts.sharp_angle_degrees * kDeg2Rad;
 
     ThreadPool::shared().parallel_ranges(ecount, 2048, [&](size_t b, size_t e, unsigned) {
@@ -342,6 +351,105 @@ void analyse_mesh(const Mesh& mesh, MeshAnalysis& out, const AnalysisOptions& op
         });
     }
 
+    // --- thickness ---------------------------------------------------------
+    // A shape diameter estimate: how far an inward ray travels before it meets
+    // the other side. It is what tells a finger from a palm with the same
+    // curvature, and what the density field needs to keep a limb round rather
+    // than collapsing it to a blade when the edge length outgrows it.
+    out.thickness.assign(vcount, out.bbox_diagonal);
+    if (opts.thickness_rays > 0) {
+        report(0.85f, "thickness");
+        const int   rays   = opts.thickness_rays;
+        const float offset = out.bbox_diagonal * 1e-4f;
+        // 20 degrees: wide enough to step past a single bad triangle, narrow
+        // enough that a ray from the inside of an elbow does not find the forearm.
+        const float spread = 0.36f;
+
+        ThreadPool::shared().parallel_ranges(vcount, 256, [&](size_t b, size_t e, unsigned) {
+            std::vector<float> hits;
+            for (size_t v = b; v < e; ++v) {
+                const Vec3 n = vnormals[v];
+                if (length2(n) < 0.5f) continue;
+                Vec3 tangent, bitangent;
+                basis_from_normal(n, tangent, bitangent);
+                const Vec3 origin = mesh.positions[v] - n * offset;
+
+                hits.clear();
+                for (int r = 0; r < rays; ++r) {
+                    Vec3 dir = -n;
+                    if (r > 0) {
+                        const float a = 6.2831853f * float(r - 1) / float(rays - 1);
+                        dir = normalize(dir + (tangent * std::cos(a) + bitangent * std::sin(a)) * spread);
+                    }
+                    const RayHit hit = out.bvh.intersect(origin, dir, offset, out.bbox_diagonal);
+                    hits.push_back(hit.hit() ? hit.t : out.bbox_diagonal);
+                }
+                std::nth_element(hits.begin(), hits.begin() + hits.size() / 2, hits.end());
+                out.thickness[v] = hits[hits.size() / 2];
+            }
+        });
+    }
+
+    // --- pieces and what can be seen of them ----------------------------------
+    {
+        const uint32_t shells = label_shells(mesh, out.tri_shell);
+        out.tri_hidden.assign(tcount, 0);
+        if (opts.visibility_rays > 0) {
+            report(0.87f, "visibility");
+            EnclosedOptions eo;
+            eo.rays = opts.visibility_rays;
+            find_enclosed_triangles(mesh, out.bvh, out.tri_hidden, eo);
+        }
+        std::vector<double> area(shells, 0.0), seen(shells, 0.0);
+        double total = 0.0;
+        for (size_t t = 0; t < tcount; ++t) {
+            const double a = out.tri_area[t];
+            area[out.tri_shell[t]] += a;
+            if (!out.tri_hidden[t]) seen[out.tri_shell[t]] += a;
+            total += a;
+        }
+        out.shell_area_share.assign(shells, 0.0f);
+        out.shell_visible_share.assign(shells, 1.0f);
+        for (uint32_t s = 0; s < shells; ++s) {
+            out.shell_area_share[s]    = total > 0.0 ? float(area[s] / total) : 0.0f;
+            out.shell_visible_share[s] = area[s] > 0.0 ? float(seen[s] / area[s]) : 1.0f;
+        }
+        out.largest_shell = uint32_t(std::max_element(out.shell_area_share.begin(),
+                                                      out.shell_area_share.end()) -
+                                     out.shell_area_share.begin());
+
+        // Stand-off of every small piece from the largest, against a BVH of
+        // the largest piece alone - the full one would answer "zero, you are
+        // on yourself" for every query.
+        out.shell_offset.assign(shells, 0.0f);
+        if (shells > 1) {
+            std::vector<bool> is_main(tcount);
+            for (size_t t = 0; t < tcount; ++t) is_main[t] = out.tri_shell[t] == out.largest_shell;
+            const Mesh main = mesh_extract(mesh, is_main);
+            Bvh main_bvh;
+            main_bvh.build(main);
+            std::vector<std::vector<float>> dist(shells);
+            for (size_t t = 0; t < tcount; ++t) {
+                const uint32_t s = out.tri_shell[t];
+                if (s == out.largest_shell || out.shell_area_share[s] >= 0.05f) continue;
+                const ClosestHit hit = main_bvh.closest_point(mesh.triangle_centroid(t));
+                dist[s].push_back(hit.hit() ? std::sqrt(hit.distance2) : out.bbox_diagonal);
+            }
+            for (uint32_t s = 0; s < shells; ++s) {
+                if (dist[s].empty()) continue;
+                const size_t k = std::min(dist[s].size() - 1, dist[s].size() * 9 / 10);
+                std::nth_element(dist[s].begin(), dist[s].begin() + k, dist[s].end());
+                out.shell_offset[s] = dist[s][k];
+            }
+        }
+        for (uint32_t s = 0; s < shells && s < 40; ++s)
+            if (s != out.largest_shell && out.shell_area_share[s] < 0.05f)
+                RD_DEBUG("piece %u: %.2f%% of the surface, %.0f%% of it visible, %.2f%% of "
+                         "the model's size off the main surface", s,
+                         out.shell_area_share[s] * 100.0f, out.shell_visible_share[s] * 100.0f,
+                         100.0f * out.shell_offset[s] / std::max(out.bbox_diagonal, kEps));
+    }
+
     // --- symmetry ----------------------------------------------------------
     report(0.90f, "symmetry");
     out.symmetry = detect_symmetry(mesh, out.bvh, opts);
@@ -356,6 +464,56 @@ void analyse_mesh(const Mesh& mesh, MeshAnalysis& out, const AnalysisOptions& op
     if (!out.stats.manifold)
         RD_WARN("mesh has %zu non manifold edges; hard rules will try to repair",
                 out.stats.nonmanifold_edges);
+}
+
+SurfaceError measure_surface_error(const Mesh& source, const Bvh& source_bvh, const Mesh& low,
+                                   int samples)
+{
+    SurfaceError out;
+    if (source.empty() || low.empty() || source_bvh.empty()) return out;
+    Bvh low_bvh;
+    low_bvh.build(low);
+    const float height = std::max(source.bounds().extent().y, 1e-6f);
+
+    // Area weighted points on `m`, from a fixed seed so the number repeats.
+    auto sample = [&](const Mesh& m, int n, std::vector<Vec3>& pts) {
+        const size_t tcount = m.triangle_count();
+        std::vector<double> cdf(tcount);
+        double acc = 0.0;
+        for (size_t t = 0; t < tcount; ++t) { acc += m.triangle_area(t); cdf[t] = acc; }
+        if (acc <= 0.0) return;
+        Rng rng(0x5A11u);
+        for (int i = 0; i < n; ++i) {
+            const double r = double(rng.next_float()) * acc;
+            const size_t t = size_t(std::lower_bound(cdf.begin(), cdf.end(), r) - cdf.begin());
+            float u = rng.next_float(), v = rng.next_float();
+            if (u + v > 1.0f) { u = 1.0f - u; v = 1.0f - v; }
+            Vec3 a, b, c;
+            m.tri_positions(std::min(t, tcount - 1), a, b, c);
+            pts.push_back(a + (b - a) * u + (c - a) * v);
+        }
+    };
+    std::vector<Vec3> from_source, from_low;
+    sample(source, samples, from_source);
+    sample(low, samples / 2, from_low);
+
+    std::vector<float> d(from_source.size() + from_low.size());
+    ThreadPool::shared().parallel_for(from_source.size(), 256, [&](size_t i, unsigned) {
+        const ClosestHit h = low_bvh.closest_point(from_source[i]);
+        d[i] = h.hit() ? std::sqrt(h.distance2) : height;
+    });
+    ThreadPool::shared().parallel_for(from_low.size(), 256, [&](size_t i, unsigned) {
+        const ClosestHit h = source_bvh.closest_point(from_low[i]);
+        d[from_source.size() + i] = h.hit() ? std::sqrt(h.distance2) : height;
+    });
+    if (d.empty()) return out;
+    double sum = 0.0;
+    for (float x : d) sum += x;
+    std::sort(d.begin(), d.end());
+    out.mean  = float(sum / double(d.size())) / height;
+    out.p95   = d[size_t(0.95 * double(d.size() - 1))] / height;
+    out.valid = true;
+    return out;
 }
 
 } // namespace rd

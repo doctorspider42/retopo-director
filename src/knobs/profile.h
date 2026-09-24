@@ -28,12 +28,34 @@ struct ProfileCamera {
     bool        primary       = false;   // weighted higher in silhouette scoring
 };
 
+// A texture page beyond the first: a named part of the model that gets an atlas
+// of its own. The part is whatever the named camera frames - a face camera's
+// page is the head - so a cutscene close up can have the texels it needs
+// without the whole body's atlas growing to match.
+struct TexturePage {
+    std::string name   = "face";
+    int         width  = 512;
+    int         height = 512;
+    std::string camera = "cutscene_face";
+};
+
 struct TextureBudget {
     int  width          = 256;
     int  height         = 256;
     int  palette_colors = 256;   // 256 = 8 bit CLUT, 16 = 4 bit CLUT, 0 = truecolor
     bool dithering      = true;
+    // How the target samples the texture when a texel covers more than a
+    // pixel. The PS2's GS filters bilinearly, and the renders the director and
+    // the viewport show used nearest, which drew every texel as a hard square
+    // and made a 256 atlas look far coarser than it would on the console.
+    bool bilinear       = true;
+    // How the low poly is unwrapped: "parts" cuts one chart per region along
+    // its least visible side (bake/charts.h), "xatlas" lets xatlas find charts.
+    std::string uv_layout = "parts";
     int  count          = 1;     // how many pages the target allows
+    // Pages after the first. The first page is width x height and takes
+    // everything no extra page claims.
+    std::vector<TexturePage> extra_pages;
 };
 
 struct TargetProfile {
@@ -43,6 +65,14 @@ struct TargetProfile {
     // --- hard geometry limits ---------------------------------------------
     int  max_triangles       = 1200;
     int  max_vertices        = 900;
+    // How far past the triangle and vertex limits a run may go, as a fraction
+    // of them, before validation fails instead of warning. The engine still
+    // aims at the limit itself; the margin is there for what comes after the
+    // aim - closing a hole takes two triangles, and a run one triangle over
+    // was otherwise judged the same as one a thousand over. 0 is a hard wall.
+    float budget_tolerance   = 0.0f;
+    int  triangle_ceiling() const { return int(float(max_triangles) * (1.0f + budget_tolerance)); }
+    int  vertex_ceiling()   const { return int(float(max_vertices) * (1.0f + budget_tolerance)); }
     int  max_shells          = 1;      // 0 = unlimited
     int  max_bone_influences = 2;
     bool require_manifold    = true;
@@ -69,6 +99,12 @@ struct TargetProfile {
     float                      reference_height_m = 1.8f;
     std::vector<ProfileCamera> cameras;
     int                        turntable_views = 8;
+    // Elevation of each ring of turntable views, degrees, positive looking
+    // down. One ring at 12 is what every profile had; more rings put more of
+    // the model under the silhouette metric, the director's renders and the
+    // density field's silhouette term - the underside of a prop, the top of a
+    // head - at the cost of more renders per iteration.
+    std::vector<float>         turntable_pitches{12.0f};
 
     // --- director guidance -------------------------------------------------
     // Free text handed to the model verbatim. This is where "3rd person, face

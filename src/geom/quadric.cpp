@@ -169,21 +169,50 @@ struct Simplifier {
         return common == shared.size();
     }
 
+    // Area vectors (twice the area, along the normal), unnormalised on purpose.
+    // normalize() has an absolute epsilon, and the loader hands over metres: a
+    // 15 cm model's millimetre triangles have cross products below it, so every
+    // normal came back zero, every collapse "flipped", and the simplifier stalled
+    // at 12k triangles against a budget of 400. Comparing the raw vectors against
+    // their own lengths is scale free.
+    Vec3 tri_area_vector(uint32_t t) const
+    {
+        const Vec3 a = pos[tri[t * 3]], b = pos[tri[t * 3 + 1]], c = pos[tri[t * 3 + 2]];
+        return cross(b - a, c - a);
+    }
+
+    Vec3 tri_area_vector_with(uint32_t t, uint32_t replaced, Vec3 np) const
+    {
+        Vec3 p[3];
+        for (int i = 0; i < 3; ++i) {
+            const uint32_t v = tri[t * 3 + i];
+            p[i] = (v == replaced) ? np : pos[v];
+        }
+        return cross(p[1] - p[0], p[2] - p[0]);
+    }
+
+    bool flips(uint32_t t, uint32_t moved, Vec3 np) const
+    {
+        const Vec3  before = tri_area_vector(t);
+        const Vec3  after  = tri_area_vector_with(t, moved, np);
+        const float lb = length2(before), la = length2(after);
+        // A triangle that was already degenerate has no orientation to lose,
+        // and refusing to touch it is how slivers get stuck forever.
+        if (lb <= 0.0f) return false;
+        // Collapsing to (almost) nothing is a fold in all but name.
+        if (la <= lb * 1e-10f) return true;
+        return dot(before, after) < flip_cos * std::sqrt(lb * la);
+    }
+
     bool would_flip(uint32_t u, uint32_t v, Vec3 np) const
     {
         for (uint32_t t : vtri[u]) {
             if (!tri_alive[t] || triangle_has(t, v)) continue;
-            const Vec3 before = tri_normal(t);
-            const Vec3 after  = tri_normal_with(t, u, np);
-            if (length2(after) < 1e-16f) return true;
-            if (dot(before, after) < flip_cos) return true;
+            if (flips(t, u, np)) return true;
         }
         for (uint32_t t : vtri[v]) {
             if (!tri_alive[t] || triangle_has(t, u)) continue;
-            const Vec3 before = tri_normal(t);
-            const Vec3 after  = tri_normal_with(t, v, np);
-            if (length2(after) < 1e-16f) return true;
-            if (dot(before, after) < flip_cos) return true;
+            if (flips(t, v, np)) return true;
         }
         return false;
     }
@@ -209,7 +238,15 @@ struct Simplifier {
         if (locked_u && locked_v)      candidate = (pos[u] + pos[v]) * 0.5f;
         else if (locked_u)             candidate = pos[u];
         else if (locked_v)             candidate = pos[v];
-        else if (!q.optimum(candidate)) {
+        else if (!q.optimum(candidate) ||
+                 // Well conditioned by the determinant and still nowhere near
+                 // the edge: the quadric of a thin piece - a cable, a rail, a
+                 // cup handle - is nearly a line, and its "minimum" can sit
+                 // anywhere along it. On a coffee cart that put vertices at
+                 // three times the model's size and drew blades across the
+                 // frame. A collapse never moves a vertex further than the
+                 // edge it removes is long.
+                 length(candidate - (pos[u] + pos[v]) * 0.5f) > length(pos[u] - pos[v])) {
             // Ill conditioned: pick whichever of the three obvious points is best.
             const Vec3 mid = (pos[u] + pos[v]) * 0.5f;
             const double eu = q.error(pos[u].x, pos[u].y, pos[u].z);
@@ -619,6 +656,37 @@ QuadricResult quadric_simplify(const Mesh& mesh, const MeshAnalysis& analysis,
     std::vector<int> budgets(size_t(max_region) + 1, std::numeric_limits<int>::max());
     for (const RegionKnobs& k : panel.regions)
         if (k.id < budgets.size()) budgets[k.id] = std::max(2, k.triangle_budget);
+
+    // A region that is a whole loose piece gets enough for a box or nothing
+    // at all: the director gave a coffee cart's casters five triangles each
+    // and its canisters four, and a closed piece at four is a tetrahedron -
+    // black spikes all over the top - while at five a caster simplified into
+    // nothing and the cart floated. Twelve is a box. Where that is more than
+    // the budget holds, the re-fit's shell cap drops whole pieces, supports
+    // last, rather than every piece shrinking into a shard.
+    if (seg.tri_region.size() == mesh.triangle_count() &&
+        analysis.tri_shell.size() == mesh.triangle_count()) {
+        constexpr int kPieceFloor = 12;
+        constexpr uint32_t kMixed = std::numeric_limits<uint32_t>::max();
+        std::vector<uint32_t> region_shell(budgets.size(), kInvalidIndex);
+        std::unordered_map<uint32_t, uint32_t> shell_region;   // kMixed when shared
+        for (size_t t = 0; t < mesh.triangle_count(); ++t) {
+            const uint16_t r = seg.tri_region[t];
+            const uint32_t sh = analysis.tri_shell[t];
+            if (r >= region_shell.size()) continue;
+            if (region_shell[r] == kInvalidIndex) region_shell[r] = sh;
+            else if (region_shell[r] != sh) region_shell[r] = kMixed;
+            const auto it = shell_region.find(sh);
+            if (it == shell_region.end()) shell_region[sh] = r;
+            else if (it->second != r) it->second = kMixed;
+        }
+        for (size_t r = 0; r < budgets.size(); ++r) {
+            const uint32_t sh = region_shell[r];
+            if (sh == kInvalidIndex || sh == kMixed || sh == analysis.largest_shell) continue;
+            if (shell_region[sh] != uint32_t(r)) continue;   // the piece is shared with another region
+            if (budgets[r] < kPieceFloor) budgets[r] = kPieceFloor;
+        }
+    }
 
     return quadric_simplify(mesh, analysis, seg, density, budgets, symmetry, opts, progress);
 }

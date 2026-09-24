@@ -4,6 +4,7 @@
   "geometry": {
     "max_triangles": 1400,
     "max_vertices": 1400,
+    "budget_tolerance": 0.03,
     "max_shells": 32,
     "max_bone_influences": 2,
     "require_manifold": true,
@@ -18,10 +19,18 @@
     "height": 256,
     "palette_colors": 256,
     "dithering": true,
-    "count": 1,
+    "count": 2,
     "require_uvs": true,
     "require_vertex_colors": true,
-    "bake_lighting_to_diffuse": true
+    "bake_lighting_to_diffuse": true,
+    "pages": [
+      {
+        "name": "face",
+        "width": 512,
+        "height": 512,
+        "camera": "cutscene_face"
+      }
+    ]
   },
   "quality": {
     "target_silhouette_error": 0.02,
@@ -74,7 +83,7 @@
     ]
   },
   "director": {
-    "art_direction": "Third person playable character. The face is visible in dialogue cutscenes, so the head deserves a disproportionate share of the budget. Hands are seen holding equipment but never in close up. Feet and the back of the legs are almost never framed.",
+    "art_direction": "Third person playable character. The face is visible in dialogue cutscenes, so the head deserves a disproportionate share of the budget. Hands are seen holding equipment but never in close up. The feet are in every gameplay shot and walk the ground: they need a readable heel, instep and toe box, about a hand's worth of triangles each, but no toes. The back of the legs is rarely framed.",
     "max_iterations": 4
   }
 }

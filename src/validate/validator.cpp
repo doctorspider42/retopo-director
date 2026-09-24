@@ -154,23 +154,33 @@ ValidationReport validate(const ValidationInput& in)
     // --- geometry budgets ---------------------------------------------------
     {
         const int tri = int(stats.triangles);
-        const bool ok = tri <= profile.max_triangles;
-        check("geometry.triangle_count", "Triangle count", ok, Severity::Error,
-              tri, profile.max_triangles,
+        const bool ok     = tri <= profile.max_triangles;
+        const bool within = tri <= profile.triangle_ceiling();
+        check("geometry.triangle_count", "Triangle count", ok,
+              within ? Severity::Warning : Severity::Error, tri, profile.max_triangles,
               ok ? format("%d of %d triangles used (%.0f%% of budget)", tri,
                           profile.max_triangles,
                           100.0 * tri / std::max(1, profile.max_triangles))
-                 : format("triangle budget exceeded by %d (%d used, limit %d)",
-                          tri - profile.max_triangles, tri, profile.max_triangles));
+              : within
+                  ? format("%d over the %d triangle budget, inside the profile's %.0f%% "
+                           "tolerance", tri - profile.max_triangles, profile.max_triangles,
+                           profile.budget_tolerance * 100.0f)
+                  : format("triangle budget exceeded by %d (%d used, limit %d)",
+                           tri - profile.max_triangles, tri, profile.max_triangles));
     }
     {
         const int vtx = int(stats.vertices);
-        const bool ok = vtx <= profile.max_vertices;
-        check("geometry.vertex_count", "Vertex count", ok, Severity::Error,
-              vtx, profile.max_vertices,
+        const bool ok     = vtx <= profile.max_vertices;
+        const bool within = vtx <= profile.vertex_ceiling();
+        check("geometry.vertex_count", "Vertex count", ok,
+              within ? Severity::Warning : Severity::Error, vtx, profile.max_vertices,
               ok ? format("%d of %d vertices used", vtx, profile.max_vertices)
-                 : format("vertex budget exceeded by %d (%d used, limit %d)",
-                          vtx - profile.max_vertices, vtx, profile.max_vertices));
+              : within
+                  ? format("%d over the %d vertex budget, inside the profile's %.0f%% "
+                           "tolerance", vtx - profile.max_vertices, profile.max_vertices,
+                           profile.budget_tolerance * 100.0f)
+                  : format("vertex budget exceeded by %d (%d used, limit %d)",
+                           vtx - profile.max_vertices, vtx, profile.max_vertices));
     }
     if (profile.max_shells > 0) {
         const bool ok = int(topology.shells) <= profile.max_shells;
@@ -206,6 +216,53 @@ ValidationReport validate(const ValidationInput& in)
                  : format("degenerate slivers present, worst quality %.4f",
                           topology.min_quality));
     }
+    // Surface standing off the source. A collapse that joins two separate
+    // pieces, or folds a cable into one triangle, leaves a blade reaching out
+    // into empty space; every other check passes it, and a coffee cart came
+    // through validation looking like a sea urchin. Points spread over the
+    // low poly by area, measured to the nearest source surface: the share of
+    // the surface further off than 3% of the model's size (the diagonal, not
+    // the height: a rat is long and flat, and 3% of its height is a hair).
+    if (in.source_analysis && !in.source_analysis->bvh.empty() && !mesh.empty()) {
+        const Bvh&  bvh    = in.source_analysis->bvh;
+        const float height = std::max(bvh.bounds().diagonal(), 1e-6f);   // "size" below
+        const float far    = 0.03f * height;
+        double total = 0.0, off = 0.0;
+        float  worst = 0.0f;
+        static const float kBary[7][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0.5f, 0.5f, 0},
+                                          {0, 0.5f, 0.5f}, {0.5f, 0, 0.5f}, {1 / 3.f, 1 / 3.f, 1 / 3.f}};
+        for (size_t t = 0; t < mesh.triangle_count(); ++t) {
+            const Vec3 a = mesh.positions[mesh.indices[t * 3]], b = mesh.positions[mesh.indices[t * 3 + 1]],
+                       c = mesh.positions[mesh.indices[t * 3 + 2]];
+            const double area = mesh.triangle_area(t);
+            if (area <= 0.0) continue;
+            for (const auto& w : kBary) {
+                const Vec3 p = a * w[0] + b * w[1] + c * w[2];
+                const ClosestHit hit = bvh.closest_point(p);
+                const float d = hit.hit() ? std::sqrt(hit.distance2) : height;
+                total += area / 7.0;
+                if (d > far) off += area / 7.0;
+                worst = std::max(worst, d);
+            }
+        }
+        const double share = total > 0.0 ? off / total : 0.0;
+        const bool ok = share <= 0.02;
+        // A loose fit - armour a few percent proud of the body - is a warning;
+        // a blade reaching past 15% of the model is broken geometry. Measured:
+        // the ranger's worst is 7%, the cart's 289%, every other asset under 5%.
+        const bool blades = worst > 0.15f * height;
+        check("geometry.spikes", "Surface off the source", ok,
+              blades ? Severity::Error : Severity::Warning, share, 0.02,
+              ok ? format("%.1f%% of the surface is more than 3%% of the model's size off the source "
+                          "(furthest %.1f%%)", share * 100.0, worst / height * 100.0f)
+                 : format(blades ? "%.1f%% of the surface stands more than 3%% of the model's size "
+                                   "off the source, furthest %.0f%%: spikes or blades reaching "
+                                   "into empty space"
+                                 : "%.1f%% of the surface stands more than 3%% of the model's size "
+                                   "off the source, furthest %.0f%%: a loose fit",
+                          share * 100.0, worst / height * 100.0f));
+    }
+
     // Seam vertices are real cost, so say how much of the budget they take.
     if (stats.vertices > topology.vertices) {
         const size_t seam = stats.vertices - topology.vertices;
@@ -228,13 +285,29 @@ ValidationReport validate(const ValidationInput& in)
         rep.symmetry_score = measure_symmetry(mesh, plane, tolerance);
 
         const bool ok = rep.symmetry_score >= 0.97f;
-        check("geometry.symmetry", "Symmetry", ok, Severity::Error,
+        // The profile asks for a symmetric asset, but a retopology can only be
+        // as symmetric as what it was given. A scan, a posed statue or a
+        // character carrying a sword in one hand has no mirror plane, and
+        // mirroring one half over the other would be destroying the asset to
+        // pass a check. So when the analysis already rejected the source's
+        // symmetry, the shortfall is reported, not failed.
+        const bool source_asymmetric =
+            in.source_analysis && in.source_analysis->valid() &&
+            !in.source_analysis->symmetry.accepted;
+        check("geometry.symmetry", "Symmetry", ok,
+              source_asymmetric ? Severity::Warning : Severity::Error,
               rep.symmetry_score, 0.97,
               ok ? format("%.1f%% of vertices mirror across %s",
                           rep.symmetry_score * 100.0f, plane.axis_name())
-                 : format("only %.1f%% of vertices mirror across %s; the profile "
-                          "requires a symmetric asset",
-                          rep.symmetry_score * 100.0f, plane.axis_name()));
+              : source_asymmetric
+                  ? format("only %.1f%% of vertices mirror across %s, but the source "
+                           "itself is not symmetric (best plane scored %.0f%%), so the "
+                           "shape was kept as authored",
+                           rep.symmetry_score * 100.0f, plane.axis_name(),
+                           in.source_analysis->symmetry.score * 100.0f)
+                  : format("only %.1f%% of vertices mirror across %s; the profile "
+                           "requires a symmetric asset",
+                           rep.symmetry_score * 100.0f, plane.axis_name()));
     }
 
     // --- skinning -----------------------------------------------------------
@@ -306,6 +379,27 @@ ValidationReport validate(const ValidationInput& in)
                                   profile.texture.palette_colors)
                          : format("palette has %d entries, the target allows %d",
                                   used, profile.texture.palette_colors));
+            }
+            // Extra pages, each against its own size in the profile.
+            for (size_t p = 0; p < bake.extra_pages.size(); ++p) {
+                const BakeResult::Page& page = bake.extra_pages[p];
+                if (page.diffuse.empty()) continue;
+                const TexturePage* spec = p < profile.texture.extra_pages.size()
+                                              ? &profile.texture.extra_pages[p] : nullptr;
+                const bool ok = spec && page.diffuse.width <= spec->width &&
+                                page.diffuse.height <= spec->height;
+                check("texture.size", "Texture size: " + page.name, ok, Severity::Error,
+                      double(page.diffuse.width), spec ? spec->width : 0,
+                      format("%dx%d, %zu triangles", page.diffuse.width, page.diffuse.height,
+                             page.triangles), page.name);
+                if (profile.texture.palette_colors > 0) {
+                    const int used = int(page.palette.size());
+                    const bool pok = used > 0 && used <= profile.texture.palette_colors;
+                    check("texture.palette", "Palette: " + page.name, pok, Severity::Error, used,
+                          profile.texture.palette_colors,
+                          format("%d colours of %d allowed", used, profile.texture.palette_colors),
+                          page.name);
+                }
             }
             {
                 const bool ok = bake.atlas_count <= profile.texture.count;

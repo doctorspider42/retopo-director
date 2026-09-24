@@ -1,5 +1,7 @@
 #include "pipeline/director.h"
 
+#include "geom/hard_rules.h"
+
 #include "core/log.h"
 #include "core/util.h"
 
@@ -121,6 +123,41 @@ std::string metrics_text(const IterationFacts& facts)
     if (!facts.silhouette.worst_view.empty())
         out += " on view '" + facts.silhouette.worst_view + "'";
     out += "\n";
+    // The fraction punishes thin shapes for being thin: a figure with arms out
+    // cannot reach a sphere's number however well it fits. The offset in pixels
+    // is what says whether there is anything left to win, and without it the
+    // director kept tearing a good panel apart to chase an unreachable target.
+    if (facts.silhouette.outline_px > 0.0f)
+        out += format("outline offset: %.2f px on average at the render size. Under about "
+                      "1 px the outline is as close as these renders can show, and the error "
+                      "fraction that remains is mostly the thin parts' perimeter, not a "
+                      "misfit: prefer small, targeted changes over rebalancing the panel.\n",
+                      facts.silhouette.outline_px);
+
+    // Which limit binds, and what the seams cost. On a small prop the unwrap
+    // cuts 180 welded vertices into 40 charts and adds 200 more along their
+    // borders, so the vertex limit is spent before the triangle limit is half
+    // used - and the director, seeing only the two totals, kept moving
+    // triangles between regions to win back a budget that seams had taken.
+    // Region splits do not change it: the unwrap does not follow regions.
+    if (facts.retopo && facts.bake && facts.max_triangles > 0 && facts.max_vertices > 0) {
+        Mesh welded = facts.retopo->mesh;
+        welded.weld(0.0f);
+        const size_t shared = welded.vertex_count();
+        const size_t seams  = facts.vertices > shared ? facts.vertices - shared : 0;
+        const float tri_fill = float(facts.triangles) / float(facts.max_triangles);
+        const float vtx_fill = float(facts.vertices) / float(facts.max_vertices);
+        out += format("uv layout: %d charts; %zu vertices on the surface, %zu more where the "
+                      "charts are cut apart (seams are %.0f%% of the vertex count)\n",
+                      facts.bake->charts, shared, seams,
+                      100.0f * float(seams) / float(std::max<size_t>(1, facts.vertices)));
+        if (vtx_fill > tri_fill + 0.05f)
+            out += format("the vertex limit binds (%.0f%% of it used against %.0f%% of the "
+                          "triangle limit): the missing triangles went to uv seams, not to "
+                          "any region. Moving shares between regions will not win them "
+                          "back; only a smaller or larger total does.\n",
+                          100.0f * vtx_fill, 100.0f * tri_fill);
+    }
 
     if (!facts.silhouette.per_view.empty()) {
         out += "per view silhouette error (fraction of the reference footprint that "
@@ -224,6 +261,10 @@ LlmRequest build_naming_request(const Mesh& mesh, const Segmentation& seg,
     u += profile_summary_text(profile);
     u += "\nREGION TABLE\n";
     u += region_table_text(seg, mesh);
+    u += "\nshape 'tube N:1' is measured, not guessed: the region is the tip of a long thin\n"
+         "tube N times as long as it is wide - a tail, an antenna, a horn, a whip. The\n"
+         "tube runs on from the tip into its neighbours, so the tip region itself can\n"
+         "be small. Name it for the tube it ends; it is not an ear, a nose or a neck.\n";
 
     if (!mesh.armature.empty()) {
         u += "\nARMATURE (joint names, which usually tell you what a region is):\n";
@@ -323,10 +364,24 @@ LlmRequest build_budget_request(const Mesh& mesh, const MeshAnalysis& analysis,
     u += "              nobody will ever see.\n";
     u += "  visibility  how much of the rendered frame this region occupies across\n";
     u += "              the profile cameras, primary cameras weighted double.\n";
+    u += "  shape       'tube N:1': the tip of a thin tube N times as long as it is wide\n";
+    u += "              (a tail). It is built as a prism of three to six sides with rings\n";
+    u += "              along it; roughly six triangles a ring, so budget it by the rings\n";
+    u += "              you want to see along it, not by its tiny area.\n";
     u += "  joint       the bone that drives this region, when there is a skeleton.\n";
 
     u += "\nREGION TABLE\n";
     u += region_table_text(seg, mesh);
+
+    if (analysis.stats.shells > 12)
+        u += "\nLOOSE PIECES\n"
+             "This model is built from many separate pieces. A region that is one whole\n"
+             "loose piece gets at least 12 triangles - enough for a box - or is left out\n"
+             "and painted onto what it sits on; it is never a 4 triangle spike. There is\n"
+             "not room for all of them, so do not spread a few triangles over each: say\n"
+             "which ones carry the read. High detail_priority keeps a piece (wheels,\n"
+             "legs, a handle that breaks the outline), low lets it go to the bake (cups,\n"
+             "screws, labels). What the model stands on is kept first regardless.\n";
 
     u += format("\nThe high poly has %zu triangles and %s symmetry across %s "
                 "(score %.2f).\n",
@@ -344,6 +399,24 @@ LlmRequest build_budget_request(const Mesh& mesh, const MeshAnalysis& analysis,
                 profile.max_shells > 0 ? std::to_string(profile.max_shells).c_str()
                                        : "any number of",
                 profile.max_shells == 1 ? "" : "s");
+    // The pieces the low poly will actually have. Eyeballs, brows and straps
+    // lying on the skin are dropped by the hard rules and painted by the bake,
+    // and until the director was told so it read "7 pieces" as an assembled
+    // costume and forced the quadric onto a clean body.
+    {
+        const HardRuleOptions rules;
+        size_t kept = 0, dropped = 0;
+        for (uint32_t s = 0; s < analysis.shell_area_share.size(); ++s) {
+            if (source_shell_is_droppable(analysis, s, rules)) ++dropped;
+            else ++kept;
+        }
+        if (dropped > 0)
+            u += format("Of those pieces, %zu are small and either hidden (eyeballs behind "
+                        "lids) or lying flat on the surface (brows, straps, patches): the "
+                        "engine drops them from the low poly and the bake paints them, so the "
+                        "surface to retopologise is %zu piece%s.\n",
+                        dropped, kept, kept == 1 ? "" : "s");
+    }
     if (profile.require_symmetry && analysis.symmetry.accepted)
         u += "Symmetry will be enforced, so half the budget effectively covers both "
              "sides. Do not try to spend differently on left and right.\n";
@@ -389,11 +462,11 @@ Rules for this step:
 
     Measured across four sources, quad_field won only on the one that was a
     single closed shell; on a costumed character, a creature and a building it
-    lost, twice by enough to fail validation. Use the topology line above rather
-    than the word "organic": one watertight shell and no open edges makes
-    quad_field worth trying, anything assembled says quadric. "auto" decides by
-    counting creases, which is the rule that got this wrong, so prefer naming
-    the backend yourself.
+    lost, twice by enough to fail validation. Use the topology lines above rather
+    than the word "organic": count the pieces that will survive, not the ones
+    that will be dropped, and a few open edges round an eye socket do not make
+    a body an assembly. "auto" applies exactly that rule, so leave it on "auto"
+    unless you can see something in the renders it cannot.
   - Write one sentence of "rationale" per region. It goes in the report a human
     will read when they wonder why the elbow looks like that.
   - Allocate the budget you were given, in full, whatever you think of it. If you
@@ -412,7 +485,7 @@ Rules for this step:
 LlmRequest build_review_request(const Mesh& source, const Segmentation& seg,
                                 const TargetProfile& profile, const KnobPanel& panel,
                                 const IterationFacts& facts, const ViewSet& reference_views,
-                                const ViewSet& candidate_views)
+                                const ViewSet& candidate_views, const ViewSet* uv_check_views)
 {
     LlmRequest req;
     req.label  = "review";
@@ -484,6 +557,16 @@ Rules for this step:
     is well short of the profile, look at the backend before the shares. A
     starving quad_field on an assembled source produces exactly that pattern,
     and "backend": "quadric" in the global patch is one key rather than twenty.
+    If the total is close to the budget, it is not starving: quad_field treats
+    region budgets as a density, not a quota, and moves triangles between
+    neighbours. Switching backend then trades even, clean topology for the
+    fans and slivers the quadric leaves on limbs and hands.
+  - Small pieces that are mostly hidden or lie flat on the surface - eyeballs,
+    brows, straps - are removed from the low poly on purpose and painted by the
+    bake (a "hard rule" line says so). Judge how they read in the texture; do
+    not treat their missing geometry as a failure or spend shares on them.
+  - Dark specks and blotches inside the silhouette are texture, not holes,
+    unless the validation reports open boundary edges.
   - "patch" cannot raise the total. The budget is fixed for this run: inside it
     you move triangles, you do not add them. If moving them is no longer enough
     and the renders show you why, that belongs in "profile_advice", where a human
@@ -491,11 +574,31 @@ Rules for this step:
     have seen the result.
 )", facts.iteration, facts.max_iterations);
 
+    if (uv_check_views) {
+        u += R"(
+UV CHECK
+The last images are the low poly with a checker in place of its texture, from
+the same cameras. Judge the uv layout by them:
+  - Squares that stay square and the same size everywhere: sound.
+  - Squares smeared into long diamonds: stretch. The texture will blur there.
+  - Squares much bigger or smaller on one part than the rest: that part gets
+    fewer or more texels. On the face or the front that should be more, on an
+    underside or a tail tip it can be less - "texel_weight" per region moves it,
+    0.5 to 2.
+  - A break where the pattern or the tint jumps: a seam. On the front of the
+    face, the chest or anything the camera looks at straight on it will show as
+    a line in the texture; "uv_seam_hiding" (0 to 1) pushes seams into crevices
+    and undersides.
+Say what you see in the critique and patch these only when something is wrong.
+)";
+    }
+
     u += profile_advice_prompt_text(profile);
 
     req.user = u;
     attach(req, reference_views, "HIGH POLY", 6);
     attach(req, candidate_views, "LOW POLY", 6);
+    if (uv_check_views) attach(req, *uv_check_views, "UV CHECK", 3);
     return req;
 }
 
