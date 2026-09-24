@@ -188,6 +188,16 @@ settings, and seams were over half of a prop's vertices. Charts start from the
 regions and are flattened by Tutte plus ARAP, which cannot fold; LSCM folded
 on every round part. `uv_stretch_tolerance` does nothing to either.
 
+**Joining an assembly into one solid does not beat dropping pieces.** Tried
+on the coffee cart (255 pieces) and a spider mech (64) at the 400 triangle
+prop budget: a voxel union (surface nets, morphological closing, thickening,
+snapped back onto the source) attaches the legs and casters as intended, but
+bars and rails one or two cells thick fold under the quadric and crumple
+under the quad field, and every variant measured worse - cart 2.56 px with
+the shell cap against 3.4 to 4.4 via the union, mech 4.22 against 5.3 to 6.6.
+What decides these assets is which pieces stay (`limit_shells`), not their
+topology.
+
 **Thin tubes are swept, not remeshed** (`geom/tubes.cpp`). An isotropic
 remesh cannot keep a tail open when its circumference holds fewer than four or
 five edges; it twists into a ribbon whose edge-on turns look like holes.
