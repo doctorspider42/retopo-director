@@ -42,7 +42,8 @@ nothing else. F12 does the same thing interactively.
 
 There is no test mesh in the repository. `tools/make_test_meshes.py <dir>`
 writes four (sphere, torus, lopsided blob, an A-pose figure with thin limbs),
-and `tools/fetch_corpus.py <corpus>` fetches five CC0 scans from Poly Haven.
+and `tools/fetch_corpus.py <corpus>` fetches five CC0 scans and a coffee cart
+from Poly Haven.
 `bench/corpus.json` lists those plus CC0 character packs found under `--root`.
 Judge a change by the benchmark table, not by one mesh: nearly every change in
 the geometry layer helps some assets and hurts others.

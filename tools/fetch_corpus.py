@@ -20,8 +20,10 @@ import urllib.request
 
 # Chosen for shape, not polish: a face, a whole standing figure with thin limbs
 # and cloth, a quadruped, a head with deep carved hair, a small creature with a
-# tail. 1k textures, because the bake downsamples to 256 anyway.
-ASSETS = ["marble_bust_01", "gothic_statue", "horse_statue_01", "lion_head", "street_rat"]
+# tail, and a coffee cart assembled from 255 hard-surface pieces. 1k textures,
+# because the bake downsamples to 256 anyway.
+ASSETS = ["marble_bust_01", "gothic_statue", "horse_statue_01", "lion_head", "street_rat",
+          "CoffeeCart_01"]
 RESOLUTION = "1k"
 API = "https://api.polyhaven.com/files/"
 USER_AGENT = "retopo-director-corpus/1.0"
