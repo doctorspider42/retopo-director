@@ -1,4 +1,5 @@
 #include "bake/bake.h"
+#include "bake/charts.h"
 
 #include "core/log.h"
 #include "mesh/topology.h"
@@ -865,7 +866,50 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
         }
     }
 
-    if (!carried_layout) {
+    if (!carried_layout && profile.texture.uv_layout == "parts" &&
+        mesh.tri_region.size() == mesh.triangle_count()) {
+        report(0.02f, "cutting uv charts by part");
+        // How much each vertex is seen: the source's ambient term where it
+        // lands, halved on surface that faces the ground. Seams go where this
+        // is low - crevices, undersides, the inside of a limb.
+        std::vector<float> seen(mesh.vertex_count(), 1.0f);
+        for (size_t v = 0; v < mesh.vertex_count(); ++v) {
+            const ClosestHit hit = source_bvh.closest_point(mesh.positions[v]);
+            if (!hit.hit()) continue;
+            float ambient = 1.0f;
+            if (source_analysis.ambient.size() == source.vertex_count()) {
+                ambient = 0.0f;
+                for (int i = 0; i < 3; ++i)
+                    ambient += source_analysis.ambient[source.indices[hit.triangle * 3 + i]] / 3.0f;
+            }
+            const float down = clampf(-source_bvh.geometric_normal(hit.triangle).y, 0.0f, 1.0f);
+            seen[v] = ambient * (1.0f - 0.5f * down);
+        }
+        Mesh candidate = mesh;
+        const PartsUnwrapResult parts = unwrap_by_parts(candidate, seen, PartsUnwrapOptions{});
+        if (parts.ok) {
+            // Each chart packs as its own island: the packer finds islands by
+            // uv connectivity and material, and charts laid out side by side
+            // must not be merged where they happen to touch.
+            const std::vector<uint16_t> materials = candidate.tri_material;
+            candidate.tri_material.assign(parts.tri_chart.begin(), parts.tri_chart.end());
+            UnwrapResult packed = repack_uvs(candidate, nullptr, width, height, padding);
+            candidate.tri_material = materials.size() == candidate.triangle_count()
+                                         ? materials : std::vector<uint16_t>{};
+            if (packed.ok) {
+                mesh = std::move(candidate);
+                uv   = packed;
+                RD_INFO("uv charts by part: %d charts (%d split, %d joined), %zu vertices",
+                        parts.charts, parts.splits, parts.merges, mesh.vertex_count());
+            } else {
+                RD_WARN("packing the part charts failed (%s); unwrapping with xatlas",
+                        packed.error.c_str());
+            }
+        } else {
+            RD_WARN("uv charts by part failed (%s); unwrapping with xatlas", parts.error.c_str());
+        }
+    }
+    if (!carried_layout && !uv.ok) {
         report(0.02f, "unwrapping uvs");
         uv = unwrap_uvs(mesh, width, height, padding, knobs.uv_stretch_tolerance);
     }

@@ -171,6 +171,7 @@ Json TargetProfile::to_json() const
         t["pages"] = pages;
     }
     t["filtering"] = texture.bilinear ? "bilinear" : "nearest";
+    t["uv_layout"] = texture.uv_layout;
     j["texture"] = t;
 
     Json q;
@@ -225,6 +226,7 @@ TargetProfile TargetProfile::from_json(const Json& j, std::string* error)
     p.texture.palette_colors = json_get<int>(t, "palette_colors", p.texture.palette_colors);
     p.texture.dithering      = json_get<bool>(t, "dithering", p.texture.dithering);
     p.texture.bilinear       = json_get<std::string>(t, "filtering", "bilinear") != "nearest";
+    p.texture.uv_layout      = json_get<std::string>(t, "uv_layout", p.texture.uv_layout);
     p.texture.count          = json_get<int>(t, "count", p.texture.count);
     p.texture.extra_pages.clear();
     for (const Json& pg : json_array_or_empty(t, "pages")) {

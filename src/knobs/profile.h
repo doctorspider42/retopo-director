@@ -49,6 +49,9 @@ struct TextureBudget {
     // the viewport show used nearest, which drew every texel as a hard square
     // and made a 256 atlas look far coarser than it would on the console.
     bool bilinear       = true;
+    // How the low poly is unwrapped: "parts" cuts one chart per region along
+    // its least visible side (bake/charts.h), "xatlas" lets xatlas find charts.
+    std::string uv_layout = "parts";
     int  count          = 1;     // how many pages the target allows
     // Pages after the first. The first page is width x height and takes
     // everything no extra page claims.
