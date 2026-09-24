@@ -373,6 +373,16 @@ LlmRequest build_budget_request(const Mesh& mesh, const MeshAnalysis& analysis,
     u += "\nREGION TABLE\n";
     u += region_table_text(seg, mesh);
 
+    if (analysis.stats.shells > 12)
+        u += "\nLOOSE PIECES\n"
+             "This model is built from many separate pieces. A region that is one whole\n"
+             "loose piece gets at least 12 triangles - enough for a box - or is left out\n"
+             "and painted onto what it sits on; it is never a 4 triangle spike. There is\n"
+             "not room for all of them, so do not spread a few triangles over each: say\n"
+             "which ones carry the read. High detail_priority keeps a piece (wheels,\n"
+             "legs, a handle that breaks the outline), low lets it go to the bake (cups,\n"
+             "screws, labels). What the model stands on is kept first regardless.\n";
+
     u += format("\nThe high poly has %zu triangles and %s symmetry across %s "
                 "(score %.2f).\n",
                 mesh.triangle_count(),
