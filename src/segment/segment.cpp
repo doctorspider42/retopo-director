@@ -610,16 +610,18 @@ void region_colors(const Segmentation& seg, std::vector<Vec4>& tri_colors)
 std::string region_table_text(const Segmentation& seg, const Mesh& mesh)
 {
     std::string out;
-    out += "id  | name        | tris  | area%  | curv | ambient | visibility | joint\n";
-    out += "----+-------------+-------+--------+------+---------+------------+------------------\n";
+    out += "id  | name        | tris  | area%  | curv | ambient | visibility | shape      | joint\n";
+    out += "----+-------------+-------+--------+------+---------+------------+------------+------------------\n";
     for (const Region& r : seg.regions) {
         std::string joint = "-";
         if (r.dominant_joint >= 0 && static_cast<size_t>(r.dominant_joint) < mesh.armature.size())
             joint = mesh.armature.joints[r.dominant_joint].name;
-        out += format("%-3u | %-11s | %5u | %5.1f%% | %.2f | %.2f    | %.3f      | %s\n",
+        const std::string shape =
+            r.tube_aspect > 0.0f ? format("tube %.0f:1", r.tube_aspect) : std::string("-");
+        out += format("%-3u | %-11s | %5u | %5.1f%% | %.2f | %.2f    | %.3f      | %-10s | %s\n",
                       unsigned(r.id), r.name.substr(0, 11).c_str(), r.triangle_count,
                       r.area_share * 100.0f, r.mean_curvature, r.mean_ambient,
-                      r.visibility, joint.c_str());
+                      r.visibility, shape.c_str(), joint.c_str());
     }
     return out;
 }

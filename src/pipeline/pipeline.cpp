@@ -471,6 +471,7 @@ bool Pipeline::stage_segment(const PipelineSettings& s)
         fail("segmentation produced no regions");
         return false;
     }
+    measure_region_tubes(copy, analysis_copy, seg, TubeOptions{});
 
     // Visibility per region, straight off the reference masks when we have them.
     {

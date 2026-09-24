@@ -236,6 +236,10 @@ LlmRequest build_naming_request(const Mesh& mesh, const Segmentation& seg,
     u += profile_summary_text(profile);
     u += "\nREGION TABLE\n";
     u += region_table_text(seg, mesh);
+    u += "\nshape 'tube N:1' is measured, not guessed: the region is the tip of a long thin\n"
+         "tube N times as long as it is wide - a tail, an antenna, a horn, a whip. The\n"
+         "tube runs on from the tip into its neighbours, so the tip region itself can\n"
+         "be small. Name it for the tube it ends; it is not an ear, a nose or a neck.\n";
 
     if (!mesh.armature.empty()) {
         u += "\nARMATURE (joint names, which usually tell you what a region is):\n";
@@ -335,6 +339,10 @@ LlmRequest build_budget_request(const Mesh& mesh, const MeshAnalysis& analysis,
     u += "              nobody will ever see.\n";
     u += "  visibility  how much of the rendered frame this region occupies across\n";
     u += "              the profile cameras, primary cameras weighted double.\n";
+    u += "  shape       'tube N:1': the tip of a thin tube N times as long as it is wide\n";
+    u += "              (a tail). It is built as a prism of three to six sides with rings\n";
+    u += "              along it; roughly six triangles a ring, so budget it by the rings\n";
+    u += "              you want to see along it, not by its tiny area.\n";
     u += "  joint       the bone that drives this region, when there is a skeleton.\n";
 
     u += "\nREGION TABLE\n";

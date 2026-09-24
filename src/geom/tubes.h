@@ -37,6 +37,13 @@ struct TubeReport {
     std::vector<std::string> notes;
 };
 
+// Fills Region::tube_aspect for every region that is the tip of a long thin
+// tube, whatever the low poly will make of it. The regions are what the
+// director names and budgets, and a tail's tip region is a small cap of 0.6%
+// of the surface that it has called a neck and an ear.
+void measure_region_tubes(const Mesh& source, const MeshAnalysis& analysis, Segmentation& seg,
+                          const TubeOptions& opts);
+
 // `symmetric` says the hard rules will mirror the mesh afterwards; a tube lying
 // on the plane is then given a cross-section that survives the cut.
 TubeReport sweep_thin_tubes(Mesh& low, const Mesh& source, const MeshAnalysis& analysis,

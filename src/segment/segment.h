@@ -35,6 +35,10 @@ struct Region {
 
     int   dominant_joint     = -1;
     float joint_weight_share = 0.0f;  // how cleanly it maps to that joint
+    // Length over diameter of the thin tube this region is the tip of - a
+    // tail, an antenna, a horn - or 0. Measured from the tip up, across
+    // whatever regions the tube runs through (sweep_thin_tubes, tubes.h).
+    float tube_aspect = 0.0f;
 
     // Fraction of rendered pixels this region covers across all cameras,
     // weighted by the primary flag. Filled in by the render stage.

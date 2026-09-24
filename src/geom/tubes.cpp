@@ -231,6 +231,25 @@ T along(const std::vector<T>& v, float x, float width)
 
 } // namespace
 
+void measure_region_tubes(const Mesh& source, const MeshAnalysis& analysis, Segmentation& seg,
+                          const TubeOptions& opts)
+{
+    if (seg.tri_region.size() != source.triangle_count()) return;
+    const SourceGraph graph(source);
+    for (Region& r : seg.regions) {
+        r.tube_aspect = 0.0f;
+        TubeShape tube;
+        // No low poly yet, so nothing is too thin for it: the question here is
+        // only whether the shape is a tube.
+        if (!measure_tube(source, seg, graph, r.id, 1e30f,
+                          analysis.bbox_diagonal, opts, tube))
+            continue;
+        const float aspect = tube.cut / std::max(2.0f * tube.mean_radius, 1e-9f);
+        // Six diameters: a finger is about four, a rat's tail thirty.
+        if (aspect >= 6.0f) r.tube_aspect = aspect;
+    }
+}
+
 TubeReport sweep_thin_tubes(Mesh& low, const Mesh& source, const MeshAnalysis& analysis,
                             const Segmentation& seg, bool symmetric, const TubeOptions& opts)
 {
@@ -324,9 +343,12 @@ TubeReport sweep_thin_tubes(Mesh& low, const Mesh& source, const MeshAnalysis& a
         if (int(removed_n) < k_loop + 6 * opts.min_rings) continue;
 
         // --- plan the prism: sides, rings -----------------------------------
-        Vec3 c0{};
-        for (uint32_t v : loop) c0 += low.positions[v];
-        c0 = c0 / float(k_loop);
+        // Angles round the loop are taken about the tube's own axis at the cut.
+        // The loop is three to six of the remesher's vertices, some up on the
+        // flare, and their centroid can sit off the axis far enough that the
+        // loop no longer goes round it once - which failed the bridge on two
+        // budget attempts in five, and the attempt that won had no tube.
+        const Vec3 c0 = along(tube.centre, tube.cut, tube.bin_width);
         const float span = tube.cut;
         const int   budget = int(removed_n);
         // At least `min_rings`: fewer is not a taper but a cone, and a tail the
