@@ -495,10 +495,35 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
             const float pri = r < region_keep_priority->size() ? (*region_keep_priority)[r] : 0.5f;
             shell_weight[tri_shell[t]] += mesh.triangle_area(t) * (0.25 + 1.5 * double(pri));
         }
+    // What the model stands on goes first. A cart's casters, a table's feet,
+    // a statue's plinth are small next to its body and ranked with its cups
+    // by area - tripling it still left the casters behind forty other pieces
+    // - and without them the asset floats, the one change of outline nobody
+    // fails to notice. A piece reaching down to within 2% of the height of
+    // the lowest point is a support.
+    std::map<uint32_t, float> shell_low;
+    float lowest = std::numeric_limits<float>::max(), highest = -lowest;
+    for (size_t v = 0; v < vcount; ++v) {
+        lowest  = std::min(lowest, mesh.positions[v].y);
+        highest = std::max(highest, mesh.positions[v].y);
+    }
+    for (size_t t = 0; t < tcount; ++t)
+        for (int i = 0; i < 3; ++i) {
+            const float y = mesh.positions[mesh.indices[t * 3 + i]].y;
+            const auto it = shell_low.find(tri_shell[t]);
+            if (it == shell_low.end() || y < it->second) shell_low[tri_shell[t]] = y;
+        }
+    const float support_band = 0.02f * std::max(highest - lowest, 1e-6f);
+    double largest_area = 0.0;
+    for (const auto& [root, area] : shell_area) largest_area = std::max(largest_area, area);
     std::vector<std::pair<double, uint32_t>> ranked;
     ranked.reserve(shell_area.size());
-    for (const auto& [root, area] : shell_area)
-        ranked.push_back({weighted ? shell_weight[root] : area, root});
+    for (const auto& [root, area] : shell_area) {
+        double rank = weighted ? shell_weight[root] : area;
+        if (shell_low[root] - lowest <= support_band) rank += total_area * 2.0;
+        if (area >= largest_area) rank += total_area * 4.0;   // the body stays the anchor
+        ranked.push_back({rank, root});
+    }
     std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
         if (a.first != b.first) return a.first > b.first;
         return a.second < b.second;
@@ -554,7 +579,10 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
         if (keep.count(root)) continue;
 
         const double share = total_area > 0.0 ? shell_area[root] / total_area : 0.0;
-        if (!keep.empty() && share < double(min_area_share)) break;
+        // Debris is passed over rather than ending the list: the order is no
+        // longer by area, and a small support ahead of the big pieces cut a
+        // cart down to one caster.
+        if (!keep.empty() && share < double(min_area_share)) continue;
 
         const auto it = partner.find(root);
         const int  needed = (it != partner.end() && !keep.count(it->second)) ? 2 : 1;
@@ -565,9 +593,12 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
             break;
         }
         const int cost = shell_tris[root] + (needed == 2 ? shell_tris[it->second] : 0);
+        // A piece too dear for what is left of the cap is passed over, not
+        // the end of the list: a rack of 88 triangles and no area stopped a
+        // cart's admission there, with thirty cheaper pieces still to come.
         if (!keep.empty() && secondary_triangle_cap > 0 &&
             secondary_tris + cost > secondary_triangle_cap)
-            break;
+            continue;
         if (!keep.empty()) secondary_tris += cost;
         keep.insert(root);
         if (needed == 2) keep.insert(it->second);
