@@ -20,6 +20,24 @@
 namespace rd {
 namespace {
 
+// Occlusion for a ray that may start just under the source's skin. The low
+// poly cuts beneath the source wherever it is convex - under a kneecap, the
+// point of an elbow - and a ray from there meets the inside of the skin
+// first: every ray blocked, a black oval on both knees of every character
+// the director built. A first hit seen from behind, near the start, is the
+// ray leaving the skin, not something covering the point; the ray carries on
+// past it. Later hits count whichever way they face, so a cape or a sleeve
+// still shades what is under it.
+bool occluded_from_under(const Bvh& bvh, Vec3 origin, Vec3 dir, float tmin, float tmax,
+                         float skin)
+{
+    const RayHit first = bvh.intersect(origin, dir, tmin, tmax);
+    if (!first.hit()) return false;
+    const float len = std::max(length(dir), 1e-12f);
+    if (first.t * len > skin || dot(bvh.geometric_normal(first.triangle), dir) <= 0.0f) return true;
+    return bvh.occluded(origin, dir, first.t + tmin, tmax);
+}
+
 struct TexelJob {
     int      x, y;
     Vec3     position;
@@ -1013,6 +1031,8 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
     const float bias        = diag * opts.ray_bias_rel;
     const float ao_distance = diag * clampf(opts.ao_distance_rel, 0.01f, 2.0f);
     const float ao_near     = std::max(bias, diag * opts.ao_min_distance_rel);
+    // How deep under the source's skin the low poly can sit (occluded_from_under).
+    const float skin        = diag * 0.03f;
     const float search      = diag * clampf(opts.projection_distance_rel, 0.001f, 1.0f);
     const int   ao_rays     = opts.bake_ao && knobs.bake_ambient_occlusion
                                   ? std::max(1, opts.ao_rays) : 0;
@@ -1141,7 +1161,8 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                                                                     rng.next_float());
                         const Vec3 dir =
                             tangent * local.x + bitangent * local.y + job.normal * local.z;
-                        if (!source_bvh.occluded(origin, dir, ao_near, ao_distance)) ++open;
+                        if (!occluded_from_under(source_bvh, origin, dir, ao_near, ao_distance, skin))
+                            ++open;
                     }
                     local_rays += uint64_t(ao_rays);
                     ao = lerpf(1.0f, float(open) / float(ao_rays), ao_strength);
@@ -1155,7 +1176,8 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                         if (ndl <= 0.0f) continue;
                         float shadow = 1.0f;
                         if (l.casts_shadow && dot(job.normal, l.direction) > 0.0f) {
-                            shadow = source_bvh.occluded(origin, l.direction, ao_near, ao_distance * 2.0f)
+                            shadow = occluded_from_under(source_bvh, origin, l.direction, ao_near,
+                                                         ao_distance * 2.0f, skin)
                                          ? 0.25f : 1.0f;
                             ++local_rays;
                         }
@@ -1229,7 +1251,8 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                         Vec3 dir = tangent * local.x + bitangent * local.y + n * local.z;
                         const float below = dot(dir, low_n);
                         if (below < 0.0f) dir = dir - low_n * (2.0f * below);
-                        if (!source_bvh.occluded(origin, dir, ao_near, ao_distance)) ++open;
+                        if (!occluded_from_under(source_bvh, origin, dir, ao_near, ao_distance, skin))
+                            ++open;
                     }
                     ao = lerpf(1.0f, float(open) / float(rays_per_vertex), ao_strength);
                 }
