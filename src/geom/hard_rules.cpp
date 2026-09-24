@@ -445,7 +445,8 @@ size_t repair_nonmanifold(Mesh& mesh)
 }
 
 size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
-                    const SymmetryPlane* mirror, int secondary_triangle_cap)
+                    const SymmetryPlane* mirror, int secondary_triangle_cap,
+                    const std::vector<float>* region_keep_priority)
 {
     if (max_shells <= 0 || mesh.empty()) return 0;
 
@@ -482,9 +483,22 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
     // Under the count, only a triangle cap can still ask for something to go.
     if (shell_area.size() <= size_t(max_shells) && secondary_triangle_cap <= 0) return 0;
 
+    // Ranked by area, scaled by the priority of the regions a piece covers:
+    // 0.5, the default, leaves the area as it is; 1 counts a piece nearly
+    // double, 0 at a quarter. Without priorities this is area alone.
+    std::map<uint32_t, double> shell_weight;
+    const bool weighted = region_keep_priority && !region_keep_priority->empty() &&
+                          mesh.tri_region.size() == tcount;
+    if (weighted)
+        for (size_t t = 0; t < tcount; ++t) {
+            const uint16_t r = mesh.tri_region[t];
+            const float pri = r < region_keep_priority->size() ? (*region_keep_priority)[r] : 0.5f;
+            shell_weight[tri_shell[t]] += mesh.triangle_area(t) * (0.25 + 1.5 * double(pri));
+        }
     std::vector<std::pair<double, uint32_t>> ranked;
     ranked.reserve(shell_area.size());
-    for (const auto& [root, area] : shell_area) ranked.push_back({area, root});
+    for (const auto& [root, area] : shell_area)
+        ranked.push_back({weighted ? shell_weight[root] : area, root});
     std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
         if (a.first != b.first) return a.first > b.first;
         return a.second < b.second;
@@ -539,7 +553,7 @@ size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
         const uint32_t root = ranked[i].second;
         if (keep.count(root)) continue;
 
-        const double share = total_area > 0.0 ? ranked[i].first / total_area : 0.0;
+        const double share = total_area > 0.0 ? shell_area[root] / total_area : 0.0;
         if (!keep.empty() && share < double(min_area_share)) break;
 
         const auto it = partner.find(root);
@@ -1098,7 +1112,8 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
                                           // budget got - 2428, 2966, 3462 triangles
                                           // culled on three attempts of one run.
                                           int(float(mesh.triangle_count()) *
-                                              opts.secondary_shell_budget_share));
+                                              opts.secondary_shell_budget_share),
+                                          &opts.region_keep_priority);
         if (rep.removed_shells && profile.max_shells <= 0) {
             rep.note(format("dropped %zu triangles in the smallest loose pieces to fit the "
                             "budget; the bake paints them onto what they sit on",

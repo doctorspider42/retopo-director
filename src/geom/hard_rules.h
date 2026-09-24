@@ -49,6 +49,11 @@ struct HardRuleOptions {
     // stalls: the costumed ranger's 32 kept pieces put a floor of 2150
     // triangles under a 1400 budget that no smaller budget could move.
     float secondary_shell_budget_share = 0.0f;
+    // Per region id, how much a loose piece of that region is worth keeping
+    // when pieces have to go (RegionKnobs::detail_priority). Area alone
+    // ranks a cart's wheels with its cups; the director knows which is which.
+    // Empty ranks by area.
+    std::vector<float> region_keep_priority;
     // Upper bound on triangles added by the joint loop rule, as a fraction of
     // the profile budget.
     float joint_split_headroom = 0.08f;
@@ -101,7 +106,8 @@ size_t repair_nonmanifold(Mesh& mesh);
 // below a handful of triangles, so a costume of dozens of trinkets has a floor
 // the simplifier cannot go under, and past the cap the body would starve.
 size_t limit_shells(Mesh& mesh, int max_shells, float min_area_share,
-                    const SymmetryPlane* mirror = nullptr, int secondary_triangle_cap = 0);
+                    const SymmetryPlane* mirror = nullptr, int secondary_triangle_cap = 0,
+                    const std::vector<float>* region_keep_priority = nullptr);
 size_t insert_joint_loops(Mesh& mesh, const MeshAnalysis& analysis, const Bvh& source_bvh,
                           float density, int max_new_triangles);
 

@@ -200,6 +200,11 @@ RetopoResult run_retopo(const Mesh& source, const MeshAnalysis& analysis,
     // --- hard rules ---------------------------------------------------------
     report(0.72f, "hard rules");
     HardRuleOptions hopts = opts.hard_rules;
+    for (const RegionKnobs& k : panel.regions) {
+        if (k.id >= hopts.region_keep_priority.size())
+            hopts.region_keep_priority.resize(size_t(k.id) + 1, 0.5f);
+        hopts.region_keep_priority[k.id] = k.detail_priority;
+    }
     result.hard_rules = apply_hard_rules(result.mesh, source, analysis.bvh, analysis,
                                          profile, panel.global, analysis.symmetry, hopts);
 

@@ -394,7 +394,7 @@ std::string KnobPanel::json_schema_text()
       "name":                "string - short human name, e.g. 'head' or 'left hand'",
       "role":                "string - what this part does for the read of the model",
       "share":               "number >= 0 - relative slice of the triangle budget",
-      "detail_priority":     "0.0 .. 1.0 - who wins when the budget is tight",
+      "detail_priority":     "0.0 .. 1.0 - who wins when the budget is tight; also which loose pieces are kept when there are too many for the budget (wheels over cups)",
       "fidelity":            "geometry | balanced | texture",
       "hard_edge_degrees":   "0 .. 180 - creases sharper than this stay sharp",
       "preserve_silhouette": "bool",
