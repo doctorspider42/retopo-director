@@ -30,6 +30,7 @@ void print_usage()
         "  --backend <name>  Force auto | quad_field | quadric\n"
         "  --replay <dir>    Answer the director from a recorded run (reports/prompts)\n"
         "  --llm-model <id>  Claude CLI director model (default claude-opus-5-5)\n"
+        "  --llm-path <exe>  Claude CLI to run, when the one on PATH is too old for it\n"
         "  --run             Start the pipeline as soon as the window opens\n"
         "  --verbose         Mirror the log to stderr\n"
         "  --no-settings     Ignore the saved settings (reproducible runs)\n"
