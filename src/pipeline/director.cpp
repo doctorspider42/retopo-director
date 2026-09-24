@@ -134,6 +134,31 @@ std::string metrics_text(const IterationFacts& facts)
                       "misfit: prefer small, targeted changes over rebalancing the panel.\n",
                       facts.silhouette.outline_px);
 
+    // Which limit binds, and what the seams cost. On a small prop the unwrap
+    // cuts 180 welded vertices into 40 charts and adds 200 more along their
+    // borders, so the vertex limit is spent before the triangle limit is half
+    // used - and the director, seeing only the two totals, kept moving
+    // triangles between regions to win back a budget that seams had taken.
+    // Region splits do not change it: the unwrap does not follow regions.
+    if (facts.retopo && facts.bake && facts.max_triangles > 0 && facts.max_vertices > 0) {
+        Mesh welded = facts.retopo->mesh;
+        welded.weld(0.0f);
+        const size_t shared = welded.vertex_count();
+        const size_t seams  = facts.vertices > shared ? facts.vertices - shared : 0;
+        const float tri_fill = float(facts.triangles) / float(facts.max_triangles);
+        const float vtx_fill = float(facts.vertices) / float(facts.max_vertices);
+        out += format("uv layout: %d charts; %zu vertices on the surface, %zu more where the "
+                      "charts are cut apart (seams are %.0f%% of the vertex count)\n",
+                      facts.bake->charts, shared, seams,
+                      100.0f * float(seams) / float(std::max<size_t>(1, facts.vertices)));
+        if (vtx_fill > tri_fill + 0.05f)
+            out += format("the vertex limit binds (%.0f%% of it used against %.0f%% of the "
+                          "triangle limit): the missing triangles went to uv seams, not to "
+                          "any region. Moving shares between regions will not win them "
+                          "back; only a smaller or larger total does.\n",
+                          100.0f * vtx_fill, 100.0f * tri_fill);
+    }
+
     if (!facts.silhouette.per_view.empty()) {
         out += "per view silhouette error (fraction of the reference footprint that "
                "disagrees):\n";

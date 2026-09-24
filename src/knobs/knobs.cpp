@@ -377,7 +377,7 @@ std::string KnobPanel::json_schema_text()
     "ao_intensity":              "0.0 .. 1.0",
     "bake_vertex_colors":        "bool",
     "uv_padding_texels":         "0.0 .. 32.0",
-    "uv_stretch_tolerance":      "0.0 .. 1.0",
+    "uv_stretch_tolerance":      "0.0 .. 1.0 - has no measurable effect on this unwrap; leave it",
     "request_another_iteration": "bool - true if you want to see the result and adjust again",
     "notes":                     "string - short explanation of the overall strategy"
   },

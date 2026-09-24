@@ -67,6 +67,8 @@ struct IterationFacts {
     int              max_iterations = 4;
     size_t           triangles = 0;
     size_t           vertices  = 0;
+    int              max_triangles = 0;   // the profile's limits, to say which one binds
+    int              max_vertices  = 0;
     SilhouetteError  silhouette;
     const RetopoResult*     retopo = nullptr;
     const ValidationReport* validation = nullptr;

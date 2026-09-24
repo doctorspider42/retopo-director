@@ -973,6 +973,8 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             facts.max_iterations = max_iterations;
             facts.triangles      = record.triangles;
             facts.vertices       = record.vertices;
+            facts.max_triangles  = s.profile.max_triangles;
+            facts.max_vertices   = s.profile.max_vertices;
             facts.silhouette     = silhouette;
             facts.retopo         = &retopo;
             facts.validation     = &validation;
