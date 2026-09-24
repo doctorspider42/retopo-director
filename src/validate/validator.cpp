@@ -216,6 +216,53 @@ ValidationReport validate(const ValidationInput& in)
                  : format("degenerate slivers present, worst quality %.4f",
                           topology.min_quality));
     }
+    // Surface standing off the source. A collapse that joins two separate
+    // pieces, or folds a cable into one triangle, leaves a blade reaching out
+    // into empty space; every other check passes it, and a coffee cart came
+    // through validation looking like a sea urchin. Points spread over the
+    // low poly by area, measured to the nearest source surface: the share of
+    // the surface further off than 3% of the model's size (the diagonal, not
+    // the height: a rat is long and flat, and 3% of its height is a hair).
+    if (in.source_analysis && !in.source_analysis->bvh.empty() && !mesh.empty()) {
+        const Bvh&  bvh    = in.source_analysis->bvh;
+        const float height = std::max(bvh.bounds().diagonal(), 1e-6f);   // "size" below
+        const float far    = 0.03f * height;
+        double total = 0.0, off = 0.0;
+        float  worst = 0.0f;
+        static const float kBary[7][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0.5f, 0.5f, 0},
+                                          {0, 0.5f, 0.5f}, {0.5f, 0, 0.5f}, {1 / 3.f, 1 / 3.f, 1 / 3.f}};
+        for (size_t t = 0; t < mesh.triangle_count(); ++t) {
+            const Vec3 a = mesh.positions[mesh.indices[t * 3]], b = mesh.positions[mesh.indices[t * 3 + 1]],
+                       c = mesh.positions[mesh.indices[t * 3 + 2]];
+            const double area = mesh.triangle_area(t);
+            if (area <= 0.0) continue;
+            for (const auto& w : kBary) {
+                const Vec3 p = a * w[0] + b * w[1] + c * w[2];
+                const ClosestHit hit = bvh.closest_point(p);
+                const float d = hit.hit() ? std::sqrt(hit.distance2) : height;
+                total += area / 7.0;
+                if (d > far) off += area / 7.0;
+                worst = std::max(worst, d);
+            }
+        }
+        const double share = total > 0.0 ? off / total : 0.0;
+        const bool ok = share <= 0.02;
+        // A loose fit - armour a few percent proud of the body - is a warning;
+        // a blade reaching past 15% of the model is broken geometry. Measured:
+        // the ranger's worst is 7%, the cart's 289%, every other asset under 5%.
+        const bool blades = worst > 0.15f * height;
+        check("geometry.spikes", "Surface off the source", ok,
+              blades ? Severity::Error : Severity::Warning, share, 0.02,
+              ok ? format("%.1f%% of the surface is more than 3%% of the model's size off the source "
+                          "(furthest %.1f%%)", share * 100.0, worst / height * 100.0f)
+                 : format(blades ? "%.1f%% of the surface stands more than 3%% of the model's size "
+                                   "off the source, furthest %.0f%%: spikes or blades reaching "
+                                   "into empty space"
+                                 : "%.1f%% of the surface stands more than 3%% of the model's size "
+                                   "off the source, furthest %.0f%%: a loose fit",
+                          share * 100.0, worst / height * 100.0f));
+    }
+
     // Seam vertices are real cost, so say how much of the budget they take.
     if (stats.vertices > topology.vertices) {
         const size_t seam = stats.vertices - topology.vertices;
