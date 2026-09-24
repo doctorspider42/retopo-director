@@ -169,6 +169,29 @@ panel is a guess and is often worse. `PipelineResults::kept_iteration` says
 which one is in the results, and the panel restored with it is the one that
 built it.
 
+**A quadric's "optimum" can be anywhere along a thin piece.** The error
+matrix of a cable or a rail is nearly a line, well conditioned by its
+determinant and still minimised miles from the edge. A collapse never moves a
+vertex further than the edge it removes is long; without that guard a coffee
+cart grew blades three times its own size, and every quad field mesh was
+quietly worse, because the quad field starts from this simplifier.
+
+**The shell cap is a triangle cap too.** `limit_shells` with
+`secondary_triangle_cap` drops loose pieces even on a profile with no shell
+limit - the budget re-fit turns it on when the loose pieces' floor stops the
+budget going down. The body stays the anchor, what the model stands on comes
+next, then area times `detail_priority`.
+
+**UV charts are cut by part, not by xatlas** (`bake/charts.cpp`). On a closed
+low poly xatlas splits wherever a chart would fold, whatever its cost
+settings, and seams were over half of a prop's vertices. Charts start from the
+regions and are flattened by Tutte plus ARAP, which cannot fold; LSCM folded
+on every round part. `uv_stretch_tolerance` does nothing to either.
+
+**Thin tubes are swept, not remeshed** (`geom/tubes.cpp`). An isotropic
+remesh cannot keep a tail open when its circumference holds fewer than four or
+five edges; it twists into a ribbon whose edge-on turns look like holes.
+
 **MinGW links the runtime dynamically by default**, which makes the executable
 unusable outside a shell that has the toolchain on `PATH`. The build passes
 `-static`.
