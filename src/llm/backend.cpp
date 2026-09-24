@@ -90,8 +90,15 @@ public:
         if (p.cancelled) { res.error = "cancelled"; return res; }
         if (p.timed_out) { res.error = format("timed out after %d s", cfg_.timeout_seconds); return res; }
         if (p.exit_code != 0) {
-            res.error = format("claude exited with %d: %s", p.exit_code,
-                               trim(p.err).substr(0, 400).c_str());
+            // With --output-format json the CLI reports its own errors - an
+            // unsupported model, an expired login - in the envelope on stdout
+            // and leaves stderr empty, which logged "claude exited with 1: ".
+            std::string why = trim(p.err);
+            std::string envelope_error;
+            const Json failed = json_parse_lenient(p.out, envelope_error);
+            if (failed.is_object() && failed.contains("result"))
+                why = json_get<std::string>(failed, "result", why);
+            res.error = format("claude exited with %d: %s", p.exit_code, why.substr(0, 400).c_str());
             return res;
         }
 
