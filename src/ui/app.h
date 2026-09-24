@@ -29,6 +29,7 @@ struct AppOptions {
     // it for this run only, which is how the two paths get compared on one mesh.
     std::string segmenter;          // geometric | sam | auto
     std::string llm_model;          // overrides the Claude CLI director's model
+    std::string llm_path;           // overrides the Claude CLI executable
     std::string sam_checkpoint;
     std::string sam_device;         // auto | cuda | cpu | mps
     // Fetch a checkpoint and exit. The same download the Director panel offers,

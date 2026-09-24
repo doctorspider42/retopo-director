@@ -91,6 +91,8 @@ int main(int argc, char** argv)
             opts.replay = next("--replay");
         } else if (!std::strcmp(a, "--backend")) {
             opts.backend = next("--backend");
+        } else if (!std::strcmp(a, "--llm-path")) {
+            opts.llm_path = next("--llm-path");
         } else if (!std::strcmp(a, "--llm-model")) {
             opts.llm_model = next("--llm-model");
         } else if (!std::strcmp(a, "--segmenter")) {
