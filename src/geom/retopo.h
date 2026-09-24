@@ -58,6 +58,10 @@ struct RetopoOptions {
     // knob panel and the command line can both override it.
     bool  prefer_quad_for_skinned   = true;
     float hard_surface_crease_ratio = 0.18f;
+    // ...and only when this share of edges is flat as well (neighbours within
+    // a degree). Creases between flat panels are hard surface; creases all
+    // over a curved surface are a scan's fur and pores.
+    float hard_surface_flat_share = 0.30f;
     // Overrides the panel entirely when set, so the two paths can be compared
     // on one mesh without editing knobs.
     bool          forced_backend_valid = false;

@@ -69,7 +69,26 @@ RetopoResult run_retopo(const Mesh& source, const MeshAnalysis& analysis,
         //
         // Quadric still wins on hard surface, where those creases are the shape
         // and an isotropic remesh would round them off.
-        const bool organic = skinned || crease_ratio < opts.hard_surface_crease_ratio;
+        //
+        // Creases alone do not make hard surface. A scanned animal trips the
+        // angle test all over its fur - the street rat is 18.7% creases, more
+        // than a car's body - and sent to the quadric it came back as fans the
+        // unwrap cut into 162 charts, 12 px off its outline; the quad field
+        // gets it to 2.6 px. What sets a machined object apart is that its
+        // creases run between flat panels: 44% of the car's and the trilobite's
+        // edges join coplanar faces, 16% of the rat's. The smooth synthetic
+        // meshes are flatter still, but have no creases to speak of.
+        size_t flat = 0, interior = 0;
+        const float flat_cos = std::cos(1.0f * kDeg2Rad);
+        for (const MeshTopology::Edge& e : analysis.topology.edges) {
+            if (e.tri1 == kInvalidIndex || e.tri1 >= analysis.tri_normal.size()) continue;
+            ++interior;
+            if (dot(analysis.tri_normal[e.tri0], analysis.tri_normal[e.tri1]) > flat_cos) ++flat;
+        }
+        const float flat_share = float(double(flat) / double(std::max<size_t>(1, interior)));
+        const bool  hard_surface = crease_ratio >= opts.hard_surface_crease_ratio &&
+                                   flat_share >= opts.hard_surface_flat_share;
+        const bool  organic = skinned || !hard_surface;
 
         // None of which matters if there is no surface to walk over. The quad
         // field is an isotropic remesh: it needs one closed manifold shell. Give
@@ -112,11 +131,12 @@ RetopoResult run_retopo(const Mesh& source, const MeshAnalysis& analysis,
         const bool walkable = kept_shells == 1 && main_closed;
         backend = (walkable && organic) ? RetopoBackend::QuadField : RetopoBackend::Quadric;
 
-        RD_INFO("auto backend: %zu shell%s (%zu kept), %s, %.1f%% of edges are creases: %s",
+        RD_INFO("auto backend: %zu shell%s (%zu kept), %s, %.1f%% of edges are creases, "
+                "%.0f%% flat: %s",
                 analysis.stats.shells, analysis.stats.shells == 1 ? "" : "s", kept_shells,
                 analysis.stats.closed ? "watertight"
                                       : (main_closed ? "main piece nearly closed" : "not watertight"),
-                crease_ratio * 100.0f,
+                crease_ratio * 100.0f, flat_share * 100.0f,
                 backend == RetopoBackend::QuadField
                     ? "one walkable shell and organic, using the quad field"
                     : (!walkable ? "assembled from pieces, so the quad field would starve"
