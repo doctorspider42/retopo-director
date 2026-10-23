@@ -58,6 +58,15 @@ To repeat a run with the director without paying for the model:
 `--replay <that run>/reports/prompts`. Every reply is recorded there as
 `NN_<label>_text.txt`, and the Replay backend hands them back in order.
 
+Releases are cut by CI on every green push to main: the zip and the Inno
+Setup 7 installer (`packaging/installer.iss`), tagged `v<version>-build.<run>`.
+The same run number is compiled in as `RD_BUILD_NUMBER`, and the update check
+(`src/ui/updater.cpp`) compares it with the latest tag. A local build is 0 and
+never offers to update; configure with `-DRD_BUILD_NUMBER=1` in a separate
+build directory to see the update flow against the real releases. The icon is
+`packaging/app.ico`, drawn by `tools/make_icon.py`; regenerate it if the mark in
+`shell.cpp` changes.
+
 Sanitizers need Linux: the `linux-asan` and `linux-tsan` presets build GLFW
 with its null platform, so they need no X11, and CI runs both on every PR.
 

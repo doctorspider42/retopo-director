@@ -321,10 +321,88 @@ void draw_topbar(AppState& app, const ImVec2& pos, const ImVec2& size, bool& wan
         const float run_w = ImGui::CalcTextSize(run_label).x + S(14) * 2 + S(26);
         float seg_w = S(6);
         for (const char* m : kModes) seg_w += ImGui::CalcTextSize(m).x + S(28);
-        const float right = seg_w + S(10) + run_w + S(8) + icon_w * 2 + S(4);
+        // An update, when there is one, sits to the left of everything else:
+        // noticeable, never in the way of Run.
+        const UpdateState us = app.updater.state();
+        const bool show_update = us == UpdateState::Available ||
+                                 us == UpdateState::Downloading || us == UpdateState::Ready;
+        std::string update_label;
+        if (us == UpdateState::Available)
+            update_label = format("Build %d is out", app.updater.latest_build());
+        else if (us == UpdateState::Downloading)
+            update_label = format("Downloading %.0f%%", app.updater.fraction() * 100.0f);
+        else if (us == UpdateState::Ready)
+            update_label = "Restart to update";
+        const float update_w = show_update
+            ? ImGui::CalcTextSize(update_label.c_str()).x + S(14) * 2 + S(26) : 0.0f;
+
+        const float right = (show_update ? update_w + S(12) : 0.0f) + seg_w + S(10) + run_w +
+                            S(8) + icon_w * 2 + S(4);
 
         ImGui::SameLine();
         ImGui::SetCursorPos({size.x - S(16) - right, cy - (ImGui::GetFrameHeight() + S(6)) * 0.5f});
+        if (show_update) {
+            ImGui::SetCursorPosY(cy - S(17));
+            if (icon_label_button(format("%s##update", update_label.c_str()).c_str(),
+                                  us == UpdateState::Ready ? Icon::Rebuild : Icon::Upload,
+                                  ButtonKind::Ghost, {update_w, S(34)}))
+                ImGui::OpenPopup("update_menu");
+            {
+                // Tinted so it reads as news rather than as one more control.
+                const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                dl->AddRect(a, b, col(p.accent, 0.55f), S(8), 1.0f);
+            }
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(16), S(14)));
+            ImGui::SetNextWindowSize({S(380), 0});
+            if (ImGui::BeginPopup("update_menu")) {
+                subheading(format("PS2 Retopo Director, build %d", app.updater.latest_build()).c_str());
+                faint("You have build %d.", Updater::current_build());
+                const std::string notes = app.updater.notes();
+                if (!notes.empty()) {
+                    spacer(4.0f);
+                    std::string shown = notes.size() > 700 ? notes.substr(0, 697) + "..." : notes;
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + S(348));
+                    ImGui::PushStyleColor(ImGuiCol_Text, p.text_dim);
+                    ImGui::TextWrapped("%s", shown.c_str());
+                    ImGui::PopStyleColor();
+                    ImGui::PopTextWrapPos();
+                }
+                spacer(8.0f);
+                if (us == UpdateState::Downloading) {
+                    progress_bar(app.updater.fraction());
+                    spacer(2.0f);
+                    faint("Downloading the installer...");
+                } else if (!Updater::installed()) {
+                    // A copy unpacked from the zip: the installer would put a
+                    // second copy somewhere else, so send them to the page.
+                    hint("This copy was unpacked from a zip, so it cannot replace itself.");
+                    spacer(4.0f);
+                    if (primary_button("Open the release page")) {
+                        open_url(app.updater.page_url());
+                        ImGui::CloseCurrentPopup();
+                    }
+                } else if (us == UpdateState::Ready) {
+                    hint("The window closes, the installer replaces it and opens the new build.");
+                    spacer(4.0f);
+                    ImGui::BeginDisabled(running);
+                    if (primary_button("Restart and update")) {
+                        std::string error;
+                        if (app.updater.install(&error)) want_quit = true;
+                        else app.notify("Update failed: " + error, 6.0);
+                    }
+                    ImGui::EndDisabled();
+                    if (running) faint("Waiting for the run to finish.");
+                } else {
+                    if (primary_button("Download and install")) app.updater.download();
+                }
+                ImGui::SameLine();
+                if (ghost_button("Release notes")) open_url(app.updater.page_url());
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleVar();
+            ImGui::SameLine(0.0f, S(12));
+            ImGui::SetCursorPosY(cy - (ImGui::GetFrameHeight() + S(6)) * 0.5f);
+        }
         int run_mode = app.settings.use_llm ? 0 : 1;
         ImGui::BeginDisabled(running);
         if (segmented("run_mode", &run_mode, kModes, 2, -1.0f))
@@ -379,6 +457,11 @@ void draw_topbar(AppState& app, const ImVec2& pos, const ImVec2& size, bool& wan
                 app.show_log = !app.show_log;
             ImGui::Separator();
             if (ImGui::MenuItem("Keyboard shortcuts", "?")) app.show_shortcuts = true;
+            if (ImGui::MenuItem("Check for updates", nullptr, false,
+                                Updater::enabled() &&
+                                    app.updater.state() != UpdateState::Checking &&
+                                    app.updater.state() != UpdateState::Downloading))
+                app.updater.check(false);
             if (ImGui::MenuItem("About")) app.show_about = true;
             ImGui::MenuItem("ImGui demo", nullptr, &app.show_demo);
             ImGui::Separator();
@@ -892,7 +975,10 @@ void draw_about_modal(AppState& app)
     ImGui::Dummy({S(56), S(56)});
     spacer(8.0f);
     heading("PS2 Retopo Director");
-    faint("version " RD_VERSION_STRING);
+    if (Updater::enabled())
+        faint("version %s, build %d", RD_VERSION_STRING, Updater::current_build());
+    else
+        faint("version %s, local build", RD_VERSION_STRING);
     spacer(8.0f);
     ImGui::PushTextWrapPos(S(560) - S(32));
     ImGui::PushStyleColor(ImGuiCol_Text, p.text_dim);

@@ -56,12 +56,16 @@
 
 ## Download
 
-Every green push to `main` is published as a release.
+Every green push to `main` is published as a release: **[Releases → latest](https://github.com/doctorspider42/retopo-director/releases/latest)**.
 
-1. Grab the zip from **[Releases → latest](https://github.com/doctorspider42/retopo-director/releases/latest)**.
-2. Unzip anywhere and run `retopo-director.exe`. One static executable; nothing to install.
+| file | what it is |
+|---|---|
+| `…-setup.exe` | Installer. Per user, no administrator prompt, Start menu shortcut, uninstaller. **Keeps itself up to date.** |
+| `…-windows-x64.zip` | The same build to unpack anywhere. One static executable, nothing to install. |
 
 Needs Windows 10 or 11 (x64) and an OpenGL 3.3 driver. The director is optional and needs one of: the `claude` CLI, the `codex` CLI, or an OpenAI-compatible API key.
+
+**Updates.** An installed copy asks GitHub for the latest release when it starts (one request; switch it off in **Settings → Output**). When a newer build exists, the top bar says so; **Download and install** fetches the installer, and **Restart and update** closes the window, installs silently and opens the new build. A copy unpacked from the zip points you to the release page instead.
 
 ## Quick start
 

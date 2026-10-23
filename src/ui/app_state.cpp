@@ -470,6 +470,7 @@ void AppState::save_settings() const
     ui["log_min_level"]  = log_min_level;
     ui["inspector_width"] = inspector_width;
     ui["tab"]            = int(tab);
+    ui["check_updates"]  = check_updates;
     j["ui"] = ui;
 
     Json recents = Json::array();
@@ -507,6 +508,7 @@ void AppState::load_settings()
     inspector_width         = std::clamp(json_get<float>(ui, "inspector_width", inspector_width),
                                          320.0f, 720.0f);
     tab                     = Tab(std::clamp(json_get<int>(ui, "tab", 0), 0, 3));
+    check_updates           = json_get<bool>(ui, "check_updates", check_updates);
 
     // Oldest first, because push_recent inserts at the front. Going through it
     // rather than push_back is what collapses entries a previous build wrote

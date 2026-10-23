@@ -445,6 +445,11 @@ int run_application(const AppOptions& opts)
     }
     const ui::AppState::Tab pinned_tab = app->tab;
 
+    // Headless runs never get here, so the benchmark and the tests stay off
+    // the network; --no-settings keeps a scripted window off it too.
+    if (ui::Updater::enabled() && app->check_updates && !opts.no_settings)
+        app->updater.check(true);
+
     // Screenshots are taken from the back buffer, so they need neither focus
     // nor an unobstructed window. F12 takes one at any time; the command line
     // options exist so a script can drive the interface unattended.
@@ -491,6 +496,21 @@ int run_application(const AppOptions& opts)
         }
 
         follow_run(*app);
+
+        // A check somebody asked for gets an answer either way; the quiet one
+        // at start only speaks up when there is something new.
+        if (ui::UpdateState news; app->updater.take_news(&news)) {
+            const bool asked = !app->updater.quiet();
+            if (news == ui::UpdateState::Available)
+                app->notify(format("Build %d is out - see the top bar",
+                                   app->updater.latest_build()), 6.0);
+            else if (news == ui::UpdateState::UpToDate && asked)
+                app->notify("This is the latest build");
+            else if (news == ui::UpdateState::Failed && asked)
+                app->notify("Update check failed: " + app->updater.error(), 6.0);
+            else if (news == ui::UpdateState::Ready)
+                app->notify("Update downloaded - restart from the top bar", 6.0);
+        }
         if (pin_tab) app->tab = pinned_tab;
 
         bool manual_screenshot = false;
@@ -601,6 +621,7 @@ int run_application(const AppOptions& opts)
     // .part file that is removed on the way out, so nothing half written is
     // left looking like a checkpoint.
     app->checkpoint_download.join();
+    app->updater.join();
 
     app->pipeline.cancel();
     // Keep servicing render requests so a worker blocked on one can finish.

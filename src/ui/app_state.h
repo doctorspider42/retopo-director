@@ -7,6 +7,7 @@
 #include "pipeline/pipeline.h"
 #include "render/renderer.h"
 #include "segment/sam.h"
+#include "ui/updater.h"
 
 #include <atomic>
 #include <cstdint>
@@ -119,6 +120,10 @@ struct AppState {
     Aabb        scene_bounds;
     ImageCache  images;
     CheckpointDownload checkpoint_download;
+    Updater     updater;
+    // Asked once at start, quietly. Off for anyone who would rather not have
+    // the application talk to GitHub on its own.
+    bool        check_updates = true;
 
     // --- viewport ------------------------------------------------------------
     OrbitCamera camera;

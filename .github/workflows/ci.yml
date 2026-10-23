@@ -31,8 +31,13 @@ jobs:
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-python-numpy
             zip
+      # A build that becomes a release carries the run number, which is what
+      # the release tag says too; the copy compares the two to find updates.
+      # Everything else is 0, a local build that never offers to update.
       - name: configure
-        run: cmake --preset mingw-release -DRD_WARNINGS_AS_ERRORS=OFF
+        run: >-
+          cmake --preset mingw-release -DRD_WARNINGS_AS_ERRORS=OFF
+          -DRD_BUILD_NUMBER=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_number || 0 }}
       - name: build
         run: cmake --build --preset mingw-release
       - name: test
@@ -50,19 +55,36 @@ jobs:
         run: |
           version=$(sed -n 's/^project(RetopoDirector VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
           name="PS2-Retopo-Director-${version}-build.${GITHUB_RUN_NUMBER}-windows-x64"
-          mkdir -p "dist/${name}/tools"
-          cp build/mingw-release/bin/retopo-director.exe "dist/${name}/"
-          cp -r build/mingw-release/bin/profiles "dist/${name}/"
-          cp tools/sam_server.py "dist/${name}/tools/"
-          cp LICENSE README.md "dist/${name}/"
+          mkdir -p dist/stage/tools
+          cp build/mingw-release/bin/retopo-director.exe dist/stage/
+          cp -r build/mingw-release/bin/profiles dist/stage/
+          cp tools/sam_server.py dist/stage/tools/
+          cp LICENSE README.md dist/stage/
+          cp -r dist/stage "dist/${name}"
           (cd dist && zip -qr "${name}.zip" "${name}")
           echo "${version}" > dist/version.txt
+      # The installer the update check downloads. Inno Setup 7 from its own
+      # GitHub release, installed where the next step can find it.
+      - name: installer
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = "$env:RUNNER_TEMP\innosetup-7.1.0-x64.exe"
+          Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe' -OutFile $setup
+          Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/DIR=C:\InnoSetup7' -Wait
+          $iscc = Get-ChildItem -Path 'C:\InnoSetup7' -Filter 'ISCC.exe' -Recurse | Select-Object -First 1
+          if (-not $iscc) { throw 'ISCC.exe not found after installing Inno Setup 7' }
+          $version = (Get-Content dist\version.txt).Trim()
+          & $iscc.FullName "/DAppVersion=$version" "/DBuildNumber=$env:GITHUB_RUN_NUMBER" "/DStageDir=$PWD\dist\stage" "/DOutputDir=$PWD\dist" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: windows-release
           path: |
             dist/*.zip
+            dist/*-setup.exe
             dist/version.txt
           retention-days: 7
 
@@ -100,8 +122,9 @@ jobs:
           name: ${{ matrix.preset }}-runs
           path: build/${{ matrix.preset }}/ctest-bench/runs/*/run.log
 
-  # Every green push to main is a release: the Windows build, tagged with the
-  # project version and the run number, notes generated from the merged PRs.
+  # Every green push to main is a release: the Windows installer and zip,
+  # tagged with the project version and the run number, notes generated from
+  # the merged PRs. The running application finds its updates here.
   release:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [windows-mingw, linux-sanitizers]
@@ -119,7 +142,7 @@ jobs:
         run: |
           version=$(cat dist/version.txt)
           tag="v${version}-build.${GITHUB_RUN_NUMBER}"
-          gh release create "${tag}" dist/*.zip \
+          gh release create "${tag}" dist/*-setup.exe dist/*.zip \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
             --title "PS2 Retopo Director ${version} (build ${GITHUB_RUN_NUMBER})" \

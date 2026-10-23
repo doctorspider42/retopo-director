@@ -186,7 +186,23 @@ endif()
 
 target_compile_definitions(rd_engine PUBLIC RD_VERSION_STRING="${PROJECT_VERSION}")
 
+# CI passes its run number; the release tag carries the same number, which is
+# how a running copy knows whether a newer release exists. 0 is a local build,
+# and a local build never offers to replace itself.
+set(RD_BUILD_NUMBER 0 CACHE STRING "Release build number, 0 for a local build")
+set(RD_UPDATE_REPO "doctorspider42/retopo-director" CACHE STRING
+    "GitHub owner/name whose releases the update check reads")
+target_compile_definitions(rd_engine PUBLIC
+    RD_BUILD_NUMBER=${RD_BUILD_NUMBER} RD_UPDATE_REPO="${RD_UPDATE_REPO}")
+
 add_executable(retopo-director ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
+if(WIN32)
+    enable_language(RC)
+    set(RD_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/packaging/app.ico")
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/app.rc.in
+                   ${CMAKE_CURRENT_BINARY_DIR}/app.rc @ONLY)
+    target_sources(retopo-director PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/app.rc)
+endif()
 target_link_libraries(retopo-director PRIVATE rd_engine)
 
 # MinGW links libstdc++, libgcc and winpthread dynamically by default, which

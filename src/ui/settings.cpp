@@ -693,6 +693,29 @@ void draw_run_settings(AppState& app)
 
     spacer(8.0f);
 
+    if (card_begin("updates_card", "Updates")) {
+        begin_form("updates_form", 190.0f);
+        toggle("Check on start", &app.check_updates,
+               "One request to GitHub's release list when the window opens. Nothing is "
+               "downloaded until you press Install.");
+        end_form();
+        spacer(4.0f);
+        if (Updater::enabled()) {
+            hint(format("This is build %d%s.", Updater::current_build(),
+                        Updater::installed() ? "" : ", unpacked from the zip").c_str());
+            spacer(4.0f);
+            ImGui::BeginDisabled(app.updater.state() == UpdateState::Checking ||
+                                 app.updater.state() == UpdateState::Downloading);
+            if (secondary_button("Check now")) app.updater.check(false);
+            ImGui::EndDisabled();
+        } else {
+            hint("A local build. Updates come with the installer from the releases page.");
+        }
+        card_end();
+    }
+
+    spacer(8.0f);
+
     if (card_begin("run_effort_card", "How hard it tries")) {
         begin_form("run_effort_form", 190.0f);
         slider_int("Max iterations", &app.settings.max_iterations, 0, 12, 0,
