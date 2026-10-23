@@ -1,89 +1,151 @@
-# PS2 Retopo Director
+<p align="center">
+  <img src="docs/images/banner.svg" alt="PS2 Retopo Director" width="100%">
+</p>
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/doctorspider42/retopo-director/actions/workflows/ci.yml"><img src="https://github.com/doctorspider42/retopo-director/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/doctorspider42/retopo-director/releases/latest"><img src="https://img.shields.io/github/v/release/doctorspider42/retopo-director?label=download&color=717EFF" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20x64-0B0C0F" alt="Windows x64">
+  <img src="https://img.shields.io/badge/C%2B%2B-20-0B0C0F" alt="C++20">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-0B0C0F" alt="Apache-2.0"></a>
+</p>
 
-High poly in, console-budget low poly out.
+<p align="center">
+  <b>Turns a 50 000 triangle sculpt into a 1 400 triangle, 256² palettised, triangle stripped PS2 asset.</b><br>
+  Deterministic code does every vertex, UV and texel. A language model only directs.
+</p>
 
-Every line of geometry, UV and bake work is done by deterministic code. A
-language model acts as **art director**: it looks at renders, names the parts of
-the model, decides how the triangle budget is split between them, decides what
-gets modelled and what gets painted into the diffuse, and judges the result. It
-never touches a vertex, and it cannot overrule a hard limit.
+<p align="center">
+  <a href="#download">Download</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#results">Results</a> ·
+  <a href="#command-line">Command line</a> ·
+  <a href="#building-from-source">Build</a>
+</p>
 
-```
-high poly ──► analysis ──► segmentation ──► [ director names the regions ]
-                                                      │
-                             [ director allocates the budget ]
-                                                      │
-                                     knob panel (JSON)
-                                                      │
-              density field ──► retopo ──► hard rules ──► bake ──► validate
-                                                      │
-                            pass? ──► [ director reviews renders ] ──┐
-                            fail? ──► [ director gets the numbers ] ─┤
-                                                      │              │
-                                                      └──────────────┘
-                                                      │
-                                              export + report
-```
+<p align="center">
+  <img src="docs/images/before-after.png" alt="A 57 216 triangle rat sculpt next to its 1 250 triangle low poly with a baked 256 by 256 texture">
+</p>
 
-## Status
+---
 
-First version. The whole loop works end to end: load, analyse, segment, name,
-allocate, build, bake, validate, iterate, export, report.
+## Contents
 
-Measured on a 20 480 triangle procedural test sculpt against `ps2_character`:
+- [What it does](#what-it-does)
+- [Download](#download)
+- [Quick start](#quick-start)
+- [The app](#the-app)
+- [How it works](#how-it-works)
+- [Results](#results)
+- [Command line](#command-line)
+- [Director backends](#director-backends)
+- [Region split: geometric or SAM](#region-split-geometric-or-sam)
+- [Target profiles](#target-profiles)
+- [Building from source](#building-from-source)
+- [Documentation](#documentation) · [Third party](#third-party) · [Licence](#licence)
 
-| | deterministic run | with the director |
-|---|---|---|
-| wall clock | 2.1 s | 3 m 46 s (3 iterations, model latency dominates) |
-| result | 1 118 tri, 702 vtx | converged, verdict *accept* on iteration 3 |
-| validation | 0 errors, 0 warnings | 0 errors, 0 warnings |
-| silhouette error | 0.0087 mean (profile wants under 0.020) | same |
-| strips | 10.2 triangles each | same |
-| quad coverage | 81 % | same |
+## What it does
 
-The director costs minutes and buys judgement about *where* the triangles go.
-The deterministic half is what guarantees the result is legal, and it runs in
-two seconds with `--no-llm` if that is all you want.
+- **Retopology to a hard budget.** A quad-dominant field or a guarded quadric collapse, chosen by topology, re-fitted until the triangle and vertex limits hold.
+- **UVs that do not fold.** Charts are cut by part and flattened with Tutte plus ARAP, then packed per texture page.
+- **A bake made for the hardware.** Diffuse, ambient occlusion and lighting baked into a palettised texture (4 or 8 bit CLUT), dithered if you ask for it.
+- **Export that a VU1 can eat.** Vertex cache optimised, stripped, validated against the profile before a single file is written.
+- **An art director, optionally.** A language model names the parts, splits the budget between them, and judges each pass from renders. It can object to the brief, but a human applies the change.
+- **Proof, not vibes.** Every pass is measured: silhouette error per camera, outline offset in pixels, every hard check with the number that decided it.
 
-## Building
+## Download
 
-Requires CMake 3.24+, Ninja and a C++20 compiler. Everything else is fetched and
-compiled by the build; there is nothing to install.
+Every green push to `main` is published as a release.
+
+1. Grab the zip from **[Releases → latest](https://github.com/doctorspider42/retopo-director/releases/latest)**.
+2. Unzip anywhere and run `retopo-director.exe`. One static executable; nothing to install.
+
+Needs Windows 10 or 11 (x64) and an OpenGL 3.3 driver. The director is optional and needs one of: the `claude` CLI, the `codex` CLI, or an OpenAI-compatible API key.
+
+## Quick start
+
+**In the window**
+
+1. Drop an `.obj`, `.gltf`, `.glb` or `.fbx` on the window (or press <kbd>Ctrl</kbd>+<kbd>O</kbd>).
+2. Pick **Director** or **Manual** in the top bar and press **Run** (<kbd>F5</kbd>).
+3. Read the **Report**. Overrule any number in **Tune** and press **Rebuild** (<kbd>F6</kbd>): seconds, not a whole run.
+
+Right drag orbits, middle drag pans, the wheel zooms, <kbd>Tab</kbd> cycles low poly / source / compare.
+
+**Without a window**
 
 ```bash
-cmake --preset mingw-release
-cmake --build --preset mingw-release
+retopo-director.exe --headless --no-llm --mesh sculpt.glb --project ./out --verbose
 ```
 
-Presets for MinGW (debug and release) and MSVC are in `CMakePresets.json`. The
-MinGW build links the runtime statically, so the result is a single executable
-you can hand to an artist.
+Exit code `0` means validation passed, `3` means it failed. Headless is the same run as the window, renders included.
 
-On Windows, `build.cmd` does the same thing in one step, and `-run` starts the
-result when the build succeeds. `-run` and `-help` are the script's own; every
-other argument is passed to the application, whose exit code comes back out:
+## The app
 
-```bat
-build.cmd
-build.cmd -run
-build.cmd -run --mesh sculpt.glb --run
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/app-report.png" alt="Report tab after a run"><br><sub><b>Report.</b> The verdict first, then the numbers that decided it.</sub></td>
+    <td width="50%"><img src="docs/images/app-tune.png" alt="Tune tab with a region open"><br><sub><b>Tune.</b> Every knob the director writes, per region, overrulable.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/app-compare.png" alt="Compare view wiping between source and low poly"><br><sub><b>Compare.</b> One camera, a wipe between source and result.</sub></td>
+    <td><img src="docs/images/app-settings.png" alt="Settings sheet on the target hardware page"><br><sub><b>Target.</b> The hard contract the validator enforces.</sub></td>
+  </tr>
+</table>
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[High poly] --> B[Analyse]
+    B --> C[Split into regions]
+    C --> D{{Director names<br/>the regions}}
+    D --> E{{Director splits<br/>the budget}}
+    E --> K[(Knob panel<br/>JSON)]
+    K --> F[Density field] --> G[Retopo] --> H[Hard rules] --> I[UV + bake] --> V[Validate]
+    V -->|renders + numbers| R{{Director reviews}}
+    R -->|another pass| K
+    V -->|best pass| X[Export + report]
 ```
 
-## Running
+Hexagons are the model; everything else is deterministic C++. The knob panel is the only thing the model can move.
 
-```bash
-# windowed
-./build/mingw-release/bin/retopo-director.exe
+| the director decides | the code decides |
+|---|---|
+| what each region is called and what it is for | where region boundaries fall |
+| how the triangle budget is split | which edges collapse, in what order |
+| geometry or texture, per region | UV layout, atlas packing, palette |
+| which parts must hold their silhouette | symmetry, manifold, joint loops |
+| whether the result is good enough | whether the result is legal |
 
-# windowed, load a mesh and start immediately
-./build/mingw-release/bin/retopo-director.exe --mesh sculpt.glb --run
+The run keeps its **best** pass, not its last: a director's next idea is often worse.
 
-# batch, no window, no director: just the deterministic half
-./build/mingw-release/bin/retopo-director.exe --headless --no-llm \
-    --mesh sculpt.glb --project ./out --verbose
-```
+## Results
+
+The deterministic half alone (`--no-llm`), on CC0 assets, against the shipped profiles. Measured on Windows 10 with an RTX 2070; `python tools/bench.py --root <corpus>` reproduces it.
+
+| asset | profile | source | low poly | outline offset | validation |
+|---|---|---:|---:|---:|:---:|
+| [Marble bust](https://polyhaven.com/a/marble_bust_01) | character | 17 456 | 1 400 | 1.02 px | ✅ |
+| [Horse statue](https://polyhaven.com/a/horse_statue_01) | character | 22 388 | 1 335 | 1.90 px | ✅ |
+| [Lion head](https://polyhaven.com/a/lion_head) | character | 47 214 | 1 352 | 2.06 px | ✅ |
+| [Gothic statue](https://polyhaven.com/a/gothic_statue) | character | 27 739 | 1 232 | 4.21 px | ✅ |
+| Superhero, male (Quaternius) | character | 14 318 | 1 388 | 1.22 px | ✅ |
+| Superhero, female (Quaternius) | character | 15 060 | 1 310 | 1.33 px | ✅ |
+| Ranger (Quaternius, costumed) | character | 26 982 | 1 344 | 3.02 px | ✅ |
+| PSX car (GGBot) | character | 8 780 | 1 384 | 0.61 px | ✅ |
+| [Street rat](https://polyhaven.com/a/street_rat) | prop | 57 216 | 394 | 1.61 px | ✅ |
+| [Coffee cart](https://polyhaven.com/a/CoffeeCart_01), 255 pieces | prop | 27 659 | 318 | 2.56 px | ✅ |
+
+**Outline offset** is how far, on average, the low poly's silhouette sits from the source's, in pixels, over every profile camera. It is the number to read: under about a pixel the fit is as close as the render can show. Thin, busy assets (a costumed character, a gothic statue full of tracery) are the hard ones, and the table says so.
+
+A run without the director takes seconds. With it, minutes: on a 20 480 triangle test sculpt three director passes took 3 m 46 s, almost all of it model latency.
+
+## Command line
+
+<details>
+<summary><b>All flags</b></summary>
 
 | flag | meaning |
 |---|---|
@@ -91,7 +153,9 @@ build.cmd -run --mesh sculpt.glb --run
 | `--profile <file>` | target profile to load |
 | `--project <dir>` | where renders, bakes, reports and exports are written |
 | `--headless` | run the pipeline without a window, then exit |
-| `--no-llm` | skip the director entirely |
+| `--no-llm` / `--llm` | skip the director / force it on |
+| `--replay <dir>` | answer every director request from a recorded run's `reports/prompts` |
+| `--no-settings` | ignore `settings.json` (what the benchmark and the tests use) |
 | `--run` | start the pipeline as soon as the window opens |
 | `--verbose` | mirror the log to stderr |
 | `--backend <name>` | force `auto`, `quad_field` or `quadric` |
@@ -103,146 +167,82 @@ build.cmd -run --mesh sculpt.glb --run
 | `--screenshot <file>` | write a png of the window; no focus needed |
 | `--screenshot-delay <sec>` | when to take it; 0 waits for the run to finish |
 | `--exit-after <sec>` | close the window automatically |
+| `--tab <name>` | start on `tune`, `report`, `director` or `renders` |
+| `--view <name>` | start on `low`, `source` or `compare` |
+| `--show <name>` | open `settings`, `log`, `shortcuts` or `about` |
 
-The exit code is 0 when validation passes, 3 when it fails, 1 or 2 on an error.
+Exit codes: `0` validation passed, `3` validation failed, `1` or `2` an error.
 
-**Headless is a complete run, not a degraded one.** It creates a hidden OpenGL
-context, so the director still gets its renders, the region overlay and the
-silhouette metric — a batch run and a windowed run produce identical results.
-`--no-gpu` forces the old render-free behaviour for a machine with no usable
-driver; the geometry half does not need one either way.
+Screenshots come off the back buffer before the swap, so they work with the window unfocused or covered and contain only the app. <kbd>F12</kbd> takes one into `<project>/screenshots/`.
 
-Screenshots are read out of the back buffer before the swap, so they work with
-the window unfocused, partly covered, or on another desktop, and they capture
-only the application. **F12** takes one at any time into
-`<project>/screenshots/`.
+</details>
 
-## Choosing the director backend
+## Director backends
 
-Three interchangeable backends, picked in the **Director** panel or in
-`settings.json`:
+| backend | how | images |
+|---|---|---|
+| **Claude CLI** | `claude -p --output-format json` | paths on disk; the CLI opens them |
+| **Codex CLI** | `codex exec -`, arguments configurable | paths listed in the prompt |
+| **OpenAI API** | any OpenAI-compatible endpoint | inlined as base64 |
+| **Replay** | a recorded run's replies, in order | — |
 
-- **Claude CLI** — runs `claude -p --output-format json`. Images are passed as
-  paths on disk; the CLI opens them itself.
-- **Codex CLI** — runs `codex exec -`. The argument list is configurable,
-  because that tool moves faster than this one.
-- **OpenAI API** — any OpenAI-compatible endpoint. Images are inlined as base64.
-  The key comes from the settings or from `OPENAI_API_KEY`, and is never written
-  to disk.
+The API key comes from settings or `OPENAI_API_KEY` and is never written to disk. If the backend is unavailable, the run continues without it on area-proportional defaults.
 
-If the chosen backend is unavailable the run continues without it: the knob
-panel keeps its area-proportional defaults and the geometry is built anyway.
+## Region split: geometric or SAM
 
-## Choosing how the regions are drawn
+**Geometric** is the default: a multi-source Dijkstra over the dual graph, seeded at joints and by farthest point sampling, punished for crossing creases and bone boundaries. No model, no download, milliseconds.
 
-The split into regions decides what the director is asked to name, and there are
-two ways to get one. Pick it in the **Director → Region split** card, in
-`settings.json`, or with `--segmenter`.
+**SAM** segments what a person would call a part, so a painted belt and the torso under it come apart. It runs in a Python sidecar, projects its masks onto the mesh through the director's own reference renders, and fills anything no camera saw with the same Dijkstra.
 
-**Geometric** is the default and the floor. A multi source Dijkstra over the
-dual graph, seeded at joints and by farthest point sampling, with edge weights
-that punish crossing creases and bone boundaries. No model, no download, no GPU,
-single digit milliseconds, and every region maps exactly onto a set of source
-triangles.
-
-**SAM** segments what a person would call a part rather than what the curvature
-says: it can see that a painted belt and the torso under it are different
-things. It runs out of process, in a Python sidecar that holds the model:
+<details>
+<summary><b>Setting up SAM</b></summary>
 
 ```bash
 pip install torch torchvision segment-anything pillow numpy
+retopo-director.exe --sam-download vit_b
+retopo-director.exe --mesh high.obj --segmenter sam
 ```
 
-Then get the weights. The **Director → Region split** card has a button for it,
-or on a machine nobody is sitting at:
-
-```bash
-retopo-director --sam-download vit_b
-```
-
-Either way the file is fetched from the address Meta documents, under Apache-2.0
-(the same licence as this project), and kept next to your settings. Nothing is
-downloaded on its own: a checkpoint is hundreds of megabytes from a third party,
-which is a decision for you rather than for the application on first run. The
-file lands as `.part` and is moved into place only once it is complete, so an
-interrupted transfer can never be mistaken for a usable checkpoint.
-
-| | size | VRAM |
-|---|---|---|
+| checkpoint | size | VRAM |
+|---|---:|---:|
 | `vit_b` | 375 MB | ~4 GB |
 | `vit_l` | 1.25 GB | ~6 GB |
 | `vit_h` | 2.56 GB | ~8 GB |
 
-`vit_b` is the one to take: the masks are only a starting point that the
-director merges, so the bigger backbones buy little here.
+`vit_b` is the one to take: the masks are a starting point the director merges, so a bigger backbone buys little. Nothing downloads on its own; the file comes from Meta's documented address under Apache-2.0 and lands as `.part` until complete. A missing checkpoint, no CUDA, or a sidecar that falls over costs a warning and the run continues on the geometric split.
 
-```bash
-retopo-director --mesh high.obj --segmenter sam
-```
-
-The reference renders the director is already looking at go to the sidecar, the
-masks come back, and one ray per pixel through the same camera puts them onto
-the mesh: each mask votes for the triangles its pixels hit, the mask with the
-most votes takes the triangle, and triangles no camera ever saw are filled in by
-the same Dijkstra the geometric split uses. The two approaches compose rather
-than compete, and the sliver absorption and statistics at the end are shared.
-
-Nothing about this is required. A missing checkpoint, a machine with no CUDA
-device, a sidecar that falls over or a `--no-gpu` run with no renders to feed it
-all cost a warning in the log, and the run continues on the geometric split.
-`auto` says so quietly, `sam` says so loudly.
-
-The sidecar speaks the `segment_anything` package's API, so it takes that
-project's checkpoints: `vit_b`, `vit_l` and `vit_h`. MobileSAM, FastSAM and
-SAM 2 are all faster and would be a sensible thing to support, but each is a
-different package with a different entry point - perhaps ten lines in
-`tools/sam_server.py`, not a checkpoint you can drop in.
-
-## What the model is and is not allowed to do
-
-| the director decides | the code decides |
-|---|---|
-| what each region is called and what it is for | where region boundaries fall |
-| how the triangle budget is split | which edges collapse, in what order |
-| geometry or texture, per region | UV layout, atlas packing, palette |
-| which parts must hold their silhouette | symmetry, manifold, joint loops |
-| whether the result is good enough | whether the result is legal |
-
-The knob panel is the only interface between the two. It is plain JSON, it is
-written to every iteration directory, and it can be edited by hand in the
-**Knob panel → JSON** tab and re-applied.
+</details>
 
 ## Target profiles
 
-A profile is the hard contract: triangle and vertex limits, shell count, bone
-influences, texture size and palette depth, whether strips are required and how
-long they must average, plus the cameras the asset will actually be seen
-through and a paragraph of art direction in plain language.
+A profile is the contract: triangle and vertex limits, shell count, bone influences, texture size and palette depth, strip requirements, the cameras the asset will really be seen through, and a paragraph of art direction.
 
-Two ship in `profiles/`: `ps2_character.json` and `ps2_prop.json`. Edit them in
-the **Target profile** panel and save your own.
+Two ship in [`profiles/`](profiles): `ps2_character.json` (1 400 triangles, 256² body plus a 512² face page) and `ps2_prop.json` (400 triangles, 128², 16 colours). Edit them in **Settings → Target hardware** and save your own.
+
+## Building from source
+
+CMake 3.24+, Ninja and a C++20 compiler. Every dependency is fetched and compiled by the build.
+
+```bash
+cmake --preset mingw-release
+cmake --build --preset mingw-release
+ctest --preset mingw-release          # unit tests plus whole runs on synthetic meshes
+```
+
+The MinGW build links statically, so the result is one executable you can hand to an artist. On Windows, `build.cmd` does it in one step and `build.cmd -run` starts it. MSVC and Linux sanitizer presets are in [`CMakePresets.json`](CMakePresets.json); CI runs ASan and TSan on every PR.
 
 ## Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the modules fit together
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — what is deliberately simple, and how to
-  deepen it (including the GPU segmentation path)
-- [`docs/FORMATS.md`](docs/FORMATS.md) — the `.rdmesh` container and the CLUT sidecar
-- [`docs/LICENSES.md`](docs/LICENSES.md) — third party licences, and what was
-  deliberately avoided
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): how the modules fit together
+- [`docs/ROADMAP.md`](docs/ROADMAP.md): what is deliberately simple, and how to deepen it
+- [`docs/FORMATS.md`](docs/FORMATS.md): the `.rdmesh` container and the CLUT sidecar
+- [`docs/LICENSES.md`](docs/LICENSES.md): third party licences, and what was deliberately avoided
+- [`CLAUDE.md`](CLAUDE.md): working on the code, and the things that will bite you
 
 ## Third party
 
-All permissive, all compiled from source by the build:
-meshoptimizer (MIT), xatlas (MIT), Dear ImGui (MIT), GLFW (zlib), cgltf (MIT),
-ufbx (MIT), stb (MIT / public domain), nlohmann/json (MIT).
-
-Nothing copyleft is linked. See [`docs/LICENSES.md`](docs/LICENSES.md).
+All permissive, all compiled from source: meshoptimizer, xatlas, Dear ImGui, cgltf, ufbx, stb, nlohmann/json (MIT) and GLFW (zlib). Nothing copyleft is linked.
 
 ## Licence
 
-Apache License 2.0. See [`LICENSE`](LICENSE).
-
-Apache-2.0 rather than MIT because it comes with an explicit patent grant, which
-matters for a tool built out of mesh processing algorithms, and because it is
-compatible with everything this project links against.
+[Apache License 2.0](LICENSE), for its explicit patent grant: this is a tool built out of mesh processing algorithms.

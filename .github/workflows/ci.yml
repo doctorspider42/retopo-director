@@ -30,6 +30,7 @@ jobs:
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-python-numpy
+            zip
       - name: configure
         run: cmake --preset mingw-release -DRD_WARNINGS_AS_ERRORS=OFF
       - name: build
@@ -41,6 +42,29 @@ jobs:
         with:
           name: windows-bench-runs
           path: build/mingw-release/ctest-bench/runs/*/run.log
+      # What an artist downloads: the static executable, the profiles it reads
+      # at start, the SAM sidecar, the licence. Only built for main, where it
+      # becomes a release once every job is green.
+      - name: package
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          version=$(sed -n 's/^project(RetopoDirector VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          name="PS2-Retopo-Director-${version}-build.${GITHUB_RUN_NUMBER}-windows-x64"
+          mkdir -p "dist/${name}/tools"
+          cp build/mingw-release/bin/retopo-director.exe "dist/${name}/"
+          cp -r build/mingw-release/bin/profiles "dist/${name}/"
+          cp tools/sam_server.py "dist/${name}/tools/"
+          cp LICENSE README.md "dist/${name}/"
+          (cd dist && zip -qr "${name}.zip" "${name}")
+          echo "${version}" > dist/version.txt
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: windows-release
+          path: |
+            dist/*.zip
+            dist/version.txt
+          retention-days: 7
 
   # The engine under the sanitizers. GLFW is built with its null platform, so no
   # X11 is needed; the window never opens, and neither the tests nor a --no-gpu
@@ -75,3 +99,29 @@ jobs:
         with:
           name: ${{ matrix.preset }}-runs
           path: build/${{ matrix.preset }}/ctest-bench/runs/*/run.log
+
+  # Every green push to main is a release: the Windows build, tagged with the
+  # project version and the run number, notes generated from the merged PRs.
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [windows-mingw, linux-sanitizers]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: dist
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(cat dist/version.txt)
+          tag="v${version}-build.${GITHUB_RUN_NUMBER}"
+          gh release create "${tag}" dist/*.zip \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "PS2 Retopo Director ${version} (build ${GITHUB_RUN_NUMBER})" \
+            --generate-notes \
+            --latest
