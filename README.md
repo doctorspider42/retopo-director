@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <b>Turns a 50 000 triangle sculpt into a 1 400 triangle, 256² palettised, triangle stripped PS2 asset.</b><br>
+  <b>Turns a 5  triangle sculpt into a   triangle, 256² palettised, triangle stripped PS2 asset.</b><br>
   Deterministic code does every vertex, UV and texel. A language model only directs.
 </p>
 
@@ -127,16 +127,16 @@ The deterministic half alone (`--no-llm`), on CC0 assets, against the shipped pr
 
 | asset | profile | source | low poly | outline offset | validation |
 |---|---|---:|---:|---:|:---:|
-| [Marble bust](https://polyhaven.com/a/marble_bust_01) | character | 17 456 | 1 400 | 1.02 px | ✅ |
-| [Horse statue](https://polyhaven.com/a/horse_statue_01) | character | 22 388 | 1 335 | 1.90 px | ✅ |
-| [Lion head](https://polyhaven.com/a/lion_head) | character | 47 214 | 1 352 | 2.06 px | ✅ |
-| [Gothic statue](https://polyhaven.com/a/gothic_statue) | character | 27 739 | 1 232 | 4.21 px | ✅ |
-| Superhero, male (Quaternius) | character | 14 318 | 1 388 | 1.22 px | ✅ |
-| Superhero, female (Quaternius) | character | 15 060 | 1 310 | 1.33 px | ✅ |
-| Ranger (Quaternius, costumed) | character | 26 982 | 1 344 | 3.02 px | ✅ |
-| PSX car (GGBot) | character | 8 780 | 1 384 | 0.61 px | ✅ |
-| [Street rat](https://polyhaven.com/a/street_rat) | prop | 57 216 | 394 | 1.61 px | ✅ |
-| [Coffee cart](https://polyhaven.com/a/CoffeeCart_01), 255 pieces | prop | 27 659 | 318 | 2.56 px | ✅ |
+| [Marble bust](https://polyhaven.com/a/marble_bust_01) | character | 1  |   | 1.0 px | ✅ |
+| [Horse statue](https://polyhaven.com/a/horse_statue_01) | character | 2  |   | 1.9 px | ✅ |
+| [Lion head](https://polyhaven.com/a/lion_head) | character | 4  |   | 2.0 px | ✅ |
+| [Gothic statue](https://polyhaven.com/a/gothic_statue) | character | 2  |   | 4.2 px | ✅ |
+| Superhero, male (Quaternius) | character | 1  |   | 1.2 px | ✅ |
+| Superhero, female (Quaternius) | character | 1  |   | 1.3 px | ✅ |
+| Ranger (Quaternius, costumed) | character | 2  |   | 3.0 px | ✅ |
+| PSX car (GGBot) | character |   |   | 0.6 px | ✅ |
+| [Street rat](https://polyhaven.com/a/street_rat) | prop | 5  | 394 | 1.6 px | ✅ |
+| [Coffee cart](https://polyhaven.com/a/CoffeeCart_01), 255 pieces | prop | 2  | 318 | 2.5 px | ✅ |
 
 **Outline offset** is how far, on average, the low poly's silhouette sits from the source's, in pixels, over every profile camera. It is the number to read: under about a pixel the fit is as close as the render can show. Thin, busy assets (a costumed character, a gothic statue full of tracery) are the hard ones, and the table says so.
 
