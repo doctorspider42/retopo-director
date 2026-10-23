@@ -11,3 +11,6 @@ screenshots/
 *.glb
 !profiles/*.json
 __pycache__/
+
+# The README's screenshots are the one place images belong in the tree.
+!docs/images/*.png
