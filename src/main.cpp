@@ -1,4 +1,4 @@
-// Retopo Director - entry point.
+// PS2 Retopo Director - entry point.
 // The real application object lives in ui/app.h; this file only owns process
 // level concerns: working directory, crash-friendly logging, argument parsing.
 
@@ -17,7 +17,7 @@ namespace {
 void print_usage()
 {
     std::printf(
-        "Retopo Director %s\n"
+        "PS2 Retopo Director %s\n"
         "\n"
         "  retopo-director [options]\n"
         "\n"
@@ -45,6 +45,9 @@ void print_usage()
         "  --screenshot <file>       Write a png of the window (no focus needed)\n"
         "  --screenshot-delay <sec>  When to take it; 0 waits for the run to end\n"
         "  --exit-after <sec>        Close the window automatically\n"
+        "  --tab <name>              Inspector tab: tune, report, director, renders\n"
+        "  --view <name>             Viewport: low, source, compare\n"
+        "  --show <what>             Open a sheet: settings, log, shortcuts, about\n"
         "  --help            This text\n",
         RD_VERSION_STRING);
 }
@@ -112,6 +115,12 @@ int main(int argc, char** argv)
             opts.screenshot_delay = std::atof(next("--screenshot-delay"));
         } else if (!std::strcmp(a, "--exit-after")) {
             opts.exit_after = std::atof(next("--exit-after"));
+        } else if (!std::strcmp(a, "--tab")) {
+            opts.ui_tab = next("--tab");
+        } else if (!std::strcmp(a, "--view")) {
+            opts.ui_view = next("--view");
+        } else if (!std::strcmp(a, "--show")) {
+            opts.ui_show = next("--show");
         } else {
             std::fprintf(stderr, "error: unknown option '%s'\n", a);
             print_usage();

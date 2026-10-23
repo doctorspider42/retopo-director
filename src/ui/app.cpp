@@ -17,8 +17,6 @@
 #include <GLFW/glfw3.h>
 
 #include <imgui.h>
-// The DockBuilder functions that lay out the default workspace are internal.
-#include <imgui_internal.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 
@@ -40,228 +38,14 @@ void glfw_error_callback(int code, const char* description)
     RD_ERROR("glfw error %d: %s", code, description);
 }
 
-// ---------------------------------------------------------------------------
-// Docking layout, built once and then left to the user's imgui.ini.
-// ---------------------------------------------------------------------------
-void build_default_layout(ImGuiID dockspace)
+// Files dropped on the window. GLFW calls this from inside glfwPollEvents, on the
+// main thread, so the pointer needs no lock.
+ui::AppState* g_drop_target = nullptr;
+
+void drop_callback(GLFWwindow*, int count, const char** paths)
 {
-    ImGui::DockBuilderRemoveNode(dockspace);
-    ImGui::DockBuilderAddNode(dockspace, ImGuiDockNodeFlags_DockSpace);
-    ImGui::DockBuilderSetNodeSize(dockspace, ImGui::GetMainViewport()->WorkSize);
-
-    ImGuiID centre = dockspace;
-    const ImGuiID left   = ImGui::DockBuilderSplitNode(centre, ImGuiDir_Left, 0.24f, nullptr, &centre);
-    const ImGuiID right  = ImGui::DockBuilderSplitNode(centre, ImGuiDir_Right, 0.30f, nullptr, &centre);
-    const ImGuiID bottom = ImGui::DockBuilderSplitNode(centre, ImGuiDir_Down, 0.26f, nullptr, &centre);
-
-    ImGui::DockBuilderDockWindow("Pipeline", left);
-    ImGui::DockBuilderDockWindow("Viewport", centre);
-    ImGui::DockBuilderDockWindow("Renders", centre);
-    ImGui::DockBuilderDockWindow("Knob panel", right);
-    ImGui::DockBuilderDockWindow("Statistics", right);
-    ImGui::DockBuilderDockWindow("Validation", bottom);
-    ImGui::DockBuilderDockWindow("Director", bottom);
-    ImGui::DockBuilderDockWindow("Log", bottom);
-
-    ImGui::DockBuilderFinish(dockspace);
-}
-
-// ---------------------------------------------------------------------------
-void draw_menu_bar(ui::AppState& app, bool& want_quit, bool& want_reset_layout)
-{
-    if (!ImGui::BeginMainMenuBar()) return;
-
-    if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("Open mesh...", "Ctrl+O")) ui::action_open_mesh(app);
-
-        if (ImGui::BeginMenu("Open recent", !app.recent_meshes.empty())) {
-            // PushID per row because two files can share a name, and the label
-            // is what ImGui hashes into the item id otherwise. Acting on the
-            // choice waits until the loop is over: open_mesh rewrites the very
-            // vector being walked.
-            fs::path chosen;
-            for (size_t i = 0; i < app.recent_meshes.size(); ++i) {
-                ImGui::PushID(int(i));
-                if (ImGui::MenuItem(app.recent_label(i).c_str()))
-                    chosen = app.recent_meshes[i];
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", app.recent_meshes[i].string().c_str());
-                ImGui::PopID();
-            }
-            ImGui::EndMenu();
-            if (!chosen.empty()) app.open_mesh(chosen);
-        }
-
-        ImGui::Separator();
-        if (ImGui::MenuItem("Open project folder"))
-            ui::reveal_in_file_manager(paths::project_dir());
-        if (ImGui::MenuItem("Options...", "Ctrl+,")) app.show_options = true;
-
-        ImGui::Separator();
-        if (ImGui::MenuItem("Quit", "Alt+F4")) want_quit = true;
-        ImGui::EndMenu();
-    }
-
-    if (ImGui::BeginMenu("Run")) {
-        const bool running = app.pipeline.running();
-        if (ImGui::MenuItem(app.settings.use_llm ? "Run with the director" : "Run",
-                            "F5", false, !running && !app.mesh_path.empty()))
-            ui::action_run(app);
-        if (ImGui::MenuItem("Rebuild the low poly", "F6", false, !running))
-            ui::action_rebuild(app);
-        if (ImGui::MenuItem("Stop", "Esc", false, running)) app.pipeline.cancel();
-        ImGui::Separator();
-        ImGui::MenuItem("Let the director decide", nullptr, &app.settings.use_llm);
-        ImGui::Separator();
-        if (ImGui::MenuItem("Apply knob panel", "Ctrl+Return", false, app.panel_dirty))
-            ui::action_apply_panel(app);
-        ImGui::EndMenu();
-    }
-
-    if (ImGui::BeginMenu("View")) {
-        ImGui::MenuItem("Viewport", nullptr, &app.show_viewport);
-        ImGui::MenuItem("Pipeline", nullptr, &app.show_pipeline);
-        ImGui::MenuItem("Knob panel", nullptr, &app.show_regions);
-        ImGui::MenuItem("Director transcript", nullptr, &app.show_director);
-        ImGui::MenuItem("Validation", nullptr, &app.show_validation);
-        ImGui::MenuItem("Renders", nullptr, &app.show_gallery);
-        ImGui::MenuItem("Statistics", nullptr, &app.show_stats);
-        ImGui::MenuItem("Log", nullptr, &app.show_log);
-        ImGui::Separator();
-        ImGui::MenuItem("Options window", "Ctrl+,", &app.show_options);
-        if (ImGui::MenuItem("Reset layout")) want_reset_layout = true;
-        ImGui::MenuItem("ImGui demo", nullptr, &app.show_demo);
-        ImGui::EndMenu();
-    }
-
-    if (ImGui::BeginMenu("Help")) {
-        if (ImGui::MenuItem("About")) app.show_about = true;
-        ImGui::EndMenu();
-    }
-
-    // Right aligned: the file, since the stage and the progress now have a bar
-    // of their own along the bottom.
-    {
-        const ui::Palette& p = ui::palette();
-        const Stage stage = app.pipeline.stage();
-        const std::string text = app.mesh_path.empty()
-                                     ? std::string("no mesh loaded")
-                                     : app.mesh_path.filename().string();
-
-        const float width = ImGui::CalcTextSize(text.c_str()).x + 24.0f;
-        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - width);
-        ImGui::PushStyleColor(ImGuiCol_Text,
-                              stage == Stage::Failed ? p.danger : p.text_faint);
-        ImGui::TextUnformatted(text.c_str());
-        ImGui::PopStyleColor();
-        if (!app.mesh_path.empty() && ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", app.mesh_path.string().c_str());
-    }
-
-    ImGui::EndMainMenuBar();
-}
-
-// ---------------------------------------------------------------------------
-// One bar along the bottom for the whole run.
-//
-// A per stage bar tucked inside a panel answers "what is it doing"; nobody was
-// asking that. The question during the two minutes this takes is how much is
-// left, so the answer sits across the bottom of the window where it cannot be
-// docked away, scrolled past or covered up.
-// ---------------------------------------------------------------------------
-void draw_status_bar(ui::AppState& app)
-{
-    const ui::Palette& p = ui::palette();
-    const float height = ImGui::GetFrameHeight() + 14.0f;
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 7));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, p.surface);
-    // Like Begin, this has to be closed whether or not it returned true.
-    const bool open = ImGui::BeginViewportSideBar(
-        "##status_bar", ImGui::GetMainViewport(), ImGuiDir_Down, height,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar);
-
-    if (open) {
-        const Stage stage   = app.pipeline.stage();
-        const bool  running = app.pipeline.running();
-        const float overall = ui::overall_progress(app);
-
-        ImVec4 tint = p.text_faint;
-        if (stage == Stage::Failed)         tint = p.danger;
-        else if (stage == Stage::Cancelled) tint = p.warning;
-        else if (stage == Stage::Done)      tint = p.success;
-        else if (running)                   tint = p.accent;
-
-        ImGui::AlignTextToFramePadding();
-        ui::dot(tint, 5.0f);
-        ImGui::PushStyleColor(ImGuiCol_Text, tint);
-        ImGui::TextUnformatted(running || stage != Stage::Idle ? stage_name(stage)
-                               : (app.mesh_path.empty() ? "Waiting for a mesh" : "Ready"));
-        ImGui::PopStyleColor();
-
-        const int iteration = app.pipeline.iteration();
-        if (running && iteration > 0) {
-            ImGui::SameLine(0.0f, 10.0f);
-            ui::badge(format("iteration %d", iteration).c_str(), p.accent);
-        }
-
-        // Reserve the right hand side before measuring what is left, so the
-        // readout and the stop button never get pushed off the edge.
-        const float tail = running ? 148.0f : 64.0f;
-        ImGui::SameLine(0.0f, 16.0f);
-        const float bar = std::max(80.0f, ImGui::GetContentRegionAvail().x - tail);
-
-        // The last stage message is only worth repeating while something is
-        // happening; at rest it is the name of a file already on screen twice.
-        const std::string msg = running ? app.pipeline.message() : std::string{};
-        const float y = ImGui::GetCursorPosY();
-        ImGui::SetCursorPosY(y + 5.0f);
-        ui::progress_bar(overall, msg.empty() ? nullptr : msg.c_str(), 16.0f, bar);
-        ImGui::SetCursorPosY(y);
-
-        ImGui::SameLine(0.0f, 12.0f);
-        ImGui::AlignTextToFramePadding();
-        ImGui::PushStyleColor(ImGuiCol_Text, p.text_dim);
-        ImGui::TextUnformatted(format("%3.0f%%", overall * 100.0f).c_str());
-        ImGui::PopStyleColor();
-
-        if (running) {
-            ImGui::SameLine(0.0f, 10.0f);
-            if (ui::danger_button("Stop", ImVec2(70, 0))) app.pipeline.cancel();
-        }
-    }
-    ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
-}
-
-void draw_toast(ui::AppState& app)
-{
-    if (app.toast.empty() || ImGui::GetTime() > app.toast_until) return;
-
-    const ui::Palette& p = ui::palette();
-    const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const ImVec2 size = ImGui::CalcTextSize(app.toast.c_str());
-
-    ImGui::SetNextWindowPos({vp->WorkPos.x + vp->WorkSize.x * 0.5f,
-                             vp->WorkPos.y + vp->WorkSize.y - 48.0f},
-                            ImGuiCond_Always, {0.5f, 1.0f});
-    ImGui::SetNextWindowBgAlpha(0.94f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18, 12));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, p.elevated);
-
-    if (ImGui::Begin("##toast", nullptr,
-                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                     ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing |
-                     ImGuiWindowFlags_NoNav)) {
-        ImGui::Dummy(ImVec2(std::max(size.x, 180.0f), 0.0f));
-        ImGui::TextUnformatted(app.toast.c_str());
-    }
-    ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
+    if (!g_drop_target) return;
+    for (int i = 0; i < count; ++i) g_drop_target->dropped.emplace_back(paths[i]);
 }
 
 void handle_shortcuts(ui::AppState& app, bool& want_quit, bool& want_screenshot)
@@ -272,23 +56,52 @@ void handle_shortcuts(ui::AppState& app, bool& want_quit, bool& want_screenshot)
     if (io.WantTextInput) return;
 
     const bool ctrl = io.KeyCtrl;
+    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Q, false)) want_quit = true;
+    // A sheet over the window owns the keyboard; it closes itself on Escape.
+    if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+        return;
+
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_O, false)) ui::action_open_mesh(app);
-    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Comma, false)) app.show_options = !app.show_options;
+    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Comma, false)) app.show_options = true;
+    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_L, false)) app.show_log = !app.show_log;
     if (ImGui::IsKeyPressed(ImGuiKey_F5, false))        ui::action_run(app);
     if (ImGui::IsKeyPressed(ImGuiKey_F6, false))        ui::action_rebuild(app);
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) ui::action_apply_panel(app);
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && app.pipeline.running())
         app.pipeline.cancel();
-    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Q, false)) want_quit = true;
+    if (ImGui::IsKeyPressed(ImGuiKey_Slash, false) && io.KeyShift) app.show_shortcuts = true;
+    if (ctrl) return;
 
-    // Viewport shortcuts, only when the pointer is not over a text field.
+    const RenderMode before = app.mode;
     if (ImGui::IsKeyPressed(ImGuiKey_1, false)) app.mode   = RenderMode::Shaded;
     if (ImGui::IsKeyPressed(ImGuiKey_2, false)) app.mode   = RenderMode::Regions;
     if (ImGui::IsKeyPressed(ImGuiKey_3, false)) app.mode   = RenderMode::Plain;
     if (ImGui::IsKeyPressed(ImGuiKey_4, false)) app.mode   = RenderMode::Checker;
+    if (app.mode != before) app.gpu_version = 0;   // region colours come and go with the mode
     if (ImGui::IsKeyPressed(ImGuiKey_W, false)) app.wireframe = !app.wireframe;
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab, false) && !io.KeyCtrl)
-        app.source = ui::ViewSource((int(app.source) + 1) % 3);
+    if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+        app.use_profile_camera = false;
+        app.camera.frame(app.scene_bounds);
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
+        app.source           = ui::ViewSource((int(app.source) + 1) % 3);
+        app.auto_view_source = false;
+    }
+}
+
+// Notices a run starting and ending, so the clock and the inspector follow it:
+// a finished run lands on its report, which is the first thing anybody asks.
+void follow_run(ui::AppState& app)
+{
+    const Stage stage   = app.pipeline.stage();
+    const bool  running = app.pipeline.running();
+    const bool  was_terminal = app.last_stage == Stage::Idle || stage_is_terminal(app.last_stage);
+    if (running && was_terminal && stage != app.last_stage) app.run_started = ImGui::GetTime();
+    if (stage == Stage::Done && app.last_stage != Stage::Done && app.jump_to_report) {
+        app.tab            = ui::AppState::Tab::Report;
+        app.jump_to_report = false;
+    }
+    app.last_stage = stage;
 }
 
 // ---------------------------------------------------------------------------
@@ -553,7 +366,7 @@ int run_application(const AppOptions& opts)
     glfwWindowHint(GLFW_SAMPLES, 0);
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
 
-    GLFWwindow* window = glfwCreateWindow(1680, 980, "Retopo Director", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1680, 980, "PS2 Retopo Director", nullptr, nullptr);
     if (!window) {
         RD_ERROR("cannot create a window; is there an OpenGL 3.3 driver?");
         glfwTerminate();
@@ -576,12 +389,9 @@ int run_application(const AppOptions& opts)
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    io.ConfigWindowsMoveFromTitleBarOnly = true;
-
-    static std::string ini_path = (paths::config_dir() / "layout.ini").string();
-    paths::ensure_dir(paths::config_dir());
-    io.IniFilename = ini_path.c_str();
+    // The layout is fixed and computed every frame, so there is nothing for an
+    // ini file to remember.
+    io.IniFilename = nullptr;
 
     float xscale = 1.0f, yscale = 1.0f;
     glfwGetWindowContentScale(window, &xscale, &yscale);
@@ -591,6 +401,9 @@ int run_application(const AppOptions& opts)
     ui::apply_theme(dpi);
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
+    g_drop_target = app.get();
+    glfwSetDropCallback(window, drop_callback);
+    ui::set_window_icon(window);
     ImGui_ImplOpenGL3_Init("#version 330 core");
 
     std::string render_error;
@@ -602,14 +415,35 @@ int run_application(const AppOptions& opts)
     glfwShowWindow(window);
 
     bool want_quit         = false;
-    bool want_reset_layout = false;
-    bool layout_built      = false;
     bool autorun_pending   = opts.autorun && !app->mesh_path.empty();
 
     // A mesh named on the command line goes on screen before anything is
     // pressed, exactly like one picked from the dialog. Not when the run starts
     // by itself: that would load the same file twice.
     if (!app->mesh_path.empty() && !autorun_pending) app->open_mesh(app->mesh_path);
+
+    // Asked for on the command line: pinned for the whole session, so a run
+    // ending does not move the inspector off the tab a screenshot wants.
+    bool pin_tab = false;
+    {
+        static const char* const kTabs[] = {"tune", "report", "director", "renders"};
+        for (int i = 0; i < 4; ++i)
+            if (iequals(opts.ui_tab, kTabs[i])) {
+                app->tab = ui::AppState::Tab(i);
+                pin_tab  = true;
+            }
+        static const char* const kViews[] = {"low", "source", "compare"};
+        for (int i = 0; i < 3; ++i)
+            if (iequals(opts.ui_view, kViews[i])) {
+                app->source           = ui::ViewSource(i);
+                app->auto_view_source = false;
+            }
+        if (iequals(opts.ui_show, "settings"))  app->show_options   = true;
+        if (iequals(opts.ui_show, "log"))       app->show_log       = true;
+        if (iequals(opts.ui_show, "shortcuts")) app->show_shortcuts = true;
+        if (iequals(opts.ui_show, "about"))     app->show_about     = true;
+    }
+    const ui::AppState::Tab pinned_tab = app->tab;
 
     // Screenshots are taken from the back buffer, so they need neither focus
     // nor an unobstructed window. F12 takes one at any time; the command line
@@ -636,17 +470,6 @@ int run_application(const AppOptions& opts)
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        const ImGuiID dockspace = ImGui::DockSpaceOverViewport(
-            0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
-
-        if (!layout_built || want_reset_layout) {
-            if (want_reset_layout || !ImGui::DockBuilderGetNode(dockspace) ||
-                ImGui::DockBuilderGetNode(dockspace)->IsEmpty())
-                build_default_layout(dockspace);
-            layout_built      = true;
-            want_reset_layout = false;
-        }
-
         app->sync_from_pipeline();
         app->upload_meshes();
 
@@ -655,9 +478,48 @@ int run_application(const AppOptions& opts)
             ui::action_run(*app);
         }
 
-        draw_menu_bar(*app, want_quit, want_reset_layout);
+        // A file dropped on the window opens like one picked from the dialog.
+        if (!app->dropped.empty()) {
+            const fs::path dropped = app->dropped.back();
+            app->dropped.clear();
+            if (app->pipeline.running())
+                app->notify("Busy; drop it again when the run has finished", 4.0);
+            else {
+                app->open_mesh(dropped);
+                app->notify("Loaded " + dropped.filename().string());
+            }
+        }
+
+        follow_run(*app);
+        if (pin_tab) app->tab = pinned_tab;
+
         bool manual_screenshot = false;
         handle_shortcuts(*app, want_quit, manual_screenshot);
+
+        // --- the frame --------------------------------------------------------
+        {
+            const ui::Metrics& m   = ui::metrics();
+            const float        d   = ui::dpi();
+            const ImGuiViewport* vp = ImGui::GetMainViewport();
+            const ImVec2 o  = vp->WorkPos;
+            const ImVec2 ws = vp->WorkSize;
+            const float top    = m.topbar_height * d;
+            const float bottom = m.statusbar_height * d;
+            // The inspector only appears once there is something to inspect.
+            const bool  inspect = !app->mesh_path.empty();
+            const float side    = inspect ? std::min(app->inspector_width * d, ws.x * 0.5f) : 0.0f;
+            const float logh    = app->show_log ? std::min(m.log_height * d, ws.y * 0.4f) : 0.0f;
+            const float mid_h   = ws.y - top - bottom;
+
+            ui::draw_topbar(*app, o, {ws.x, top}, want_quit, manual_screenshot);
+            ui::draw_viewport(*app, {o.x, o.y + top}, {ws.x - side, mid_h - logh});
+            if (logh > 0.0f)
+                ui::draw_log_drawer(*app, {o.x, o.y + top + mid_h - logh}, {ws.x - side, logh});
+            if (inspect)
+                ui::draw_inspector(*app, {o.x + ws.x - side, o.y + top}, {side, mid_h});
+            ui::draw_statusbar(*app, {o.x, o.y + ws.y - bottom}, {ws.x, bottom});
+        }
+
         if (manual_screenshot) {
             if (screenshot_path.empty() || screenshot_done) {
                 const std::time_t now = std::time(nullptr);
@@ -675,18 +537,11 @@ int run_application(const AppOptions& opts)
             screenshot_pending = true;
         }
 
-        ui::panel_viewport(*app);
-        ui::panel_pipeline(*app);
-        ui::panel_regions(*app);
-        ui::panel_director(*app);
-        ui::panel_validation(*app);
-        ui::panel_gallery(*app);
-        ui::panel_stats(*app);
-        ui::panel_log(*app);
-        ui::panel_options(*app);
+        ui::draw_options(*app);
+        ui::draw_lightbox(*app);
         ui::draw_about_modal(*app);
-        draw_status_bar(*app);
-        draw_toast(*app);
+        ui::draw_shortcuts_modal(*app);
+        ui::draw_toast(*app);
 
         if (app->show_demo) ImGui::ShowDemoWindow(&app->show_demo);
 

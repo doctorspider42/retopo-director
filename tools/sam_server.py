@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Segment Anything sidecar for Retopo Director.
+"""Segment Anything sidecar for PS2 Retopo Director.
 
 Reads one JSON request from stdin, writes one JSON reply to stdout, exits.
 Nothing else is ever written to stdout: Torch, timm and friends are chatty, and

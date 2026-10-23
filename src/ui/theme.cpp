@@ -13,6 +13,7 @@ namespace {
 Palette g_palette;
 Metrics g_metrics;
 Fonts   g_fonts;
+float   g_dpi = 1.0f;
 
 // Faces worth trying, best first. Nothing is downloaded; if none of these are
 // installed the built-in bitmap font takes over.
@@ -80,6 +81,7 @@ ImFont* try_load(const char* const (&candidates)[N], float size, ImFontConfig& c
 const Palette& palette() { return g_palette; }
 const Metrics& metrics() { return g_metrics; }
 const Fonts&   fonts()   { return g_fonts; }
+float          dpi()     { return g_dpi; }
 
 ImU32 col(const ImVec4& c, float alpha_scale)
 {
@@ -106,6 +108,7 @@ void load_fonts(float dpi_scale)
     g_fonts.size_body  = std::round(15.0f * scale);
     g_fonts.size_small = std::round(13.0f * scale);
     g_fonts.size_title = std::round(18.0f * scale);
+    g_fonts.size_display = std::round(28.0f * scale);
     g_fonts.size_mono  = std::round(13.0f * scale);
 
     ImFontConfig cfg;
@@ -135,48 +138,52 @@ void apply_theme(float dpi_scale)
     const Palette& p = g_palette;
     ImGuiStyle&    s = ImGui::GetStyle();
     s = ImGuiStyle();
+    g_dpi = std::clamp(dpi_scale, 0.5f, 4.0f);
 
     const Metrics& m = g_metrics;
     s.WindowRounding    = m.rounding_window;
-    s.ChildRounding     = m.rounding_frame;
+    s.ChildRounding     = m.rounding_card;
     s.FrameRounding     = m.rounding_frame;
-    s.PopupRounding     = m.rounding_window;
+    s.PopupRounding     = m.rounding_frame + 2.0f;
     s.ScrollbarRounding = m.rounding_grab;
     s.GrabRounding      = m.rounding_grab;
     s.TabRounding       = m.rounding_tab;
 
     s.WindowPadding     = {m.padding_window_x, m.padding_window_y};
     s.FramePadding      = {m.padding_frame_x, m.padding_frame_y};
-    s.CellPadding       = {8.0f, 6.0f};
+    s.CellPadding       = {8.0f, 7.0f};
     s.ItemSpacing       = {m.spacing_x, m.spacing_y};
     s.ItemInnerSpacing  = {8.0f, 6.0f};
     s.IndentSpacing     = m.indent;
     s.ScrollbarSize     = m.scrollbar;
-    s.GrabMinSize       = 12.0f;
+    s.GrabMinSize       = 10.0f;
 
-    s.WindowBorderSize  = 1.0f;
-    s.ChildBorderSize   = 1.0f;
+    // Tone separates surfaces; outlines are kept for the few places where two
+    // surfaces of the same tone meet - popups over a panel, mainly.
+    s.WindowBorderSize  = 0.0f;
+    s.ChildBorderSize   = 0.0f;
     s.PopupBorderSize   = 1.0f;
-    s.FrameBorderSize   = 1.0f;
+    s.FrameBorderSize   = 0.0f;
     s.TabBorderSize     = 0.0f;
     s.SeparatorTextBorderSize = 1.0f;
-    s.SeparatorTextPadding    = {18.0f, 6.0f};
+    s.SeparatorTextPadding    = {14.0f, 4.0f};
 
     s.WindowTitleAlign  = {0.0f, 0.5f};
     s.WindowMenuButtonPosition = ImGuiDir_None;
     s.ColorButtonPosition      = ImGuiDir_Right;
-    s.DockingSeparatorSize     = 2.0f;
+    s.SelectableTextAlign      = {0.0f, 0.5f};
+    s.DockingSeparatorSize     = 1.0f;
 
     s.AntiAliasedLines       = true;
     s.AntiAliasedLinesUseTex = true;
     s.AntiAliasedFill        = true;
-    s.CurveTessellationTol   = 1.0f;
+    s.CurveTessellationTol   = 0.8f;
 
     ImVec4* c = s.Colors;
     c[ImGuiCol_Text]                  = p.text;
     c[ImGuiCol_TextDisabled]          = p.text_faint;
     c[ImGuiCol_WindowBg]              = p.surface;
-    c[ImGuiCol_ChildBg]               = with_alpha(p.surface_alt, 0.35f);
+    c[ImGuiCol_ChildBg]               = {0, 0, 0, 0};
     c[ImGuiCol_PopupBg]               = p.elevated;
     c[ImGuiCol_Border]                = p.line;
     c[ImGuiCol_BorderShadow]          = {0, 0, 0, 0};
@@ -185,15 +192,15 @@ void apply_theme(float dpi_scale)
     c[ImGuiCol_FrameBgHovered]        = p.elevated;
     c[ImGuiCol_FrameBgActive]         = p.overlay;
 
-    c[ImGuiCol_TitleBg]               = p.canvas;
-    c[ImGuiCol_TitleBgActive]         = p.surface_alt;
-    c[ImGuiCol_TitleBgCollapsed]      = p.canvas;
-    c[ImGuiCol_MenuBarBg]             = p.canvas;
+    c[ImGuiCol_TitleBg]               = p.surface;
+    c[ImGuiCol_TitleBgActive]         = p.surface;
+    c[ImGuiCol_TitleBgCollapsed]      = p.surface;
+    c[ImGuiCol_MenuBarBg]             = p.surface;
 
     c[ImGuiCol_ScrollbarBg]           = {0, 0, 0, 0};
-    c[ImGuiCol_ScrollbarGrab]         = p.overlay;
-    c[ImGuiCol_ScrollbarGrabHovered]  = mix(p.overlay, p.accent, 0.35f);
-    c[ImGuiCol_ScrollbarGrabActive]   = p.accent;
+    c[ImGuiCol_ScrollbarGrab]         = with_alpha(p.overlay, 0.8f);
+    c[ImGuiCol_ScrollbarGrabHovered]  = mix(p.overlay, p.text_faint, 0.4f);
+    c[ImGuiCol_ScrollbarGrabActive]   = p.text_faint;
 
     c[ImGuiCol_CheckMark]             = p.accent;
     c[ImGuiCol_SliderGrab]            = p.accent;
@@ -201,11 +208,11 @@ void apply_theme(float dpi_scale)
 
     c[ImGuiCol_Button]                = p.elevated;
     c[ImGuiCol_ButtonHovered]         = p.overlay;
-    c[ImGuiCol_ButtonActive]          = mix(p.overlay, p.accent, 0.45f);
+    c[ImGuiCol_ButtonActive]          = mix(p.overlay, p.accent, 0.35f);
 
-    c[ImGuiCol_Header]                = with_alpha(p.accent, 0.20f);
-    c[ImGuiCol_HeaderHovered]         = with_alpha(p.accent, 0.32f);
-    c[ImGuiCol_HeaderActive]          = with_alpha(p.accent, 0.45f);
+    c[ImGuiCol_Header]                = with_alpha(p.accent, 0.16f);
+    c[ImGuiCol_HeaderHovered]         = with_alpha(p.text, 0.06f);
+    c[ImGuiCol_HeaderActive]          = with_alpha(p.accent, 0.24f);
 
     c[ImGuiCol_Separator]             = p.line;
     c[ImGuiCol_SeparatorHovered]      = p.accent;
@@ -215,13 +222,13 @@ void apply_theme(float dpi_scale)
     c[ImGuiCol_ResizeGripHovered]     = with_alpha(p.accent, 0.35f);
     c[ImGuiCol_ResizeGripActive]      = with_alpha(p.accent, 0.60f);
 
-    c[ImGuiCol_Tab]                   = p.canvas;
+    c[ImGuiCol_Tab]                   = {0, 0, 0, 0};
     c[ImGuiCol_TabHovered]            = p.elevated;
-    c[ImGuiCol_TabSelected]           = p.surface;
-    c[ImGuiCol_TabSelectedOverline]   = p.accent;
-    c[ImGuiCol_TabDimmed]             = p.canvas;
+    c[ImGuiCol_TabSelected]           = p.elevated;
+    c[ImGuiCol_TabSelectedOverline]   = {0, 0, 0, 0};
+    c[ImGuiCol_TabDimmed]             = {0, 0, 0, 0};
     c[ImGuiCol_TabDimmedSelected]     = p.surface_alt;
-    c[ImGuiCol_TabDimmedSelectedOverline] = with_alpha(p.accent, 0.35f);
+    c[ImGuiCol_TabDimmedSelectedOverline] = {0, 0, 0, 0};
 
     c[ImGuiCol_DockingPreview]        = with_alpha(p.accent, 0.35f);
     c[ImGuiCol_DockingEmptyBg]        = p.canvas;
@@ -231,18 +238,18 @@ void apply_theme(float dpi_scale)
     c[ImGuiCol_PlotHistogram]         = p.accent;
     c[ImGuiCol_PlotHistogramHovered]  = p.accent_hot;
 
-    c[ImGuiCol_TableHeaderBg]         = p.surface_alt;
+    c[ImGuiCol_TableHeaderBg]         = {0, 0, 0, 0};
     c[ImGuiCol_TableBorderStrong]     = p.line;
-    c[ImGuiCol_TableBorderLight]      = with_alpha(p.line, 0.5f);
+    c[ImGuiCol_TableBorderLight]      = with_alpha(p.line, 0.6f);
     c[ImGuiCol_TableRowBg]            = {0, 0, 0, 0};
-    c[ImGuiCol_TableRowBgAlt]         = with_alpha(p.surface_alt, 0.4f);
+    c[ImGuiCol_TableRowBgAlt]         = with_alpha(p.text, 0.02f);
 
     c[ImGuiCol_TextSelectedBg]        = with_alpha(p.accent, 0.35f);
-    c[ImGuiCol_NavCursor]             = p.accent;
+    c[ImGuiCol_NavCursor]             = with_alpha(p.accent, 0.8f);
     c[ImGuiCol_DragDropTarget]        = p.accent_hot;
-    c[ImGuiCol_ModalWindowDimBg]      = {0.02f, 0.02f, 0.03f, 0.62f};
+    c[ImGuiCol_ModalWindowDimBg]      = {0.01f, 0.01f, 0.02f, 0.66f};
 
-    if (dpi_scale != 1.0f) s.ScaleAllSizes(dpi_scale);
+    if (g_dpi != 1.0f) s.ScaleAllSizes(g_dpi);
 }
 
 } // namespace rd::ui

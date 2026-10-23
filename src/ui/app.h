@@ -46,6 +46,10 @@ struct AppOptions {
     std::string screenshot;          // where to write it
     double      screenshot_delay = 0.0;  // seconds; 0 waits for the run to finish
     double      exit_after       = 0.0;  // seconds; 0 means run until closed
+    // Where the interface starts, so a script can screenshot any state.
+    std::string ui_tab;              // tune | report | director | renders
+    std::string ui_view;             // low | source | compare
+    std::string ui_show;             // settings | log | shortcuts | about
 };
 
 // Owns the window, the GPU context and the pipeline. Returns a process exit code.

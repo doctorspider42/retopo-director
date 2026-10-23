@@ -247,7 +247,7 @@ if(RD_BUILD_TESTS)
 endif()
 
 message(STATUS "-------------------------------------------------")
-message(STATUS " Retopo Director ${PROJECT_VERSION}")
+message(STATUS " PS2 Retopo Director ${PROJECT_VERSION}")
 message(STATUS "  compiler : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  build    : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  LTO      : ${RD_LTO} / supported=${RD_IPO_OK}")

@@ -1241,7 +1241,7 @@ bool Pipeline::stage_report(const PipelineSettings& s)
 
     // --- for a human --------------------------------------------------------
     std::string md;
-    md += "# Retopo Director report\n\n";
+    md += "# PS2 Retopo Director report\n\n";
     md += format("- source: `%s`\n", r.source_path.filename().string().c_str());
     md += format("- profile: **%s** (%d triangles, %d vertices)\n", s.profile.name.c_str(),
                  s.profile.max_triangles, s.profile.max_vertices);

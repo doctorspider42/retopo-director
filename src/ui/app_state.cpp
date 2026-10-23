@@ -298,7 +298,7 @@ void AppState::upload_meshes()
         if (!r.highpoly.empty()) {
             gpu_high.upload(r.highpoly);
             gpu_high_ok = gpu_high.valid();
-            if (!r.segmentation.tri_region.empty() &&
+            if (mode == RenderMode::Regions && !r.segmentation.tri_region.empty() &&
                 r.segmentation.tri_region.size() == r.highpoly.triangle_count()) {
                 std::vector<Vec4> colors;
                 region_colors(r.segmentation, colors);
@@ -468,6 +468,8 @@ void AppState::save_settings() const
     ui["wireframe"]      = wireframe;
     ui["mode"]           = int(mode);
     ui["log_min_level"]  = log_min_level;
+    ui["inspector_width"] = inspector_width;
+    ui["tab"]            = int(tab);
     j["ui"] = ui;
 
     Json recents = Json::array();
@@ -502,6 +504,9 @@ void AppState::load_settings()
     wireframe               = json_get<bool>(ui, "wireframe", wireframe);
     mode                    = RenderMode(std::clamp(json_get<int>(ui, "mode", 0), 0, 6));
     log_min_level           = std::clamp(json_get<int>(ui, "log_min_level", 1), 0, 4);
+    inspector_width         = std::clamp(json_get<float>(ui, "inspector_width", inspector_width),
+                                         320.0f, 720.0f);
+    tab                     = Tab(std::clamp(json_get<int>(ui, "tab", 0), 0, 3));
 
     // Oldest first, because push_recent inserts at the front. Going through it
     // rather than push_back is what collapses entries a previous build wrote

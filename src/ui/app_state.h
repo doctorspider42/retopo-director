@@ -163,19 +163,36 @@ struct AppState {
     // whole channel exists to avoid.
     bool          advice_wants_attention = false;
 
-    // --- panels --------------------------------------------------------------
-    bool show_viewport   = true;
-    bool show_pipeline   = true;
-    bool show_regions    = true;
-    bool show_director   = true;
-    bool show_validation = true;
-    bool show_gallery    = true;
-    bool show_log        = true;
-    bool show_stats      = true;
-    bool show_demo       = false;
-    bool show_about      = false;
-    // The second window: everything that is set once and then left alone.
-    bool show_options    = false;
+    // --- shell ---------------------------------------------------------------
+    // One fixed frame instead of a docking workspace: a top bar, the viewport,
+    // one inspector with tabs, a status bar. Nothing to lose, close or rearrange.
+    enum class Tab : int { Tune = 0, Report, Director, Renders };
+    Tab   tab             = Tab::Tune;
+    // Set when something happens that the user should see on another tab -
+    // a run finishing lands on the report - and cleared once it is shown.
+    bool  tab_changed     = false;
+    float inspector_width = 400.0f;
+    bool  show_log        = false;
+    bool  show_demo       = false;
+    bool  show_about      = false;
+    bool  show_shortcuts  = false;
+    // The settings sheet, and which of its pages is open.
+    bool  show_options    = false;
+    int   options_page    = 0;
+    // A render opened full size from the Renders tab.
+    fs::path lightbox;
+    // Where the wipe sits in the Compare view, 0..1 from the left.
+    float compare_split   = 0.5f;
+    // Files dropped on the window this frame. GLFW calls back from inside
+    // glfwPollEvents, on this thread, so a plain vector is enough.
+    std::vector<fs::path> dropped;
+    // The stage seen last frame, to notice a run ending.
+    Stage last_stage      = Stage::Idle;
+    // When the current run started, for the clock in the status bar.
+    double run_started    = 0.0;
+    // Set by a full run, so its end opens the report. A rebuild leaves the
+    // inspector where it was: the person is in the middle of tuning.
+    bool   jump_to_report = false;
 
     // --- log view ------------------------------------------------------------
     int         log_min_level = 1;   // Debug

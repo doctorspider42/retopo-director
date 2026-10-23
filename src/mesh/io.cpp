@@ -1076,7 +1076,7 @@ bool save_obj(const fs::path& path, const Mesh& mesh, const SaveOptions& opts,
 
     std::string text;
     text.reserve(m.vertex_count() * 48 + m.indices.size() * 12);
-    text += "# Retopo Director " RD_VERSION_STRING "\n";
+    text += "# PS2 Retopo Director " RD_VERSION_STRING "\n";
     const bool paged = m.has_pages() && opts.page_textures.size() > 1;
     if (!opts.texture_file.empty() || paged)
         text += "mtllib " + path.stem().string() + ".mtl\n";
@@ -1205,7 +1205,7 @@ bool save_gltf(const fs::path& path, const Mesh& mesh, const SaveOptions& opts,
     const Aabb box = m.bounds();
 
     std::string json = "{\n  \"asset\": {\"version\": \"2.0\", \"generator\": "
-                       "\"Retopo Director " RD_VERSION_STRING "\"},\n";
+                       "\"PS2 Retopo Director " RD_VERSION_STRING "\"},\n";
     json += "  \"scene\": 0,\n  \"scenes\": [{\"nodes\": [0]}],\n";
     json += "  \"nodes\": [{\"mesh\": 0, \"name\": \"" +
             (m.name.empty() ? std::string("lowpoly") : m.name) + "\"}],\n";

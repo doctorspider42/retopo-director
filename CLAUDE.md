@@ -1,4 +1,4 @@
-# Working on Retopo Director
+# Working on PS2 Retopo Director
 
 ## Build and test
 
@@ -38,7 +38,9 @@ To look at the interface without needing it focused or even visible:
 ```
 
 The capture comes off the back buffer, so it contains the application window and
-nothing else. F12 does the same thing interactively.
+nothing else. F12 does the same thing interactively. `--tab tune|report|director|renders`,
+`--view low|source|compare` and `--show settings|log|shortcuts|about` put the
+interface in the state the screenshot is for.
 
 There is no test mesh in the repository. `tools/make_test_meshes.py <dir>`
 writes four (sphere, torus, lopsided blob, an A-pose figure with thin limbs),
@@ -219,7 +221,8 @@ a file and run them rather than piping them in.
 | add a hard check | `src/validate/validator.cpp` |
 | add a retopo backend | implement the shape of `quad_field_retopo`, dispatch in `src/geom/retopo.cpp` |
 | add a segmenter | implement `ISegmenter`, dispatch in `make_segmenter` (`src/segment/segmenter.cpp`) |
-| change the look | `src/ui/theme.cpp` for the palette and metrics, `src/ui/widgets.cpp` for the components |
+| change the look | `src/ui/theme.cpp` for the palette and metrics, `src/ui/widgets.cpp` and `src/ui/icons.cpp` for the components |
+| change the layout | `src/ui/app.cpp` lays out the fixed frame; `shell.cpp` (top bar, status bar, sheets), `panels_scene.cpp` (viewport, renders), `inspector.cpp` (tune, report, director), `settings.cpp` (the settings pages) |
 | add an LLM backend | implement `ILlmBackend`, register in `make_llm_backend` |
 
 Do not add geometry decisions to the prompt layer, and do not let the geometry
