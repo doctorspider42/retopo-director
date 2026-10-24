@@ -221,7 +221,7 @@ retopo-director.exe --mesh high.obj --segmenter sam
 
 A profile is the contract: triangle and vertex limits, shell count, bone influences, texture size and palette depth, strip requirements, the cameras the asset will really be seen through, and a paragraph of art direction.
 
-Two ship in [`profiles/`](profiles): `ps2_character.json` (1 400 triangles, 256² body plus a 512² face page) and `ps2_prop.json` (400 triangles, 128², 16 colours). Edit them in **Settings → Target hardware** and save your own.
+Two ship in [`profiles/`](profiles): `ps2_character.json` (4 000 triangles, 256² body plus a 512² face page) and `ps2_prop.json` (400 triangles, 128², 16 colours). Edit them in **Settings → Target hardware** and save your own.
 
 ## Building from source
 

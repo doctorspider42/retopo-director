@@ -317,7 +317,7 @@ void draw_profile_settings(AppState& app)
         ImGui::TableNextColumn();
         section_label("Geometry");
         begin_form("geo_form", 130.0f);
-        changed |= slider_int("Max triangles", &profile.max_triangles, 32, 20000, 1400);
+        changed |= slider_int("Max triangles", &profile.max_triangles, 32, 20000, 4000);
         changed |= slider_int("Max vertices", &profile.max_vertices, 32, 20000, 1000);
         changed |= slider_int("Max shells", &profile.max_shells, 0, 64, 32,
                               "Not a check: pieces past this are deleted, smallest first. "

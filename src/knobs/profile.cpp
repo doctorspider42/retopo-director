@@ -46,11 +46,11 @@ TargetProfile TargetProfile::ps2_character_default()
     p.name        = "ps2_character";
     p.description = "Playable third person character, PlayStation 2 class budget.";
 
-    p.max_triangles       = 1400;
+    p.max_triangles       = 4000;
     // Roughly T/2 for a closed mesh, plus the vertices the uv seams duplicate.
     // On a thousand-triangle character that surcharge is 30 to 45 per cent, so
     // a limit of T/2 exactly is unreachable no matter how good the retopology.
-    p.max_vertices        = 1200;
+    p.max_vertices        = 3000;
     p.max_shells          = 1;
     p.max_bone_influences = 2;
     p.require_manifold    = true;
