@@ -9,6 +9,7 @@
 #include <stb_image.h>
 
 #include <algorithm>
+#include <cmath>
 #include <imgui.h>
 
 namespace rd::ui {
@@ -316,6 +317,81 @@ Mesh region_submesh(const Mesh& mesh, const std::vector<uint16_t>& tri_region, u
     return out;
 }
 
+// The source as its author textured it, for the shaded view: every material's
+// base colour map packed side by side into one texture, and the mesh split
+// into separate corners, because the loader welds by position and only the
+// per corner uvs still know which side of a seam each triangle was on.
+// Returns an empty texture when the source carries no artwork.
+Texture source_display(const Mesh& src, Mesh& out)
+{
+    if (!src.materials || src.materials->textured_count() == 0 ||
+        src.corner_uvs.size() != src.indices.size() ||
+        src.tri_material.size() != src.triangle_count())
+        return {};
+
+    // The tallest map sets the row height; a material without a map gets a
+    // small white tile so its base factor alone shows through.
+    const auto& mats = src.materials->materials;
+    int height = 4;
+    for (const SourceMaterial& m : mats)
+        if (!m.base_color.empty()) height = std::max(height, m.base_color.height);
+    std::vector<int> x0(mats.size()), w(mats.size());
+    int width = 0;
+    for (size_t i = 0; i < mats.size(); ++i) {
+        const Texture& t = mats[i].base_color;
+        w[i]  = t.empty() ? 4 : int(std::lround(float(t.width) * float(height) / float(t.height)));
+        x0[i] = width;
+        width += w[i];
+    }
+    // GL 3.3 guarantees 1024; every driver this runs on manages 16384, and a
+    // row of four 1k maps is 4096.
+    if (width > 16384) return {};
+
+    Texture art;
+    art.resize(width, height, 4);
+    for (size_t i = 0; i < mats.size(); ++i) {
+        const Texture& t = mats[i].base_color;
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < w[i]; ++x)
+                art.set(x0[i] + x, y,
+                        t.empty() ? Vec4{1, 1, 1, 1}
+                                  : t.sample({(float(x) + 0.5f) / float(w[i]),
+                                              (float(y) + 0.5f) / float(height)}));
+    }
+
+    out = Mesh{};
+    const size_t tris = src.triangle_count();
+    out.positions.reserve(tris * 3);
+    out.uvs.reserve(tris * 3);
+    out.colors.reserve(tris * 3);
+    if (src.has_normals()) out.normals.reserve(tris * 3);
+    for (size_t t = 0; t < tris; ++t) {
+        const uint16_t m  = src.tri_material[t];
+        const size_t   mi = m < mats.size() ? m : 0;
+        // A tiling map cannot wrap inside an atlas; moving the whole triangle
+        // back by whole tiles keeps the common case, a uv just past the edge.
+        Vec2 lo{1e30f, 1e30f};
+        for (int c = 0; c < 3; ++c) {
+            lo.x = std::min(lo.x, src.corner_uvs[t * 3 + c].x);
+            lo.y = std::min(lo.y, src.corner_uvs[t * 3 + c].y);
+        }
+        const Vec2 shift{std::floor(lo.x), std::floor(lo.y)};
+        const Vec4& f = mats[mi].base_factor;
+        for (int c = 0; c < 3; ++c) {
+            const uint32_t v  = src.indices[t * 3 + c];
+            const Vec2     uv = src.corner_uvs[t * 3 + c];
+            const float    u  = std::clamp(uv.x - shift.x, 0.0f, 1.0f);
+            const float    vv = std::clamp(uv.y - shift.y, 0.0f, 1.0f);
+            out.indices.push_back(uint32_t(out.positions.size()));
+            out.positions.push_back(src.positions[v]);
+            if (src.has_normals()) out.normals.push_back(src.normals[v]);
+            out.uvs.push_back({(float(x0[mi]) + u * float(w[mi])) / float(width), vv});
+            out.colors.push_back({f.x, f.y, f.z, 1.0f});
+        }
+    }
+    return art;
+}
+
 } // namespace
 
 void AppState::upload_highlight()
@@ -349,7 +425,22 @@ void AppState::upload_meshes()
 
     pipeline.with_results([&](const PipelineResults& r) {
         if (!r.highpoly.empty()) {
-            gpu_high.upload(r.highpoly);
+            // Only the shaded view shows the artwork; every other mode colours
+            // the source per vertex or per triangle and needs its own buffer.
+            Mesh    display;
+            Texture art;
+            if (mode == RenderMode::Shaded && show_baked_texture)
+                art = source_display(r.highpoly, display);
+            gpu_high.clear_texture();
+            gpu_high.set_texture_is_albedo(false);
+            if (!art.empty()) {
+                gpu_high.upload(display);
+                gpu_high.set_texture(art, true);
+                gpu_high.set_texture_is_albedo(true);
+                gpu_high.set_baked_colors(false);
+            } else {
+                gpu_high.upload(r.highpoly);
+            }
             gpu_high_ok = gpu_high.valid();
             if (mode == RenderMode::Regions && !r.segmentation.tri_region.empty() &&
                 r.segmentation.tri_region.size() == r.highpoly.triangle_count()) {

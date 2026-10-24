@@ -60,6 +60,7 @@ uniform float uAlpha;
 uniform sampler2D uTexture;
 uniform int   uUseTexture;
 uniform int   uPrelit;        // 1 when the colours already carry baked light
+uniform int   uTextureLit;    // 1 when the texture is albedo the view must light
 uniform float uCheckerScale;
 
 out vec4 fragColor;
@@ -128,6 +129,10 @@ void main()
     // bake has run, the lighting is already in the pixels; running the rig over
     // it a second time just clips everything to white.
     if (uMode == 0) {
+        if (uUseTexture == 1 && uTextureLit == 1) {
+            fragColor = vec4(texture(uTexture, vUv).rgb * vColor.rgb * lightRig(n), 1.0);
+            return;
+        }
         if (uUseTexture == 1) { fragColor = vec4(texture(uTexture, vUv).rgb, 1.0); return; }
         if (uPrelit == 1)     { fragColor = vec4(vColor.rgb, 1.0); return; }
         fragColor = vec4(vColor.rgb * lightRig(n), 1.0);
@@ -200,7 +205,8 @@ void GpuMesh::release()
     if (texture_) glDeleteTextures(1, &texture_);
     vao_ = vbo_ = ebo_ = texture_ = 0;
     index_count_ = vertex_count_ = 0;
-    baked_colors_ = false;
+    baked_colors_   = false;
+    texture_albedo_ = false;
 }
 
 void GpuMesh::ensure_buffers()
@@ -393,6 +399,7 @@ bool Renderer::init(std::string* error)
     u_texture_       = glGetUniformLocation(program_, "uTexture");
     u_use_texture_   = glGetUniformLocation(program_, "uUseTexture");
     u_prelit_        = glGetUniformLocation(program_, "uPrelit");
+    u_texture_lit_   = glGetUniformLocation(program_, "uTextureLit");
     u_checker_scale_ = glGetUniformLocation(program_, "uCheckerScale");
     return true;
 }
@@ -503,6 +510,7 @@ void Renderer::draw_scene(const GpuMesh& mesh, const ViewCamera& camera,
     const bool use_texture = opts.mode == RenderMode::Shaded && mesh.has_texture();
     glUniform1i(u_use_texture_, use_texture ? 1 : 0);
     glUniform1i(u_prelit_, mesh.has_baked_colors() ? 1 : 0);
+    glUniform1i(u_texture_lit_, mesh.texture_is_albedo() ? 1 : 0);
     if (use_texture) {
         mesh.bind_texture(0);
         glUniform1i(u_texture_, 0);

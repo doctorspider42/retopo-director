@@ -57,6 +57,11 @@ public:
     // baked lighting, which the shaded view must not light again.
     bool   has_baked_colors() const { return baked_colors_; }
     void   set_baked_colors(bool on) { baked_colors_ = on; }
+    // A source's own artwork is albedo: the view lights it and multiplies in
+    // the vertex colour, where the material's base factor travels. A baked
+    // texture already holds its light and is shown as it is.
+    bool   texture_is_albedo() const { return texture_albedo_; }
+    void   set_texture_is_albedo(bool on) { texture_albedo_ = on; }
 
     void draw() const;
     void draw_wireframe() const;
@@ -72,6 +77,7 @@ private:
     size_t   index_count_ = 0;
     size_t   vertex_count_ = 0;
     bool     baked_colors_ = false;
+    bool     texture_albedo_ = false;
     Aabb     bounds_;
 };
 
@@ -132,7 +138,7 @@ private:
 
     int u_view_proj_ = -1, u_model_ = -1, u_mode_ = -1, u_camera_ = -1;
     int u_color_ = -1, u_alpha_ = -1, u_texture_ = -1, u_use_texture_ = -1;
-    int u_prelit_ = -1;
+    int u_prelit_ = -1, u_texture_lit_ = -1;
     int u_checker_scale_ = -1;
 };
 
