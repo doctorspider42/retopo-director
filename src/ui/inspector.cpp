@@ -721,8 +721,9 @@ void tab_report(AppState& app)
     if (!iterations.empty()) {
         spacer(12.0f);
         section_label("Passes");
-        for (const IterationRecord& it : iterations) {
-            ImGui::PushID(it.index);
+        for (size_t row = 0; row < iterations.size(); ++row) {
+            const IterationRecord& it = iterations[row];
+            ImGui::PushID(int(row));
             const bool is_kept = it.index == kept;
             const ImVec2 pos = ImGui::GetCursorScreenPos();
             const float  w   = ImGui::GetContentRegionAvail().x;

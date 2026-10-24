@@ -670,9 +670,21 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
 
         // --- snapshot the inputs -------------------------------------------
         Mesh         source;
+    // A rebuild runs the loop again on top of the run's passes, and numbered
+    // them from one again: two passes called 1, both marked kept in the
+    // report, and the rebuild's renders written over the first pass's.
+    // Passes are numbered on from the last one; `iteration` stays this
+    // loop's count, for the progress bar and the stopping rule.
+    int first_pass = 0;
+    {
+        std::lock_guard lock(results_mutex_);
+        if (!results_.iterations.empty()) first_pass = results_.iterations.back().index;
+    }
+
         MeshAnalysis analysis;
         Segmentation seg;
         KnobPanel    panel;
+        const int pass = first_pass + iteration;
         {
             std::lock_guard lock(results_mutex_);
             source   = results_.highpoly;
@@ -905,7 +917,7 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         opts.wireframe_overlay = true;
         opts.bilinear_texture  = s.profile.texture.bilinear;
 
-        const fs::path iter_dir = paths::iteration_dir(iteration);
+        const fs::path iter_dir = paths::iteration_dir(pass);
         // One texture for the renderer: the pages laid side by side.
         Mesh    display_mesh;
         Texture display_tex = bake.ok ? display_atlas(retopo.mesh, bake, display_mesh) : Texture{};
@@ -958,7 +970,7 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
 
         // --- record ----------------------------------------------------------
         IterationRecord record;
-        record.index      = iteration;
+        record.index      = pass;
         record.panel      = panel;
         record.triangles  = retopo.mesh.triangle_count();
         record.vertices   = retopo.mesh.vertex_count();
@@ -982,7 +994,7 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
             results_.silhouette      = silhouette;
             results_.panel           = panel;
             if (better(validation, silhouette, kept)) {
-                kept.iteration  = iteration;
+                kept.iteration  = pass;
                 kept.lowpoly    = results_.lowpoly;
                 kept.density    = results_.density;
                 kept.retopo     = retopo;
