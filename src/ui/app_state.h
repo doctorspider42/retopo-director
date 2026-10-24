@@ -190,7 +190,6 @@ struct AppState {
     bool  tab_changed     = false;
     float inspector_width = 400.0f;
     bool  show_log        = false;
-    bool  show_demo       = false;
     bool  show_about      = false;
     bool  show_shortcuts  = false;
     // The settings sheet, and which of its pages is open.

@@ -463,7 +463,6 @@ void draw_topbar(AppState& app, const ImVec2& pos, const ImVec2& size, bool& wan
                                     app.updater.state() != UpdateState::Downloading))
                 app.updater.check(false);
             if (ImGui::MenuItem("About")) app.show_about = true;
-            ImGui::MenuItem("ImGui demo", nullptr, &app.show_demo);
             ImGui::Separator();
             if (ImGui::MenuItem("Quit", "Ctrl+Q")) want_quit = true;
             ImGui::EndPopup();

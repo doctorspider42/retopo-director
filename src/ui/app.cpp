@@ -578,8 +578,6 @@ int run_application(const AppOptions& opts)
         ui::draw_shortcuts_modal(*app);
         ui::draw_toast(*app);
 
-        if (app->show_demo) ImGui::ShowDemoWindow(&app->show_demo);
-
         if (app->auto_rotate && !app->use_profile_camera)
             app->camera.yaw += float(io.DeltaTime) * 18.0f;
 
