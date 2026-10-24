@@ -200,6 +200,8 @@ private:
     bool stage_analyse(const PipelineSettings& s);
     bool stage_reference_renders(const PipelineSettings& s);
     bool stage_segment(const PipelineSettings& s);
+    bool stage_choose_split(const PipelineSettings& s, bool& finished);
+    void render_region_overlay(const PipelineSettings& s);
     bool stage_name_regions(const PipelineSettings& s);
     bool stage_allocate_budget(const PipelineSettings& s);
     bool stage_iterate(const PipelineSettings& s);

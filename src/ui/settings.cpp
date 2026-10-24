@@ -1011,8 +1011,8 @@ void regions_picker_popup(AppState& app, ImVec2 anchor)
         const bool sel = seg.kind == SegmenterKind::Auto && !downloading;
         bool hov = false;
         const CardFrame fr = card_open(cw);
-        if (card_header("##auto", "Auto", nullptr, p.text, "SAM once a model is in place, "
-                        "Geometric until then.", sel, inner, &hov) && !downloading)
+        if (card_header("##auto", "Auto", nullptr, p.text, "Tries both and keeps the better "
+                        "outline. Geometric until a model is in place.", sel, inner, &hov) && !downloading)
             seg.kind = SegmenterKind::Auto;
         card_close(fr, sel, hov);
     }

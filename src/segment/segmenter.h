@@ -31,7 +31,8 @@ namespace rd {
 enum class SegmenterKind : uint8_t {
     Geometric = 0,   // the deterministic dual graph split
     Sam,             // Segment Anything through the sidecar, geometric on failure
-    Auto             // Sam when the sidecar is configured and answers, else Geometric
+    Auto             // both, one trial pass each, the better carries on (stage_choose_split);
+                     // Geometric alone when the sidecar is not configured or does not answer
 };
 
 const char*   segmenter_kind_name(SegmenterKind k);

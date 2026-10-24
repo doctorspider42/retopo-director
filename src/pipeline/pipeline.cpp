@@ -489,7 +489,13 @@ bool Pipeline::stage_segment(const PipelineSettings& s)
     }
     bump();
 
-    // Region overlay renders, for the naming step.
+    render_region_overlay(s);
+    return true;
+}
+
+// Region overlay renders, for the naming step.
+void Pipeline::render_region_overlay(const PipelineSettings& s)
+{
     RenderOptions opts;
     opts.width   = s.render_size;
     opts.height  = s.render_size;
@@ -512,6 +518,71 @@ bool Pipeline::stage_segment(const PipelineSettings& s)
         results_.region_views = std::move(region_views);
     }
     bump();
+}
+
+// Auto tries both splits. SAM and the geometric split each win on different
+// assets - SAM by half on a costumed ranger and a statue, the geometric split
+// on the coffee cart and on smooth single bodies - and nothing measured about
+// the mesh beforehand sorted them well enough. So the split is chosen the way
+// the run chooses everything else, by result: one deterministic pass on each,
+// and the better of the two carries on. Without the director that pass is the
+// whole run and `finished` says so; with it, the director starts on the
+// chosen split as it would have on any other, and the two trial passes stay
+// in the record ahead of its own.
+bool Pipeline::stage_choose_split(const PipelineSettings& s, bool& finished)
+{
+    finished = false;
+    // SAM when it answers, the geometric split when it does not - in which
+    // case there is nothing to choose between.
+    if (!stage_segment(s)) return false;
+    {
+        std::lock_guard lock(results_mutex_);
+        if (results_.split_by == "Geometric") return true;
+    }
+
+    PipelineSettings trial = s;
+    trial.use_llm        = false;
+    trial.max_iterations = 1;
+
+    if (!stage_allocate_budget(trial) || !stage_iterate(trial)) return false;
+    PipelineResults sam_run;
+    {
+        std::lock_guard lock(results_mutex_);
+        sam_run = results_;
+    }
+
+    trial.segmenter.kind = SegmenterKind::Geometric;
+    if (!stage_segment(trial) || !stage_allocate_budget(trial) || !stage_iterate(trial))
+        return false;
+
+    bool keep_sam = false;
+    {
+        std::lock_guard lock(results_mutex_);
+        const PipelineResults& geo = results_;
+        // Passing validation first, then the silhouette: the order the run
+        // keeps its best pass by.
+        if (sam_run.validation.passed != geo.validation.passed)
+            keep_sam = sam_run.validation.passed;
+        else
+            keep_sam = sam_run.silhouette.mean < geo.silhouette.mean;
+        RD_INFO("auto split: %s pass %.4f (%s), geometric pass %.4f (%s); keeping %s",
+                sam_run.split_by.c_str(), sam_run.silhouette.mean,
+                sam_run.validation.passed ? "valid" : "invalid", geo.silhouette.mean,
+                geo.validation.passed ? "valid" : "invalid",
+                keep_sam ? sam_run.split_by.c_str() : "the geometric split");
+        if (keep_sam) {
+            // The geometric trial's pass stays in the record; its renders are
+            // in their own folder, so nothing of SAM's was written over.
+            std::vector<IterationRecord> passes = std::move(results_.iterations);
+            results_ = std::move(sam_run);
+            results_.iterations = std::move(passes);
+        }
+    }
+    // The geometric trial drew its overlay over SAM's files.
+    if (keep_sam) render_region_overlay(s);
+    else          bump();
+
+    finished = !(s.use_llm && llm_);
     return true;
 }
 
@@ -1374,16 +1445,20 @@ void Pipeline::run(Entry entry, fs::path mesh_path, PipelineSettings settings)
     // is, so the message lands in the Pipeline panel like any other.
     bool ok = true;
     try {
+        bool iterated = false;
         if (entry == Entry::Full) {
             ok = stage_load(mesh_path, settings) &&
                  stage_analyse(settings) &&
-                 stage_reference_renders(settings) &&
-                 stage_segment(settings) &&
-                 stage_name_regions(settings) &&
-                 stage_allocate_budget(settings);
+                 stage_reference_renders(settings);
+            if (ok)
+                ok = settings.segmenter.kind == SegmenterKind::Auto
+                         ? stage_choose_split(settings, iterated)
+                         : stage_segment(settings);
+            if (ok && !iterated)
+                ok = stage_name_regions(settings) && stage_allocate_budget(settings);
         }
 
-        if (ok && !cancelled()) ok = stage_iterate(settings);
+        if (ok && !cancelled() && !iterated) ok = stage_iterate(settings);
         if (ok && !cancelled()) ok = stage_export(settings);
         if (ok && !cancelled()) ok = stage_report(settings);
     } catch (const std::exception& e) {
