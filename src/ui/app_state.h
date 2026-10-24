@@ -147,6 +147,9 @@ struct AppState {
     // from the bounds alone; it has to be asked for.
     bool        want_frame = false;
     int         profile_camera_index = 0;
+    // A camera asked for by name on the command line, waiting for a run to
+    // build the profile's cameras.
+    std::string pending_camera;
     bool        show_baked_texture = true;
 
     // --- documents -----------------------------------------------------------

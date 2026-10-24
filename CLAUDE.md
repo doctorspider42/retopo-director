@@ -39,8 +39,9 @@ To look at the interface without needing it focused or even visible:
 
 The capture comes off the back buffer, so it contains the application window and
 nothing else. F12 does the same thing interactively. `--tab tune|report|director|renders`,
-`--view low|source|compare` and `--show settings|log|shortcuts|about` put the
-interface in the state the screenshot is for.
+`--view low|source|compare`, `--camera <profile camera>` (`cutscene_face`, say)
+and `--show settings|log|shortcuts|about` put the interface in the state the
+screenshot is for.
 
 There is no test mesh in the repository. `tools/make_test_meshes.py <dir>`
 writes four (sphere, torus, lopsided blob, an A-pose figure with thin limbs),

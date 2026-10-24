@@ -49,6 +49,7 @@ struct AppOptions {
     // Where the interface starts, so a script can screenshot any state.
     std::string ui_tab;              // tune | report | director | renders
     std::string ui_view;             // low | source | compare
+    std::string ui_camera;           // a profile camera by name: gameplay, cutscene_face...
     std::string ui_show;             // settings | log | shortcuts | about
 };
 

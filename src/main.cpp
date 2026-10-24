@@ -47,6 +47,7 @@ void print_usage()
         "  --exit-after <sec>        Close the window automatically\n"
         "  --tab <name>              Inspector tab: tune, report, director, renders\n"
         "  --view <name>             Viewport: low, source, compare\n"
+        "  --camera <name>           A profile camera, once a run has built them\n"
         "  --show <what>             Open a sheet: settings, log, shortcuts, about\n"
         "  --help            This text\n",
         RD_VERSION_STRING);
@@ -119,6 +120,8 @@ int main(int argc, char** argv)
             opts.ui_tab = next("--tab");
         } else if (!std::strcmp(a, "--view")) {
             opts.ui_view = next("--view");
+        } else if (!std::strcmp(a, "--camera")) {
+            opts.ui_camera = next("--camera");
         } else if (!std::strcmp(a, "--show")) {
             opts.ui_show = next("--show");
         } else {

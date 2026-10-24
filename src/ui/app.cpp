@@ -438,6 +438,9 @@ int run_application(const AppOptions& opts)
                 app->source           = ui::ViewSource(i);
                 app->auto_view_source = false;
             }
+        // The profile's cameras exist only once a run has framed them, so the
+        // name waits until they do.
+        app->pending_camera = opts.ui_camera;
         if (iequals(opts.ui_show, "settings"))  app->show_options   = true;
         if (iequals(opts.ui_show, "log"))       app->show_log       = true;
         if (iequals(opts.ui_show, "shortcuts")) app->show_shortcuts = true;
@@ -478,6 +481,17 @@ int run_application(const AppOptions& opts)
         app->sync_from_pipeline();
         app->upload_meshes();
         app->upload_highlight();
+        if (!app->pending_camera.empty()) {
+            app->pipeline.with_results([&](const PipelineResults& r) {
+                for (size_t i = 0; i < r.cameras.size(); ++i)
+                    if (iequals(r.cameras[i].name, app->pending_camera)) {
+                        app->use_profile_camera   = true;
+                        app->profile_camera_index = int(i);
+                        app->pending_camera.clear();
+                        break;
+                    }
+            });
+        }
 
         if (autorun_pending && ImGui::GetFrameCount() > 3) {
             autorun_pending = false;
