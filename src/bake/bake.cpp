@@ -48,6 +48,12 @@ struct TexelJob {
     // the barycentrics are already in hand.
     Vec2     source_uv{0.0f, 0.0f};
     bool     has_source_uv = false;
+    // How long one texel of the bake is on the low poly's surface, and, when
+    // the layout was carried over, how far it reaches in the source's uvs:
+    // what the source map is averaged over, so a 256 atlas reads a 2048 map
+    // instead of picking a pixel out of it.
+    float    footprint = 0.0f;
+    float    source_uv_radius = 0.0f;
 };
 
 // The albedo at a point on the high poly, given the barycentric weights of the
@@ -63,7 +69,8 @@ struct TexelJob {
 //
 // Vertex colours are the fallback, and a flat white is the fallback to that, so
 // a mesh with neither still bakes - it just bakes lighting onto nothing.
-Vec3 albedo_at(const Mesh& source, uint32_t triangle, float w0, float w1, float w2)
+Vec3 albedo_at(const Mesh& source, uint32_t triangle, float w0, float w1, float w2,
+               float footprint = 0.0f)
 {
     const uint32_t i0 = source.indices[triangle * 3 + 0];
     const uint32_t i1 = source.indices[triangle * 3 + 1];
@@ -75,7 +82,19 @@ Vec3 albedo_at(const Mesh& source, uint32_t triangle, float w0, float w1, float 
                 const Vec2 uv = source.corner_uv(triangle, 0) * w0 +
                                 source.corner_uv(triangle, 1) * w1 +
                                 source.corner_uv(triangle, 2) * w2;
-                const Vec4 c  = mat->base_color.sample(uv);
+                // The footprint, a length on the surface, in this triangle's
+                // uvs: scaled by how many uv units its own metre spans.
+                float radius = 0.0f;
+                if (footprint > 0.0f) {
+                    const Vec2  ua = source.corner_uv(triangle, 0), ub = source.corner_uv(triangle, 1),
+                                uc = source.corner_uv(triangle, 2);
+                    const float uv_area = 0.5f * std::fabs((ub.x - ua.x) * (uc.y - ua.y) -
+                                                           (ub.y - ua.y) * (uc.x - ua.x));
+                    const float area = source.triangle_area(triangle);
+                    if (area > 1e-14f && uv_area > 0.0f)
+                        radius = 0.5f * footprint * std::sqrt(uv_area / area);
+                }
+                const Vec4 c  = mat->base_color.sample_area(uv, radius);
                 return {saturate(c.x * mat->base_factor.x), saturate(c.y * mat->base_factor.y),
                         saturate(c.z * mat->base_factor.z)};
             }
@@ -87,10 +106,10 @@ Vec3 albedo_at(const Mesh& source, uint32_t triangle, float w0, float w1, float 
     return {saturate(c.x), saturate(c.y), saturate(c.z)};
 }
 
-Vec3 sample_source_color(const Mesh& source, const RayHit& hit)
+Vec3 sample_source_color(const Mesh& source, const RayHit& hit, float footprint = 0.0f)
 {
     if (!hit.hit()) return Vec3{1.0f, 1.0f, 1.0f};
-    return albedo_at(source, hit.triangle, 1.0f - hit.u - hit.v, hit.u, hit.v);
+    return albedo_at(source, hit.triangle, 1.0f - hit.u - hit.v, hit.u, hit.v, footprint);
 }
 
 // Barycentric weights of a point against the triangle it was projected onto.
@@ -116,12 +135,12 @@ void barycentric_at(const Mesh& source, const ClosestHit& hit, float& w0, float&
     w0 = saturate(1.0f - u - v);
 }
 
-Vec3 sample_source_color_at(const Mesh& source, const ClosestHit& hit)
+Vec3 sample_source_color_at(const Mesh& source, const ClosestHit& hit, float footprint = 0.0f)
 {
     if (!hit.hit()) return Vec3{1.0f, 1.0f, 1.0f};
     float w0 = 0.0f, w1 = 0.0f, w2 = 0.0f;
     barycentric_at(source, hit, w0, w1, w2);
-    return albedo_at(source, hit.triangle, w0, w1, w2);
+    return albedo_at(source, hit.triangle, w0, w1, w2, footprint);
 }
 
 // Half space triangle rasteriser over the UV domain, with a conservative
@@ -160,6 +179,52 @@ void rasterise_uv_triangle(const Vec2& a, const Vec2& b, const Vec2& c,
             emit(x, y, w0 / sum, w1 / sum, w2 / sum);
         }
     }
+}
+
+// How far texel density strays from the mesh's own average, either way:
+// more texels than average is wasted atlas and shimmer, fewer is blur.
+//
+// A percentile weighted by surface area, not the single worst triangle.
+// The worst triangle is always a sliver a few millimetres across that the
+// packer rounded up to a texel, and it swung this number from 3 to 47 on
+// the same asset between two runs that looked identical. What an artist
+// sees is the surface, so the surface decides: the density ratio that 98%
+// of the model's area is within.
+float uv_stretch(const Mesh& mesh)
+{
+    struct Sample { float deviation, area; };
+    if (!mesh.has_uvs()) return 0.0f;
+    const size_t tcount = mesh.triangle_count();
+    std::vector<Sample> samples;
+    samples.reserve(tcount);
+    double uv_total = 0.0, area_total = 0.0;
+    for (size_t t = 0; t < tcount; ++t) {
+        const uint32_t i0 = mesh.indices[t * 3 + 0];
+        const uint32_t i1 = mesh.indices[t * 3 + 1];
+        const uint32_t i2 = mesh.indices[t * 3 + 2];
+        const float area3 = mesh.triangle_area(t);
+        const Vec2 a = mesh.uvs[i0], b = mesh.uvs[i1], c = mesh.uvs[i2];
+        const float area2 = 0.5f * std::fabs((b.x - a.x) * (c.y - a.y) -
+                                             (b.y - a.y) * (c.x - a.x));
+        if (area3 < 1e-12f || area2 < 1e-12f) continue;
+        uv_total   += area2;
+        area_total += area3;
+        samples.push_back({area2 / area3, area3});
+    }
+    if (samples.empty() || uv_total <= 0.0 || area_total <= 0.0) return 0.0f;
+    const float mean = float(uv_total / area_total);
+    for (Sample& s : samples) s.deviation = std::max(s.deviation / mean, mean / s.deviation);
+    std::sort(samples.begin(), samples.end(),
+              [](const Sample& x, const Sample& y) { return x.deviation < y.deviation; });
+    const double cutoff = 0.98 * area_total;
+    double acc   = 0.0;
+    float  worst = 0.0f;
+    for (const Sample& s : samples) {
+        acc  += s.area;
+        worst = s.deviation;
+        if (acc >= cutoff) break;
+    }
+    return worst;
 }
 
 } // namespace
@@ -854,8 +919,24 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                 packed.ok && profile.max_vertices > 0 &&
                 candidate.vertex_count() <= size_t(profile.max_vertices) &&
                 overhead <= kMaxCarriedOverhead;
+            // Affordable is not enough either. A low poly triangle that
+            // straddles a source seam becomes an island of its own, a few
+            // texels across once padded, and at four thousand triangles a
+            // character's body came back as 279 charts, the lower half of the
+            // atlas confetti, at 7.3 times the average density where a fresh
+            // unwrap gave 1.6. Fresh unwraps measure 1.1 to 2.2 over the
+            // corpus and the validator warns at 4.
+            constexpr float kMaxCarriedStretch = 3.0f;
+            const float stretch = packed.ok ? uv_stretch(candidate) : 0.0f;
 
-            if (packed.ok && !affordable) {
+            if (packed.ok && affordable && stretch > kMaxCarriedStretch) {
+                RD_INFO("the source uv layout comes out %.1fx uneven in %d charts; unwrapping "
+                        "fresh instead", stretch, packed.charts);
+                result.messages.push_back(
+                    format("kept the generated uv layout: the source layout came out in %d charts "
+                           "at %.1fx the average texel density", packed.charts, stretch));
+                source_uv.clear();
+            } else if (packed.ok && !affordable) {
                 RD_INFO("the source uv layout needs %zu vertices (%.1fx the welded %zu) against "
                         "a budget of %d (%d charts); unwrapping fresh instead",
                         candidate.vertex_count(), overhead, mesh.vertex_count(),
@@ -994,6 +1075,18 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
         const Vec2 a{mesh.uvs[i0].x * width, mesh.uvs[i0].y * height};
         const Vec2 b{mesh.uvs[i1].x * width, mesh.uvs[i1].y * height};
         const Vec2 c{mesh.uvs[i2].x * width, mesh.uvs[i2].y * height};
+        // One texel's length on the surface, and in the source's uvs.
+        const float texel_area = 0.5f * std::fabs((b.x - a.x) * (c.y - a.y) -
+                                                  (b.y - a.y) * (c.x - a.x));
+        const float footprint =
+            texel_area > 0.0f ? std::sqrt(mesh.triangle_area(t) / texel_area) : 0.0f;
+        float source_uv_radius = 0.0f;
+        if (!source_uv.empty() && texel_area > 0.0f) {
+            const Vec2 sa = source_uv[i0], sb = source_uv[i1], sc = source_uv[i2];
+            const float source_area = 0.5f * std::fabs((sb.x - sa.x) * (sc.y - sa.y) -
+                                                       (sb.y - sa.y) * (sc.x - sa.x));
+            source_uv_radius = 0.5f * std::sqrt(source_area / texel_area);
+        }
 
         rasterise_uv_triangle(a, b, c, width, height,
                               [&](int x, int y, float w0, float w1, float w2) {
@@ -1008,7 +1101,9 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                                   job.normal = normalize(mesh.normals[i0] * w0 +
                                                          mesh.normals[i1] * w1 +
                                                          mesh.normals[i2] * w2);
-                                  job.triangle = uint32_t(t);
+                                  job.triangle  = uint32_t(t);
+                                  job.footprint = footprint;
+                                  job.source_uv_radius = source_uv_radius;
                                   if (!source_uv.empty()) {
                                       job.source_uv = source_uv[i0] * w0 + source_uv[i1] * w1 +
                                                       source_uv[i2] * w2;
@@ -1034,6 +1129,13 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
     // How deep under the source's skin the low poly can sit (occluded_from_under).
     const float skin        = diag * 0.03f;
     const float search      = diag * clampf(opts.projection_distance_rel, 0.001f, 1.0f);
+    const float outer_reach = diag * 0.01f;
+    const float stray_reach = diag * 0.005f;
+    // How far in front of or behind the low poly a camera's first hit may be
+    // and still be this texel's: the layers of a face, a brow card standing
+    // proud of the skin, not the arm in front of the torso.
+    const float view_reach  = diag * 0.012f;
+    const bool  project_from_views = !opts.seam_viewpoints.empty();
     const int   ao_rays     = opts.bake_ao && knobs.bake_ambient_occlusion
                                   ? std::max(1, opts.ao_rays) : 0;
     const float ao_strength = clampf(opts.ao_intensity > 0.0f ? opts.ao_intensity
@@ -1059,7 +1161,6 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                 // a fallback.
                 Vec3  base_color = Vec3{1.0f, 1.0f, 1.0f};
                 Vec3  surface    = job.position;
-                Vec3  normal     = job.normal;
 
                 // When the layout was carried over, the albedo needs no search
                 // at all: this texel already knows which source texel it is.
@@ -1067,12 +1168,54 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                 if (job.has_source_uv) {
                     if (const SourceMaterial* mat = mesh.material_for(job.triangle)) {
                         if (!mat->base_color.empty()) {
-                            const Vec4 c = mat->base_color.sample(job.source_uv);
+                            const Vec4 c =
+                                mat->base_color.sample_area(job.source_uv, job.source_uv_radius);
                             base_color = {saturate(c.x * mat->base_factor.x),
                                           saturate(c.y * mat->base_factor.y),
                                           saturate(c.z * mat->base_factor.z)};
                             albedo_done = true;
                         }
+                    }
+                }
+
+                // The albedo as the cameras see it. Asking what lies along
+                // the low poly's normal only works while the low poly follows
+                // the source; around an eye it is a few flat triangles cutting
+                // through a brow card, a lid and the eyeball, and the line
+                // from a texel hits whichever layer its plane happens to slice
+                // - the eye white came out as the outline of a triangle
+                // through a sphere. What the texel should hold is what anybody
+                // looking at the model sees at that point, from where it is
+                // looked at: so each of the profile's cameras looks at the
+                // texel's point, and the first surface its ray meets there is
+                // the colour. A view counts only when that surface is within
+                // reach of the point - an arm in front of the torso is not the
+                // torso - and views blend by how squarely they see it and by
+                // the camera's weight, so the face camera decides the face.
+                if (!albedo_done && project_from_views) {
+                    Vec3  sum{0.0f, 0.0f, 0.0f};
+                    float total = 0.0f;
+                    for (const ViewPoint& vp : opts.seam_viewpoints) {
+                        const Vec3  to   = job.position - vp.eye;
+                        const float dist = length(to);
+                        if (dist <= view_reach) continue;
+                        const Vec3  dir    = to * (1.0f / dist);
+                        const float facing = -dot(dir, job.normal);
+                        if (facing < 0.25f) continue;
+                        const RayHit h = source_bvh.intersect(vp.eye, dir, 0.0f, dist + view_reach);
+                        ++local_rays;
+                        if (!h.hit() || h.t < dist - view_reach) continue;
+                        // Fourth power: a view at 45 degrees counts a quarter
+                        // of a square one, so the blend stays sharp where the
+                        // views disagree about anything that stands proud.
+                        const float f2 = facing * facing;
+                        const float w  = std::max(vp.weight, 0.0f) * f2 * f2;
+                        sum   += sample_source_color(source, h, job.footprint) * w;
+                        total += w;
+                    }
+                    if (total > 0.0f) {
+                        base_color  = sum * (1.0f / total);
+                        albedo_done = true;
                     }
                 }
 
@@ -1117,23 +1260,48 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                 }
 
                 const RayHit* best = nullptr;
-                if (out_hit.hit() && in_hit.hit()) best = out_hit.t <= in_hit.t ? &out_hit : &in_hit;
+                // Both ways found a surface: the low poly runs between two
+                // layers of the source - an eyelid over the eye, a brow card
+                // over the skin. Nearest-wins flipped from one to the other
+                // texel by texel wherever the low poly wove between them; the
+                // outer one is what anybody looks at, so it wins when it is
+                // close. Close is a hundredth of the model: far enough for the
+                // layers of a face, short of the far side of an arm.
+                if (out_hit.hit() && in_hit.hit())
+                    best = out_hit.t <= std::max(in_hit.t, outer_reach) ? &out_hit : &in_hit;
                 else if (out_hit.hit())            best = &out_hit;
                 else if (in_hit.hit())             best = &in_hit;
+
+                // A ray along the low poly's normal crosses the source at a
+                // glancing angle wherever the two disagree about the slope -
+                // down every limb of a character - and lands centimetres along
+                // it, on another part of the map each texel: the limbs came
+                // out speckled with whatever the map held a hand's width away.
+                // When the hit is both far - centimetres, not the millimetres
+                // between the layers of a face - and much further than the
+                // nearest surface that faces the same way, the nearest surface
+                // is the one meant. Not closer in: around an eye the nearest
+                // point hops between the lid and the eyeball, and the straight
+                // hit there is the right one.
+                if (best && best->t > stray_reach) {
+                    const ClosestHit nearest = source_bvh.closest_point(job.position, best->t);
+                    if (nearest.hit() &&
+                        dot(source_bvh.geometric_normal(nearest.triangle), job.normal) > 0.0f &&
+                        best->t > 2.0f * std::sqrt(nearest.distance2) + bias) {
+                        if (!albedo_done) base_color = sample_source_color_at(source, nearest, job.footprint);
+                        albedo_done = true;
+                    }
+                }
 
                 if (best) {
                     const Vec3 dir = (best == &out_hit) ? job.normal : -job.normal;
                     surface    = job.position + dir * best->t;
-                    normal     = source_bvh.shading_normal(*best);
-                    if (dot(normal, job.normal) < 0.0f) normal = -normal;
-                    if (!albedo_done) base_color = sample_source_color(source, *best);
+                    if (!albedo_done) base_color = sample_source_color(source, *best, job.footprint);
                 } else {
                     const ClosestHit hit = source_bvh.closest_point(job.position, search);
                     if (hit.hit()) {
                         surface    = hit.point;
-                        normal     = source_bvh.geometric_normal(hit.triangle);
-                        if (dot(normal, job.normal) < 0.0f) normal = -normal;
-                        base_color = sample_source_color_at(source, hit);
+                        base_color = sample_source_color_at(source, hit, job.footprint);
                     }
                 }
 
@@ -1168,11 +1336,18 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
                     ao = lerpf(1.0f, float(open) / float(ao_rays), ao_strength);
                 }
 
-                // Direct lighting, flattened into the albedo.
+                // Direct lighting, flattened into the albedo. Shaded with the
+                // low poly's own smooth normal, for the reason the occlusion
+                // above is traced from it: the source's normal at the landing
+                // point jumps from one hit to the next across every fold and
+                // every sliver, and lit by it a character's skin came out
+                // crumpled like foil, the face worst of all. The form the low
+                // poly lost comes back through the occlusion, which still
+                // reads the source.
                 Vec3 light_sum{0.0f, 0.0f, 0.0f};
                 if (do_lighting) {
                     for (const BakeLight& l : lights) {
-                        const float ndl = saturate(dot(normal, l.direction));
+                        const float ndl = saturate(dot(job.normal, l.direction));
                         if (ndl <= 0.0f) continue;
                         float shadow = 1.0f;
                         if (l.casts_shadow && dot(job.normal, l.direction) > 0.0f) {
@@ -1284,47 +1459,7 @@ BakeResult bake_single(Mesh& mesh, const Mesh& source, const Bvh& source_bvh,
     }
 
     // --- 7. uv stretch metric ----------------------------------------------
-    // How far texel density strays from the mesh's own average, either way:
-    // more texels than average is wasted atlas and shimmer, fewer is blur.
-    //
-    // A percentile weighted by surface area, not the single worst triangle.
-    // The worst triangle is always a sliver a few millimetres across that the
-    // packer rounded up to a texel, and it swung this number from 3 to 47 on
-    // the same asset between two runs that looked identical. What an artist
-    // sees is the surface, so the surface decides: the density ratio that 98%
-    // of the model's area is within.
-    {
-        struct Sample { float deviation, area; };
-        std::vector<Sample> samples;
-        samples.reserve(tcount);
-        double uv_total = 0.0, area_total = 0.0;
-        for (size_t t = 0; t < tcount; ++t) {
-            const uint32_t i0 = mesh.indices[t * 3 + 0];
-            const uint32_t i1 = mesh.indices[t * 3 + 1];
-            const uint32_t i2 = mesh.indices[t * 3 + 2];
-            const float area3 = mesh.triangle_area(t);
-            const Vec2 a = mesh.uvs[i0], b = mesh.uvs[i1], c = mesh.uvs[i2];
-            const float area2 = 0.5f * std::fabs((b.x - a.x) * (c.y - a.y) -
-                                                 (b.y - a.y) * (c.x - a.x));
-            if (area3 < 1e-12f || area2 < 1e-12f) continue;
-            uv_total   += area2;
-            area_total += area3;
-            samples.push_back({area2 / area3, area3});
-        }
-        if (!samples.empty() && uv_total > 0.0 && area_total > 0.0) {
-            const float mean = float(uv_total / area_total);
-            for (Sample& s : samples) s.deviation = std::max(s.deviation / mean, mean / s.deviation);
-            std::sort(samples.begin(), samples.end(),
-                      [](const Sample& x, const Sample& y) { return x.deviation < y.deviation; });
-            const double cutoff = 0.98 * area_total;
-            double acc = 0.0;
-            for (const Sample& s : samples) {
-                acc += s.area;
-                result.uv_max_stretch = s.deviation;
-                if (acc >= cutoff) break;
-            }
-        }
-    }
+    result.uv_max_stretch = uv_stretch(mesh);
 
     result.ok      = true;
     result.seconds = watch.seconds();

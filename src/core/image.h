@@ -56,6 +56,11 @@ struct Texture {
     // than clamping because that is what every DCC does with a tiling texture,
     // and a transferred uv lands outside the unit square often enough to matter.
     Vec4 sample(Vec2 uv) const;
+    // The average over a square `radius` either side of `uv`, in uv units: a
+    // box filter for reading a big map into a small one, where one bilinear
+    // tap picks a single pore out of the eight by eight texels the target
+    // texel stands for. Falls back to sample() below a texel.
+    Vec4 sample_area(Vec2 uv, float radius) const;
 
     bool save_png(const std::filesystem::path& path) const;
     // Despite the name, stb decodes png, jpg, tga and bmp, which is what an

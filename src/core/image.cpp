@@ -6,6 +6,7 @@
 #include <stb_image.h>
 #include <stb_image_write.h>
 
+#include <algorithm>
 #include <cmath>
 
 namespace rd {
@@ -37,6 +38,23 @@ Vec4 Texture::get(int x, int y) const
     c.z = channels > 2 ? decode(p[2]) : c.x;
     c.w = channels > 3 ? float(p[3]) / 255.0f : 1.0f;
     return c;
+}
+
+Vec4 Texture::sample_area(Vec2 uv, float radius) const
+{
+    if (empty()) return Vec4{1.0f, 1.0f, 1.0f, 1.0f};
+    const float texels = radius * float(std::max(width, height));
+    if (!(texels > 0.75f)) return sample(uv);
+    // One tap per texel across, capped: past sixteen by sixteen the average no
+    // longer moves and the bake pays for every tap of every texel.
+    const int   n    = std::min(16, int(std::ceil(texels * 2.0f)));
+    const float step = 2.0f * radius / float(n);
+    Vec4 sum{0.0f, 0.0f, 0.0f, 0.0f};
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i)
+            sum = sum + sample({uv.x - radius + (float(i) + 0.5f) * step,
+                           uv.y - radius + (float(j) + 0.5f) * step});
+    return sum * (1.0f / float(n * n));
 }
 
 Vec4 Texture::sample(Vec2 uv) const

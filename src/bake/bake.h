@@ -18,7 +18,8 @@
 
 namespace rd {
 
-// Where the model is looked at from, for placing uv seams out of sight.
+// Where the model is looked at from: uv seams go out of its sight, and the
+// albedo is read the way it sees the source.
 struct ViewPoint {
     Vec3  eye;
     float weight = 1.0f;
@@ -53,7 +54,9 @@ struct BakeOptions {
     // Texel density per region id (RegionKnobs::texel_weight), for the uv
     // layout that cuts charts by part. Empty means even.
     std::vector<float> region_texel_weight;
-    // The profile's cameras. Empty falls back to the ambient term alone.
+    // The profile's cameras. Seams hide from them and the albedo is read
+    // through them; empty falls back to the ambient term for the seams and to
+    // projecting along the low poly's normal for the albedo.
     std::vector<ViewPoint> seam_viewpoints;
 };
 
