@@ -210,6 +210,13 @@ the shell cap against 3.4 to 4.4 via the union, mech 4.22 against 5.3 to 6.6.
 What decides these assets is which pieces stay (`limit_shells`), not their
 topology.
 
+**The coffee cart is bound by vertices, not pieces.** Its share of the budget
+the loose pieces may hold when the re-fit stalls (0.4) changes nothing on it
+anywhere from 0.2 to 0.7: 392 triangles come back as 442 vertices against a
+limit of 380, the uv seams around dozens of small pieces. Cheaper seams are the
+lever there. The same sweep moved the costumed ranger's geometric split 7.0,
+2.0, 4.4, 2.0, 2.0 px - chaotic, not a setting to tune by one asset.
+
 **Thin tubes are swept, not remeshed** (`geom/tubes.cpp`). An isotropic
 remesh cannot keep a tail open when its circumference holds fewer than four or
 five edges; it twists into a ribbon whose edge-on turns look like holes.
@@ -230,7 +237,11 @@ failed on four non manifold edges.
 **SAM is worth running, on a GPU.** On the corpus it took the summed outline
 error from 14.2 to 11.1 px, mostly on costumes and assemblies (the ranger 4.4
 to 1.8, the gothic statue 2.2 to 1.1), and lost on the coffee cart and the
-torus. On a CPU it is minutes a mesh. The sidecar needs a torch build that
+torus. Auto runs a trial pass on both splits and keeps the better: 10.5. vit_l
+measured worse than vit_b (14.2), so the bigger checkpoint is not an upgrade.
+Masks are cached beside the checkpoint (`mask_cache/`), keyed by the image and
+every setting, so a repeat run costs no SAM time; clear it after changing the
+sidecar's output. On a CPU it is minutes a mesh. The sidecar needs a torch build that
 matches the driver (`pip install torch torchvision --index-url
 https://download.pytorch.org/whl/cu124`), `segment-anything`, `opencv-python-headless`
 and `pillow`, and the bench needs `--sam-checkpoint`, because `--no-settings`
