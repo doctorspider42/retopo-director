@@ -8,6 +8,8 @@
 #include <meshoptimizer.h>
 
 #include <algorithm>
+#include <array>
+#include <map>
 #include <cstring>
 
 namespace rd {
@@ -95,9 +97,25 @@ OptimiseReport optimise_for_target(Mesh& mesh, const TargetProfile& profile)
         rep.atvr_before = before.atvr;
     }
 
+    // meshoptimizer reorders whole triangles without saying where each one
+    // went, so the region map is carried across by the triangle's own vertices.
+    // The viewport's region overlay and its picking read the shipped mesh.
+    const auto ranges = group_by_page(mesh);
+    std::map<std::array<uint32_t, 3>, uint16_t> region_of;
+    const bool keep_regions = mesh.tri_region.size() == mesh.triangle_count();
+    auto triangle_key = [&](size_t t) {
+        std::array<uint32_t, 3> k{mesh.indices[t * 3], mesh.indices[t * 3 + 1],
+                                  mesh.indices[t * 3 + 2]};
+        std::sort(k.begin(), k.end());
+        return k;
+    };
+    if (keep_regions)
+        for (size_t t = 0; t < mesh.triangle_count(); ++t)
+            region_of[triangle_key(t)] = mesh.tri_region[t];
+
     // 1 and 2, cache order then overdraw, within each texture page: a page is a
     // draw of its own, so triangles must not wander from one page to another.
-    for (const auto& [begin, end] : group_by_page(mesh)) {
+    for (const auto& [begin, end] : ranges) {
         const size_t count = (end - begin) * 3;
         if (count == 0) continue;
         uint32_t* range = mesh.indices.data() + begin * 3;
@@ -107,7 +125,14 @@ OptimiseReport optimise_for_target(Mesh& mesh, const TargetProfile& profile)
                                  vertex_count, sizeof(Vec3), 1.02f);
     }
 
+    if (keep_regions)
+        for (size_t t = 0; t < mesh.triangle_count(); ++t) {
+            const auto it = region_of.find(triangle_key(t));
+            mesh.tri_region[t] = it == region_of.end() ? kNoRegion : it->second;
+        }
+
     // 3. Fetch order: remap the vertices so the index buffer walks forward.
+    //    Triangles keep their order here, so the region map stays put.
     {
         std::vector<uint32_t> remap(vertex_count);
         const size_t unique = meshopt_optimizeVertexFetchRemap(
@@ -133,10 +158,6 @@ OptimiseReport optimise_for_target(Mesh& mesh, const TargetProfile& profile)
         remap_stream(mesh.skin);
         rep.vertices_after = unique;
     }
-
-    // tri_region is per face and the face order changed, so it is no longer
-    // meaningful; dropping it is more honest than shipping a stale mapping.
-    mesh.tri_region.clear();
 
     {
         const meshopt_VertexCacheStatistics after = meshopt_analyzeVertexCache(

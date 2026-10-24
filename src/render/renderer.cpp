@@ -512,6 +512,30 @@ void Renderer::draw_scene(const GpuMesh& mesh, const ViewCamera& camera,
     glUniform4fv(u_color_, 1, &white.x);
     mesh.draw();
 
+    if (opts.highlight && opts.highlight->valid() && !mask_mode) {
+        // The piece was cut from the surface just drawn, so it ties the depth
+        // test everywhere; the offset pulls it in front.
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glUniform1i(u_mode_, 6);
+        const Vec4 tint{opts.highlight_color.x, opts.highlight_color.y,
+                        opts.highlight_color.z, 1.0f};
+        glUniform4fv(u_color_, 1, &tint.x);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0f, -1.0f);
+        glUniform1f(u_alpha_, 0.5f);
+        opts.highlight->draw();
+        glDisable(GL_POLYGON_OFFSET_FILL);
+        glEnable(GL_POLYGON_OFFSET_LINE);
+        glPolygonOffset(-2.0f, -2.0f);
+        glUniform1f(u_alpha_, 0.85f);
+        opts.highlight->draw_wireframe();
+        glDisable(GL_POLYGON_OFFSET_LINE);
+        glDisable(GL_BLEND);
+        glUniform1i(u_mode_, mode_index(opts.mode));
+        glUniform1f(u_alpha_, 1.0f);
+    }
+
     if (opts.wireframe_overlay && !mask_mode) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);

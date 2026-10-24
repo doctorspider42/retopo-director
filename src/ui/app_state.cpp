@@ -286,6 +286,59 @@ void AppState::sync_from_pipeline()
     panel_version = version;
 }
 
+uint16_t AppState::selected_region_id() const
+{
+    if (selected_region < 0 || selected_region >= int(panel.regions.size())) return kNoRegion;
+    return panel.regions[size_t(selected_region)].id;
+}
+
+namespace {
+
+// The triangles of one region as a mesh of their own, for the tint the
+// viewport lays over a picked region. Empty when the map does not fit.
+Mesh region_submesh(const Mesh& mesh, const std::vector<uint16_t>& tri_region, uint16_t id)
+{
+    Mesh out;
+    if (id == kNoRegion || tri_region.size() != mesh.triangle_count()) return out;
+    std::vector<uint32_t> remap(mesh.vertex_count(), kInvalidIndex);
+    for (size_t t = 0; t < mesh.triangle_count(); ++t) {
+        if (tri_region[t] != id) continue;
+        for (int c = 0; c < 3; ++c) {
+            const uint32_t v = mesh.indices[t * 3 + c];
+            if (remap[v] == kInvalidIndex) {
+                remap[v] = uint32_t(out.positions.size());
+                out.positions.push_back(mesh.positions[v]);
+                if (mesh.has_normals()) out.normals.push_back(mesh.normals[v]);
+            }
+            out.indices.push_back(remap[v]);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+void AppState::upload_highlight()
+{
+    const uint64_t version = pipeline.version();
+    const uint16_t id      = selected_region_id();
+    if (version == gpu_highlight_version && id == gpu_highlight) return;
+    gpu_highlight_version = version;
+    gpu_highlight         = id;
+
+    gpu_high_pick.release();
+    gpu_low_pick.release();
+    if (id == kNoRegion) return;
+    pipeline.with_results([&](const PipelineResults& r) {
+        const Mesh high = region_submesh(r.highpoly, r.segmentation.tri_region, id);
+        if (!high.empty()) gpu_high_pick.upload(high);
+        // The display copy of a multi page bake only moves uvs, so the low
+        // poly's own positions and region map line up with what is drawn.
+        const Mesh low = region_submesh(r.lowpoly, r.lowpoly.tri_region, id);
+        if (!low.empty()) gpu_low_pick.upload(low);
+    });
+}
+
 void AppState::upload_meshes()
 {
     const uint64_t version = pipeline.version();
@@ -327,7 +380,7 @@ void AppState::upload_meshes()
                 std::vector<Vec4> colors;
                 region_colors(view_seg, colors);
                 if (mode == RenderMode::Regions) {
-                    gpu_low.upload_face_attribute(r.lowpoly, colors);
+                    gpu_low.upload_face_attribute(display, colors);
                     gpu_low.set_baked_colors(false);
                 }
             }

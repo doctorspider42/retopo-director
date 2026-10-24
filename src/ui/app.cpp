@@ -477,6 +477,7 @@ int run_application(const AppOptions& opts)
 
         app->sync_from_pipeline();
         app->upload_meshes();
+        app->upload_highlight();
 
         if (autorun_pending && ImGui::GetFrameCount() > 3) {
             autorun_pending = false;

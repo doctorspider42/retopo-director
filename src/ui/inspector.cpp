@@ -316,6 +316,10 @@ void tab_tune(AppState& app)
         const float  w   = ImGui::GetContentRegionAvail().x;
         const float  h   = S(36);
         if (ImGui::InvisibleButton("##row", {w, h})) app.selected_region = selected ? -1 : i;
+        if (selected && app.scroll_to_region) {
+            ImGui::SetScrollHereY(0.15f);
+            app.scroll_to_region = false;
+        }
         const bool hov = ImGui::IsItemHovered();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         if (selected)

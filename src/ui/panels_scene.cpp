@@ -49,7 +49,8 @@ ViewCamera current_camera(AppState& app)
 // Renders `mesh` at `size` and returns the GL texture, 0 when there is nothing
 // to show. The image is bottom up; callers flip v.
 unsigned render_view(AppState& app, Renderer& renderer, const GpuMesh& mesh,
-                     const ViewCamera& cam, const ImVec2& size)
+                     const ViewCamera& cam, const ImVec2& size,
+                     const GpuMesh* highlight = nullptr)
 {
     if (!mesh.valid() || !renderer.ready() || size.x < 16.0f || size.y < 16.0f) return 0;
     const Palette& p = palette();
@@ -61,6 +62,8 @@ unsigned render_view(AppState& app, Renderer& renderer, const GpuMesh& mesh,
     opts.wireframe_overlay = app.wireframe;
     opts.background = {p.viewport.x, p.viewport.y, p.viewport.z};
     opts.flip_y = false;
+    opts.highlight = highlight;
+    opts.highlight_color = {p.accent_hot.x, p.accent_hot.y, p.accent_hot.z};
     return renderer.render_to_gl_texture(mesh, cam, opts);
 }
 
@@ -100,6 +103,76 @@ void handle_orbit(AppState& app, const ViewCamera& cam)
                                          0.15f, 40.0f);
         if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
             app.camera.frame(app.scene_bounds);
+    }
+}
+
+// The region under `at`, a point inside the viewport of `size`, kNoRegion when
+// the ray finds nothing. The low poly answers from its own region map, so a
+// click lands on what is drawn even where the low poly strays off the source.
+uint16_t pick_region(AppState& app, const ViewCamera& cam, ImVec2 at, ImVec2 size, bool low)
+{
+    const float aspect = size.x / std::max(1.0f, size.y);
+    const float th     = std::tan(cam.fov_radians * 0.5f);
+    const float nx     = at.x / size.x * 2.0f - 1.0f;
+    const float ny     = 1.0f - at.y / size.y * 2.0f;
+    const Vec3  fwd    = cam.forward();
+    const Vec3  right  = normalize(cross(fwd, cam.up));
+    const Vec3  up     = cross(right, fwd);
+    const Vec3  dir    = fwd + right * (nx * th * aspect) + up * (ny * th);
+
+    uint16_t picked = kNoRegion;
+    app.pipeline.with_results([&](const PipelineResults& r) {
+        // A brute force walk is a few milliseconds on a million triangles and
+        // happens once per click; the analysis BVH is used when it still points
+        // at this copy of the source.
+        auto nearest = [&](const Mesh& m) {
+            uint32_t best = kInvalidIndex;
+            float    best_t = std::numeric_limits<float>::max();
+            for (size_t t = 0; t < m.triangle_count(); ++t) {
+                float tt, u, v;
+                if (ray_triangle(cam.eye, dir, m.positions[m.indices[t * 3]],
+                                 m.positions[m.indices[t * 3 + 1]],
+                                 m.positions[m.indices[t * 3 + 2]], cam.znear, best_t, tt, u, v)) {
+                    best   = uint32_t(t);
+                    best_t = tt;
+                }
+            }
+            return best;
+        };
+        if (low && r.lowpoly.tri_region.size() == r.lowpoly.triangle_count()) {
+            const uint32_t t = nearest(r.lowpoly);
+            if (t != kInvalidIndex) picked = r.lowpoly.tri_region[t];
+            return;
+        }
+        const auto& regions = r.segmentation.tri_region;
+        if (regions.size() != r.highpoly.triangle_count()) return;
+        uint32_t t = kInvalidIndex;
+        if (r.analysis.bvh.mesh() == &r.highpoly && !r.analysis.bvh.empty())
+            t = r.analysis.bvh.intersect(cam.eye, dir, cam.znear).triangle;
+        else
+            t = nearest(r.highpoly);
+        if (t != kInvalidIndex) picked = regions[t];
+    });
+    return picked;
+}
+
+// A left click that did not drag: select whatever region is under it, and open
+// it in the tune tab. Clicking empty space lets go of the selection.
+void handle_pick(AppState& app, const ViewCamera& cam, ImVec2 origin, ImVec2 size, bool low)
+{
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!ImGui::IsItemDeactivated() || !ImGui::IsMouseReleased(ImGuiMouseButton_Left)) return;
+    if (io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] > S(4) * S(4)) return;
+    if (app.panel.regions.empty()) return;
+
+    const uint16_t id = pick_region(app, cam, {io.MousePos.x - origin.x, io.MousePos.y - origin.y},
+                                    size, low);
+    app.selected_region = -1;
+    for (int i = 0; i < int(app.panel.regions.size()); ++i)
+        if (app.panel.regions[size_t(i)].id == id) app.selected_region = i;
+    if (app.selected_region >= 0) {
+        app.tab              = AppState::Tab::Tune;
+        app.scroll_to_region = true;
     }
 }
 
@@ -398,9 +471,13 @@ void draw_viewport(AppState& app, const ImVec2& pos, const ImVec2& size)
     const GpuMesh& main_mesh = show_low || compare ? app.gpu_low : app.gpu_high;
     const bool     main_ok   = show_low || compare ? app.gpu_low_ok : app.gpu_high_ok;
 
-    unsigned tex_main = main_ok ? render_view(app, app.renderer, main_mesh, cam, size) : 0;
+    const GpuMesh& main_pick = show_low || compare ? app.gpu_low_pick : app.gpu_high_pick;
+    unsigned tex_main = main_ok ? render_view(app, app.renderer, main_mesh, cam, size, &main_pick)
+                                : 0;
     unsigned tex_high = compare && app.gpu_high_ok
-                            ? render_view(app, app.renderer_alt, app.gpu_high, cam, size) : 0;
+                            ? render_view(app, app.renderer_alt, app.gpu_high, cam, size,
+                                          &app.gpu_high_pick)
+                            : 0;
 
     const ImVec2 a = pos;
     const ImVec2 b{pos.x + size.x, pos.y + size.y};
@@ -438,6 +515,12 @@ void draw_viewport(AppState& app, const ImVec2& pos, const ImVec2& size)
                            ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle |
                            ImGuiButtonFlags_MouseButtonRight);
     handle_orbit(app, cam);
+    {
+        // In the wipe the left of the split is the source, the right the low poly.
+        const bool low_side = compare ? ImGui::GetIO().MousePos.x >= a.x + size.x * app.compare_split
+                                      : show_low;
+        handle_pick(app, cam, a, size, low_side && app.gpu_low_ok);
+    }
 
     if (compare && tex_main && tex_high) {
         const float  sx = a.x + size.x * app.compare_split;
@@ -593,7 +676,15 @@ void draw_viewport(AppState& app, const ImVec2& pos, const ImVec2& size)
         size_t passes = 0;
         bool   sym = false;
         const char* sym_axis = "";
+        const uint16_t picked = app.selected_region_id();
+        std::string    picked_name;
+        ImVec4         picked_color = p.text_faint;
         app.pipeline.with_results([&](const PipelineResults& r) {
+            if (const Region* region = r.segmentation.find(picked)) {
+                picked_color = {region->debug_color.x, region->debug_color.y,
+                                region->debug_color.z, 1.0f};
+                picked_name  = app.panel.regions[size_t(app.selected_region)].name;
+            }
             high_tris  = r.highpoly.triangle_count();
             high_verts = r.highpoly.vertex_count();
             low_tris   = r.lowpoly.triangle_count();
@@ -613,7 +704,9 @@ void draw_viewport(AppState& app, const ImVec2& pos, const ImVec2& size)
         ImGui::PopFont();
         ImGui::SetCursorScreenPos({a.x + m, b.y - m - chip_h});
         const int max_tris = app.settings.profile.max_triangles;
+        bool chips = false;
         if (show_low && low_tris) {
+            chips = true;
             const ImVec4 dot = int(low_tris) <= max_tris ? p.success : p.danger;
             hud_chip(format("%s / %s tris", thousands(low_tris).c_str(),
                             thousands(size_t(max_tris)).c_str()).c_str(), &dot, p.text);
@@ -628,6 +721,7 @@ void draw_viewport(AppState& app, const ImVec2& pos, const ImVec2& size)
                 hud_chip(format("pass %d kept", kept).c_str(), nullptr, p.text_dim);
             }
         } else if (app.source == ViewSource::HighPoly && high_tris) {
+            chips = true;
             hud_chip(format("%s tris", thousands(high_tris).c_str()).c_str(), nullptr, p.text_dim);
             ImGui::SameLine(0.0f, S(6));
             hud_chip(format("%s verts", thousands(high_verts).c_str()).c_str(), nullptr,
@@ -636,6 +730,12 @@ void draw_viewport(AppState& app, const ImVec2& pos, const ImVec2& size)
                 ImGui::SameLine(0.0f, S(6));
                 hud_chip(format("symmetry %s", sym_axis).c_str(), nullptr, p.text_dim);
             }
+        }
+        // What a click picked, in its overlay colour, so the viewport says which
+        // region the knobs on the right belong to.
+        if (!picked_name.empty()) {
+            if (chips) ImGui::SameLine(0.0f, S(6));
+            hud_chip(picked_name.c_str(), &picked_color, p.text);
         }
     }
 

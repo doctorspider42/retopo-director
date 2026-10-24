@@ -89,6 +89,10 @@ struct RenderOptions {
     bool       backface_cull   = true;
     // Texture magnification, as the target does it (TextureBudget::bilinear).
     bool       bilinear_texture = true;
+    // A piece of the same surface tinted over the picture: the region picked
+    // in the viewport. Drawn in every mode but the silhouette mask.
+    const GpuMesh* highlight = nullptr;
+    Vec3       highlight_color{1.0f, 0.78f, 0.25f};
 };
 
 class Renderer {

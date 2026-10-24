@@ -115,6 +115,12 @@ struct AppState {
     GpuMesh     gpu_high;
     GpuMesh     gpu_low;
     uint64_t    gpu_version   = 0;
+    // The picked region's triangles, drawn as a tint over each mesh, and the
+    // region and results they were cut for.
+    GpuMesh     gpu_high_pick;
+    GpuMesh     gpu_low_pick;
+    uint16_t    gpu_highlight = kNoRegion;
+    uint64_t    gpu_highlight_version = 0;
     bool        gpu_high_ok   = false;
     bool        gpu_low_ok    = false;
     Aabb        scene_bounds;
@@ -152,6 +158,9 @@ struct AppState {
     // --- editing -------------------------------------------------------------
     KnobPanel   panel;              // editable copy, synced from the pipeline
     int         selected_region = -1;
+    // Set by a pick in the viewport, so the inspector brings that row into view
+    // once; a click on the row itself must not yank the list around.
+    bool        scroll_to_region = false;
     bool        panel_dirty  = false;
     uint64_t    panel_version = 0;
     std::string knobs_json_buffer;
@@ -214,6 +223,9 @@ struct AppState {
     bool load_profile(const fs::path& path);
     void sync_from_pipeline();      // pulls results into the editable copies
     void upload_meshes();           // (re)uploads GPU copies when data changed
+    void upload_highlight();        // the picked region's tint meshes
+    // The id of the region open in the tune tab, kNoRegion when none is.
+    uint16_t selected_region_id() const;
     void save_settings() const;
     void load_settings();
     void push_recent(const fs::path& p);
