@@ -26,13 +26,15 @@ anticipate, and the C++ side reports stderr instead.
 
 Install what it needs with:
 
-    pip install torch torchvision segment-anything pillow numpy
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+    pip install segment-anything opencv-python-headless pillow numpy
 
 and fetch a checkpoint (vit_b is 375 MB and enough for this) from
 https://github.com/facebookresearch/segment-anything#model-checkpoints
 """
 
 import json
+import hashlib
 import os
 import sys
 import time
@@ -41,6 +43,83 @@ PROTOCOL = 1
 # A view with more masks than this is speckle, and the payload stops being
 # worth sending: the director merges them down to a few dozen regions anyway.
 MAX_MASKS_PER_VIEW = 64
+
+# Generator settings. The director merges patches later, so a mask that is
+# only probably right is still useful; upstream defaults are tuned for
+# standalone use. 64 points a batch is upstream's: 256 ran ten times slower on
+# an 8 GB card.
+GENERATOR = {
+    "pred_iou_thresh": 0.86,
+    "stability_score_thresh": 0.90,
+    "min_mask_region_area": 64,
+    "points_per_batch": 64,
+}
+
+# Masks for one view are kept by what produced them: the image, the weights
+# and every setting above. Generating them is the whole cost - about 1.7 s a
+# view on an RTX 2070, twenty seconds a run, against eight for importing Torch
+# and loading vit_b - and a rebuild, a re-run or a benchmark renders the same
+# views of the same mesh every time. A run whose views all hit never imports
+# Torch at all.
+CACHE_LIMIT = 4000   # files; the oldest go first
+
+
+def cache_key(image_path, req, checkpoint):
+    h = hashlib.sha1()
+    with open(image_path, "rb") as f:
+        h.update(f.read())
+    settings = {
+        "model_type": req.get("model_type", "vit_b"),
+        "checkpoint": os.path.basename(checkpoint),
+        "checkpoint_bytes": os.path.getsize(checkpoint),
+        "points_per_side": int(req.get("points_per_side", 16)),
+        "min_mask_area": float(req.get("min_mask_area", 0.0015)),
+        "max_mask_area": float(req.get("max_mask_area", 0.5)),
+        "max_masks": MAX_MASKS_PER_VIEW,
+        "generator": GENERATOR,
+    }
+    h.update(json.dumps(settings, sort_keys=True).encode("utf-8"))
+    return h.hexdigest()
+
+
+def cache_load(cache_dir, key):
+    if not cache_dir:
+        return None
+    try:
+        with open(os.path.join(cache_dir, key + ".json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def cache_store(cache_dir, key, view):
+    if not cache_dir:
+        return
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        path = os.path.join(cache_dir, key + ".json")
+        # Written aside and renamed, so a run that dies halfway never leaves a
+        # truncated entry for the next one to trust.
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(view, f)
+        os.replace(path + ".tmp", path)
+    except OSError as exc:
+        print("mask cache: cannot write %s: %s" % (key, exc), file=sys.stderr)
+
+
+def cache_prune(cache_dir):
+    try:
+        entries = [os.path.join(cache_dir, n) for n in os.listdir(cache_dir) if n.endswith(".json")]
+    except OSError:
+        return
+    if len(entries) <= CACHE_LIMIT:
+        return
+    entries.sort(key=lambda p: os.path.getmtime(p))
+    for path in entries[:len(entries) - CACHE_LIMIT]:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def fail(message):
@@ -102,48 +181,65 @@ def main():
     if not checkpoint or not os.path.isfile(checkpoint):
         fail("checkpoint '%s' is not a file" % checkpoint)
 
-    try:
-        import numpy as np
-        import torch
-        from PIL import Image
-        from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
-    except ImportError as exc:
-        fail("%s; pip install torch torchvision segment-anything pillow numpy" % exc)
+    # Beside the weights unless the request says otherwise: the masks belong
+    # to the machine, like the checkpoint, not to one project.
+    cache_dir = req.get("cache_dir")
+    if cache_dir is None:
+        cache_dir = os.path.join(os.path.dirname(os.path.abspath(checkpoint)), "mask_cache")
 
-    model_type = req.get("model_type", "vit_b")
-    if model_type not in sam_model_registry:
-        fail("unknown model type '%s'" % model_type)
-
-    device = pick_device(req.get("device", "auto"), torch)
     started = time.time()
+    model_type = req.get("model_type", "vit_b")
 
-    try:
-        sam = sam_model_registry[model_type](checkpoint=checkpoint)
-        sam.to(device=device)
-    except Exception as exc:                                  # noqa: BLE001
-        fail("cannot load %s from %s: %s" % (model_type, checkpoint, exc))
-
-    generator = SamAutomaticMaskGenerator(
-        sam,
-        points_per_side=int(req.get("points_per_side", 16)),
-        # The director merges patches later, so a mask that is only probably
-        # right is still useful; upstream defaults are tuned for standalone use.
-        pred_iou_thresh=0.86,
-        stability_score_thresh=0.90,
-        min_mask_region_area=64,
-    )
-
-    min_share = float(req.get("min_mask_area", 0.0015))
-    max_share = float(req.get("max_mask_area", 0.5))
-
-    out_views = []
+    views = []
     for view in req.get("views", []):
         path = view.get("file", "")
         if not os.path.isfile(path):
             print("skipping missing view %s" % path, file=sys.stderr)
             continue
+        key = cache_key(path, req, checkpoint)
+        views.append((view, key, cache_load(cache_dir, key)))
 
-        image = np.array(Image.open(path).convert("RGB"))
+    misses = [v for v in views if v[2] is None]
+    device = "cache"
+    generator = None
+    if misses:
+        try:
+            import numpy as np
+            import torch
+            from PIL import Image
+            from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
+        except ImportError as exc:
+            fail("%s; pip install torch torchvision segment-anything opencv-python-headless "
+                 "pillow numpy" % exc)
+
+        if model_type not in sam_model_registry:
+            fail("unknown model type '%s'" % model_type)
+
+        device = pick_device(req.get("device", "auto"), torch)
+        try:
+            sam = sam_model_registry[model_type](checkpoint=checkpoint)
+            sam.to(device=device)
+        except Exception as exc:                                  # noqa: BLE001
+            fail("cannot load %s from %s: %s" % (model_type, checkpoint, exc))
+
+        generator = SamAutomaticMaskGenerator(
+            sam, points_per_side=int(req.get("points_per_side", 16)), **GENERATOR)
+
+    min_share = float(req.get("min_mask_area", 0.0015))
+    max_share = float(req.get("max_mask_area", 0.5))
+
+    out_views = []
+    for view, key, cached in views:
+        if cached is not None:
+            # The name and index are this request's; the masks are the image's.
+            cached["name"]  = view.get("name", "")
+            cached["index"] = int(view.get("index", -1))
+            out_views.append(cached)
+            print("%s: %d masks (cached)" % (view.get("name", "?"), len(cached["masks"])),
+                  file=sys.stderr)
+            continue
+
+        image = np.array(Image.open(view["file"]).convert("RGB"))
         height, width = image.shape[:2]
         frame = float(width * height)
 
@@ -161,19 +257,25 @@ def main():
         masks.sort(key=lambda m: m["area_share"], reverse=True)
         del masks[MAX_MASKS_PER_VIEW:]
 
-        out_views.append({
+        entry = {
             "name": view.get("name", ""),
             "index": int(view.get("index", -1)),
             "width": int(width),
             "height": int(height),
             "masks": masks,
-        })
+        }
+        cache_store(cache_dir, key, entry)
+        out_views.append(entry)
         print("%s: %d masks" % (view.get("name", "?"), len(masks)), file=sys.stderr)
+
+    if misses and cache_dir:
+        cache_prune(cache_dir)
 
     json.dump({
         "ok": True,
         "device": device,
         "model_type": model_type,
+        "cached_views": len(views) - len(misses),
         "seconds": time.time() - started,
         "views": out_views,
     }, sys.stdout)

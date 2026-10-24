@@ -322,7 +322,15 @@ int run_application(const AppOptions& opts)
     }
     if (!opts.llm_model.empty()) app->settings.llm.claude_model = opts.llm_model;
     if (!opts.llm_path.empty())  app->settings.llm.claude_path  = opts.llm_path;
-    if (!opts.sam_checkpoint.empty()) app->settings.segmenter.sam.checkpoint = opts.sam_checkpoint;
+    if (!opts.sam_checkpoint.empty()) {
+        app->settings.segmenter.sam.checkpoint = opts.sam_checkpoint;
+        // The weights say which backbone they are by their published file
+        // name. Without this a vit_l file kept whatever model type the
+        // settings held - vit_b under --no-settings - and Torch refused it.
+        const std::string file = std::filesystem::path(opts.sam_checkpoint).filename().string();
+        for (const SamCheckpoint& c : sam_checkpoints())
+            if (file == c.file) app->settings.segmenter.sam.model_type = c.model_type;
+    }
     if (!opts.sam_device.empty())     app->settings.segmenter.sam.device     = opts.sam_device;
 
     if (opts.keep_hidden) app->settings.retopo.hard_rules.drop_hidden_shells = false;
