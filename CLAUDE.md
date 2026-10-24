@@ -214,6 +214,28 @@ topology.
 remesh cannot keep a tail open when its circumference holds fewer than four or
 five edges; it twists into a ribbon whose edge-on turns look like holes.
 
+**The outline is fitted in the profile's cameras** (`fit_to_silhouette`,
+the last move in the hard rules). It samples the source's signed distance
+field along the low poly's outline *edges*, not at its vertices - vertices on
+the outline leave chords inside it - and it only moves an edge that has
+nothing of the low poly just beyond it, or the near rim of a ring gets pulled
+toward its far side. It traces at the render size the score is measured at:
+at 256 pixels every corpus mesh got worse, at 640 almost all got better.
+
+**Only the mirror's seam is on the symmetry plane.** The pairing tolerance
+is millimetres; pinning every vertex that close to the plane laid the two
+sides of a figure's seat onto each other, face on face, and the validator
+failed on four non manifold edges.
+
+**SAM is worth running, on a GPU.** On the corpus it took the summed outline
+error from 14.2 to 11.1 px, mostly on costumes and assemblies (the ranger 4.4
+to 1.8, the gothic statue 2.2 to 1.1), and lost on the coffee cart and the
+torus. On a CPU it is minutes a mesh. The sidecar needs a torch build that
+matches the driver (`pip install torch torchvision --index-url
+https://download.pytorch.org/whl/cu124`), `segment-anything`, `opencv-python-headless`
+and `pillow`, and the bench needs `--sam-checkpoint`, because `--no-settings`
+forgets the one the window chose.
+
 **MinGW links the runtime dynamically by default**, which makes the executable
 unusable outside a shell that has the toolchain on `PATH`. The build passes
 `-static`.

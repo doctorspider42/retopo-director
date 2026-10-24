@@ -18,6 +18,8 @@
 
 namespace rd {
 
+struct ViewCamera;
+
 struct HardRuleReport {
     size_t mirrored_triangles   = 0;
     size_t clipped_triangles    = 0;
@@ -92,6 +94,13 @@ struct HardRuleOptions {
     int   fill_holes_max_edges = 12;
     // Passes of fit_to_surface. 0 leaves the vertices where the backend put them.
     int   fit_surface_passes   = 4;
+    // Passes of fit_to_silhouette, and the size of the outline images it traces
+    // for each profile camera. 0 passes leaves the outline where it is. The
+    // resolution matches the renders the silhouette is scored on: at 256 the
+    // outline is already sub-pixel before the fit starts, and the fit only
+    // added its own quantisation - every corpus mesh measured worse.
+    int   fit_silhouette_passes     = 3;
+    int   fit_silhouette_resolution = 640;
 };
 
 // `source` and `source_bvh` are the high poly, used to re-project any vertex
@@ -156,5 +165,14 @@ size_t drop_hidden_shells(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis&
 // offset of the last pass, in model units.
 float fit_to_surface(Mesh& mesh, const Bvh& source_bvh, int passes,
                      const SymmetryPlane* symmetry, float symmetry_epsilon);
+
+// Moves the vertices on the low poly's outline, as each profile camera sees
+// it, toward the source's outline in the same view. The source is traced at
+// `resolution` pixels square with the BVH; folds behind the model are left
+// alone, and each step is capped like fit_to_surface's. Returns the mean
+// distance an outline vertex moved in the last pass, in model units.
+float fit_to_silhouette(Mesh& mesh, const Bvh& source_bvh, const std::vector<ViewCamera>& cameras,
+                        int passes, int resolution, const SymmetryPlane* symmetry,
+                        float symmetry_epsilon);
 
 } // namespace rd

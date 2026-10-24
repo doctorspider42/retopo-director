@@ -4,12 +4,18 @@
 #include "core/util.h"
 #include "mesh/topology.h"
 #include "mesh/visibility.h"
+#include "core/thread_pool.h"
+#include "mesh/bvh.h"
+#include "render/camera.h"
 
 #include <algorithm>
+#include <array>
 #include <numeric>
 #include <limits>
 #include <functional>
 #include <map>
+#include <set>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -791,6 +797,14 @@ size_t fill_small_holes(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis& a
     for (const auto& [key, n] : directed)
         edges.insert(ekey(uint32_t(key >> 32), uint32_t(key & 0xFFFFFFFFu)));
 
+    std::set<std::array<uint32_t, 3>> faces;
+    for (size_t t = 0; t < tcount; ++t) {
+        std::array<uint32_t, 3> key{mesh.indices[t * 3], mesh.indices[t * 3 + 1],
+                                    mesh.indices[t * 3 + 2]};
+        std::sort(key.begin(), key.end());
+        faces.insert(key);
+    }
+
     std::unordered_set<uint32_t> visited;
     std::vector<uint32_t> added;
     std::vector<uint16_t> added_regions;
@@ -815,6 +829,15 @@ size_t fill_small_holes(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis& a
             if (visited.count(v) || int(loop.size()) > max_edges) { clean = false; break; }
         }
         if (!clean || loop.size() < 3 || int(loop.size()) > max_edges) continue;
+
+        // Three corners that already make a triangle are a face stored twice
+        // the same way round, whose edges look open because nothing runs
+        // back along them. Patching it adds a third copy.
+        if (loop.size() == 3) {
+            std::array<uint32_t, 3> key{loop[0], loop[1], loop[2]};
+            std::sort(key.begin(), key.end());
+            if (faces.count(key)) continue;
+        }
 
         Vec3 centre{};
         float perimeter = 0.0f;
@@ -1116,6 +1139,84 @@ size_t drop_hidden_shells(Mesh& mesh, const Bvh& source_bvh, const MeshAnalysis&
 }
 
 // ---------------------------------------------------------------------------
+namespace {
+
+// Each vertex's mirror image across the symmetry plane, and the vertices on
+// the plane itself, so a pass that moves vertices one by one can keep a
+// mirrored mesh exactly mirrored.
+struct MirrorPairs {
+    std::vector<uint32_t> partner;
+    std::vector<uint8_t>  on_plane;
+};
+
+MirrorPairs find_mirror_pairs(const Mesh& mesh, const SymmetryPlane* symmetry, float epsilon,
+                              float plane_epsilon)
+{
+    const size_t vcount = mesh.vertex_count();
+    MirrorPairs  out;
+    out.partner.assign(vcount, kInvalidIndex);
+    out.on_plane.assign(vcount, 0);
+    if (!symmetry) return out;
+
+    std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+    const float cell = std::max(epsilon * 2.0f, 1e-7f);
+    auto key = [&](Vec3 p) {
+        const int64_t x = int64_t(std::floor(p.x / cell));
+        const int64_t y = int64_t(std::floor(p.y / cell));
+        const int64_t z = int64_t(std::floor(p.z / cell));
+        return uint64_t(x * 73856093) ^ uint64_t(y * 19349663) ^ uint64_t(z * 83492791);
+    };
+    for (uint32_t v = 0; v < vcount; ++v) grid[key(mesh.positions[v])].push_back(v);
+    for (uint32_t v = 0; v < vcount; ++v) {
+        const Vec3 p = mesh.positions[v];
+        if (std::fabs(dot(symmetry->normal, p) - symmetry->offset) <= plane_epsilon) {
+            out.on_plane[v] = 1;
+            continue;
+        }
+        const Vec3 m = symmetry->mirror(p);
+        float best = epsilon * epsilon;
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dz = -1; dz <= 1; ++dz) {
+                    const auto it = grid.find(key(m + Vec3(float(dx), float(dy), float(dz)) * cell));
+                    if (it == grid.end()) continue;
+                    for (uint32_t w : it->second) {
+                        const float d2 = length2(mesh.positions[w] - m);
+                        if (d2 <= best) { best = d2; out.partner[v] = w; }
+                    }
+                }
+    }
+    return out;
+}
+
+// How close to the plane a vertex must be to count as on the mirror's seam,
+// which the mirror itself leaves exactly on it.
+float seam_epsilon(const Mesh& mesh)
+{
+    return std::max(mesh.compute_stats().bounds.diagonal() * 1e-6f, 1e-8f);
+}
+
+// Averages each vertex with its partner's reflection and pins plane vertices
+// to the plane.
+void apply_mirror(std::vector<Vec3>& moved, const MirrorPairs& pairs, const SymmetryPlane& symmetry)
+{
+    for (size_t v = 0; v < moved.size(); ++v) {
+        if (pairs.on_plane[v]) {
+            moved[v] = moved[v] - symmetry.normal * (dot(symmetry.normal, moved[v]) - symmetry.offset);
+        } else if (pairs.partner[v] != kInvalidIndex && pairs.partner[pairs.partner[v]] == uint32_t(v)) {
+            const uint32_t w = pairs.partner[v];
+            if (w > v) {
+                const Vec3 avg = (moved[v] + symmetry.mirror(moved[w])) * 0.5f;
+                moved[v] = avg;
+                moved[w] = symmetry.mirror(avg);
+            }
+        }
+    }
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
 float fit_to_surface(Mesh& mesh, const Bvh& source_bvh, int passes,
                      const SymmetryPlane* symmetry, float symmetry_epsilon)
 {
@@ -1124,42 +1225,14 @@ float fit_to_surface(Mesh& mesh, const Bvh& source_bvh, int passes,
     const size_t vcount = mesh.vertex_count();
     const size_t tcount = mesh.triangle_count();
 
-    // Mirror partners, found once: the moves below are computed per vertex and
-    // would drift a symmetric mesh apart by float noise, so each pass averages
-    // a vertex with its partner's reflection and pins plane vertices to it.
-    std::vector<uint32_t> partner(vcount, kInvalidIndex);
-    std::vector<bool>     on_plane(vcount, false);
-    if (symmetry) {
-        std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
-        const float cell = std::max(symmetry_epsilon * 2.0f, 1e-7f);
-        auto key = [&](Vec3 p) {
-            const int64_t x = int64_t(std::floor(p.x / cell));
-            const int64_t y = int64_t(std::floor(p.y / cell));
-            const int64_t z = int64_t(std::floor(p.z / cell));
-            return uint64_t(x * 73856093) ^ uint64_t(y * 19349663) ^ uint64_t(z * 83492791);
-        };
-        for (uint32_t v = 0; v < vcount; ++v) grid[key(mesh.positions[v])].push_back(v);
-        for (uint32_t v = 0; v < vcount; ++v) {
-            const Vec3 p = mesh.positions[v];
-            if (std::fabs(dot(symmetry->normal, p) - symmetry->offset) <= symmetry_epsilon) {
-                on_plane[v] = true;
-                continue;
-            }
-            const Vec3 m = symmetry->mirror(p);
-            float best = symmetry_epsilon * symmetry_epsilon;
-            for (int dx = -1; dx <= 1; ++dx)
-                for (int dy = -1; dy <= 1; ++dy)
-                    for (int dz = -1; dz <= 1; ++dz) {
-                        const auto it =
-                            grid.find(key(m + Vec3(float(dx), float(dy), float(dz)) * cell));
-                        if (it == grid.end()) continue;
-                        for (uint32_t w : it->second) {
-                            const float d2 = length2(mesh.positions[w] - m);
-                            if (d2 <= best) { best = d2; partner[v] = w; }
-                        }
-                    }
-        }
-    }
+    // Found once: the moves below are computed per vertex and would drift a
+    // symmetric mesh apart by float noise.
+    // Only the seam the mirror left counts as on the plane: within the pairing
+    // tolerance, the two sides of a narrow cleft - the seat of a figure - were
+    // pinned to the plane, which laid each face on its own mirror image and
+    // left four non manifold edges at a time.
+    const MirrorPairs pairs = find_mirror_pairs(mesh, symmetry, symmetry_epsilon,
+                                                seam_epsilon(mesh));
 
     // Where each face is sampled: the centroid and a point toward each corner,
     // with the share of each sample that goes to each corner.
@@ -1223,23 +1296,358 @@ float fit_to_surface(Mesh& mesh, const Bvh& source_bvh, int passes,
             moved[v] = mesh.positions[v] + mesh.normals[v] * offset;
             pass_move += std::fabs(offset);
         }
-        if (symmetry) {
-            for (size_t v = 0; v < vcount; ++v) {
-                if (on_plane[v]) {
-                    moved[v] = moved[v] - symmetry->normal *
-                                              (dot(symmetry->normal, moved[v]) - symmetry->offset);
-                } else if (partner[v] != kInvalidIndex && partner[partner[v]] == uint32_t(v)) {
-                    const uint32_t w = partner[v];
-                    if (w > v) {
-                        const Vec3 avg = (moved[v] + symmetry->mirror(moved[w])) * 0.5f;
-                        moved[v] = avg;
-                        moved[w] = symmetry->mirror(avg);
-                    }
+        if (symmetry) apply_mirror(moved, pairs, *symmetry);
+        mesh.positions.swap(moved);
+        last_move = float(pass_move / double(std::max<size_t>(1, vcount)));
+    }
+    mesh.compute_normals(60.0f);
+    return last_move;
+}
+
+// ---------------------------------------------------------------------------
+namespace {
+
+// Exact squared Euclidean distance transform of one row or column
+// (Felzenszwalb and Huttenlocher, "Distance Transforms of Sampled Functions").
+void edt_1d(const float* f, float* d, int n, std::vector<int>& v, std::vector<float>& z)
+{
+    v.resize(size_t(n));
+    z.resize(size_t(n) + 1);
+    int k = 0;
+    v[0] = 0;
+    z[0] = -std::numeric_limits<float>::infinity();
+    z[1] = std::numeric_limits<float>::infinity();
+    for (int q = 1; q < n; ++q) {
+        float s = 0.0f;
+        for (;;) {
+            const int p = v[size_t(k)];
+            s = ((f[q] + float(q) * float(q)) - (f[p] + float(p) * float(p))) / float(2 * q - 2 * p);
+            if (s > z[size_t(k)] || k == 0) break;
+            --k;
+        }
+        if (s <= z[size_t(k)]) {
+            k    = 0;
+            v[0] = q;
+            z[0] = -std::numeric_limits<float>::infinity();
+        } else {
+            ++k;
+            v[size_t(k)] = q;
+            z[size_t(k)] = s;
+        }
+        z[size_t(k) + 1] = std::numeric_limits<float>::infinity();
+    }
+    k = 0;
+    for (int q = 0; q < n; ++q) {
+        while (z[size_t(k) + 1] < float(q)) ++k;
+        const int p = v[size_t(k)];
+        d[q] = float(q - p) * float(q - p) + f[p];
+    }
+}
+
+// Distance in pixels from every pixel to the nearest pixel where `mask` equals
+// `target`.
+std::vector<float> distance_to(const std::vector<uint8_t>& mask, int size, uint8_t target)
+{
+    const float big = 1e12f;
+    std::vector<float> g(mask.size());
+    for (size_t i = 0; i < mask.size(); ++i) g[i] = mask[i] == target ? 0.0f : big;
+
+    std::vector<float> f(static_cast<size_t>(size)), d(static_cast<size_t>(size)), z;
+    std::vector<int>   v;
+    for (int x = 0; x < size; ++x) {
+        for (int y = 0; y < size; ++y) f[size_t(y)] = g[size_t(y) * size + x];
+        edt_1d(f.data(), d.data(), size, v, z);
+        for (int y = 0; y < size; ++y) g[size_t(y) * size + x] = d[size_t(y)];
+    }
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) f[size_t(x)] = g[size_t(y) * size + x];
+        edt_1d(f.data(), d.data(), size, v, z);
+        for (int x = 0; x < size; ++x) g[size_t(y) * size + x] = std::sqrt(d[size_t(x)]);
+    }
+    return g;
+}
+
+// The source as one camera sees it: where its outline is, as a signed
+// distance in pixels, positive outside the source.
+struct OutlineView {
+    Vec3  eye, s, u, f;
+    float tan_half = 0.0f;
+    float weight   = 1.0f;
+    int   size     = 0;
+    std::vector<float> sdf;
+
+    // Pixel coordinates of a point in front of the camera, false behind it.
+    bool project(Vec3 p, float& px, float& py, float& depth) const
+    {
+        const Vec3 d = p - eye;
+        depth = dot(d, f);
+        if (depth <= 1e-6f) return false;
+        const float x = dot(d, s) / (depth * tan_half);
+        const float y = dot(d, u) / (depth * tan_half);
+        px = (x * 0.5f + 0.5f) * float(size);
+        py = (0.5f - y * 0.5f) * float(size);
+        return true;
+    }
+
+    float sample(float px, float py) const
+    {
+        const float fx = std::clamp(px - 0.5f, 0.0f, float(size - 1));
+        const float fy = std::clamp(py - 0.5f, 0.0f, float(size - 1));
+        const int   x0 = std::min(int(fx), size - 2), y0 = std::min(int(fy), size - 2);
+        const float tx = fx - float(x0), ty = fy - float(y0);
+        auto at = [&](int x, int y) { return sdf[size_t(y) * size + x]; };
+        return (at(x0, y0) * (1 - tx) + at(x0 + 1, y0) * tx) * (1 - ty) +
+               (at(x0, y0 + 1) * (1 - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
+    }
+};
+
+OutlineView trace_outline(const Bvh& source_bvh, const ViewCamera& cam, int size)
+{
+    OutlineView o;
+    o.eye = cam.eye;
+    o.f   = cam.forward();
+    o.s   = cross(o.f, cam.up);
+    if (length2(o.s) < 1e-12f) o.s = cross(o.f, Vec3{0.0f, 0.0f, 1.0f});
+    o.s        = normalize(o.s);
+    o.u        = cross(o.s, o.f);
+    o.tan_half = std::tan(cam.fov_radians * 0.5f);
+    o.weight   = cam.weight;
+    o.size     = size;
+
+    std::vector<uint8_t> mask(size_t(size) * size, 0);
+    ThreadPool::shared().parallel_for(size_t(size), 4, [&](size_t row, unsigned) {
+        const float y = 1.0f - (float(row) + 0.5f) / float(size) * 2.0f;
+        for (int col = 0; col < size; ++col) {
+            const float x   = (float(col) + 0.5f) / float(size) * 2.0f - 1.0f;
+            const Vec3  dir = o.f + o.s * (x * o.tan_half) + o.u * (y * o.tan_half);
+            mask[row * size + size_t(col)] =
+                source_bvh.occluded(o.eye, dir, cam.znear, cam.zfar) ? 1 : 0;
+        }
+    });
+
+    // Half a pixel off each side, so the zero crossing sits on the boundary
+    // between pixels rather than on the outermost pixel's centre.
+    const std::vector<float> to_inside  = distance_to(mask, size, 1);
+    const std::vector<float> to_outside = distance_to(mask, size, 0);
+    o.sdf.resize(mask.size());
+    for (size_t i = 0; i < mask.size(); ++i)
+        o.sdf[i] = mask[i] ? -(to_outside[i] - 0.5f) : to_inside[i] - 0.5f;
+    return o;
+}
+
+} // namespace
+
+float fit_to_silhouette(Mesh& mesh, const Bvh& source_bvh, const std::vector<ViewCamera>& cameras,
+                        int passes, int resolution, const SymmetryPlane* symmetry,
+                        float symmetry_epsilon)
+{
+    if (mesh.empty() || source_bvh.empty() || cameras.empty() || passes <= 0 || resolution < 16)
+        return 0.0f;
+
+    std::vector<OutlineView> views;
+    views.reserve(cameras.size());
+    for (const ViewCamera& cam : cameras)
+        if (cam.weight > 0.0f) views.push_back(trace_outline(source_bvh, cam, resolution));
+
+    const size_t      vcount = mesh.vertex_count();
+    const size_t      tcount = mesh.triangle_count();
+    const MirrorPairs pairs = find_mirror_pairs(mesh, symmetry, symmetry_epsilon,
+                                                seam_epsilon(mesh));
+
+    // The first vertex at each exact position, for every vertex there.
+    std::vector<uint32_t> colocated(vcount);
+    {
+        std::map<std::tuple<float, float, float>, uint32_t> first;
+        for (uint32_t v = 0; v < vcount; ++v) {
+            const Vec3 p = mesh.positions[v];
+            colocated[v] = first.emplace(std::make_tuple(p.x, p.y, p.z), v).first->second;
+        }
+    }
+
+    // Every edge and the faces on either side of it: the outline runs along
+    // edges whose two faces disagree about facing the camera.
+    struct EdgeFaces { uint32_t a, b, f0, f1; };
+    std::vector<EdgeFaces> edges;
+    {
+        std::unordered_map<uint64_t, size_t> index;
+        index.reserve(tcount * 2);
+        for (uint32_t t = 0; t < tcount; ++t)
+            for (int k = 0; k < 3; ++k) {
+                uint32_t a = mesh.indices[t * 3 + k], b = mesh.indices[t * 3 + (k + 1) % 3];
+                if (a > b) std::swap(a, b);
+                const uint64_t key = (uint64_t(a) << 32) | b;
+                const auto     it  = index.find(key);
+                if (it == index.end()) {
+                    index.emplace(key, edges.size());
+                    edges.push_back({a, b, t, kInvalidIndex});
+                } else if (edges[it->second].f1 == kInvalidIndex) {
+                    edges[it->second].f1 = t;
+                }
+            }
+    }
+
+    std::vector<Vec3>   face_n(tcount), face_c(tcount), push(vcount);
+    std::vector<double> edge_min(vcount), weight(vcount);
+    std::vector<int>    edge_n(vcount);
+    float last_move = 0.0f;
+
+    for (int pass = 0; pass < passes; ++pass) {
+        mesh.compute_normals();
+        if (!mesh.has_normals()) break;
+        std::fill(edge_min.begin(), edge_min.end(), std::numeric_limits<double>::max());
+        std::fill(edge_n.begin(), edge_n.end(), 0);
+        std::fill(push.begin(), push.end(), Vec3{});
+        std::fill(weight.begin(), weight.end(), 0.0);
+
+        for (size_t t = 0; t < tcount; ++t) {
+            const Vec3 a = mesh.positions[mesh.indices[t * 3]];
+            const Vec3 b = mesh.positions[mesh.indices[t * 3 + 1]];
+            const Vec3 c = mesh.positions[mesh.indices[t * 3 + 2]];
+            // Raw area vector: normalize() has an absolute epsilon that small
+            // assets fall under, and only its sign against the view matters.
+            face_n[t] = cross(b - a, c - a);
+            face_c[t] = (a + b + c) / 3.0f;
+        }
+        for (const EdgeFaces& e : edges) {
+            const double len = length(mesh.positions[e.a] - mesh.positions[e.b]);
+            edge_min[e.a] = std::min(edge_min[e.a], len); ++edge_n[e.a];
+            edge_min[e.b] = std::min(edge_min[e.b], len); ++edge_n[e.b];
+        }
+
+        Bvh low_bvh;
+        low_bvh.build(mesh);
+
+        for (size_t vi = 0; vi < views.size(); ++vi) {
+            const OutlineView& o = views[vi];
+            for (const EdgeFaces& e : edges) {
+                const bool front0 = dot(face_n[e.f0], face_c[e.f0] - o.eye) < 0.0f;
+                const bool front1 = e.f1 == kInvalidIndex
+                                        ? !front0
+                                        : dot(face_n[e.f1], face_c[e.f1] - o.eye) < 0.0f;
+                if (front0 == front1) continue;
+
+                // The outline is made of edges, not vertices: with every vertex
+                // on the source's outline the edges between them are chords
+                // inside it. So the field is sampled along the edge, and each
+                // sample pulls on both ends by how close it is to them, the
+                // way fit_to_surface samples faces.
+                static const float kAlong[3] = {1.0f / 6.0f, 0.5f, 5.0f / 6.0f};
+                for (float t : kAlong) {
+                    const Vec3 p = mesh.positions[e.a] * (1.0f - t) + mesh.positions[e.b] * t;
+                    float px = 0.0f, py = 0.0f, depth = 0.0f;
+                    if (!o.project(p, px, py, depth)) continue;
+                    if (px < 1.0f || py < 1.0f || px > float(o.size - 1) || py > float(o.size - 1))
+                        continue;
+                    const float world_per_px = 2.0f * depth * o.tan_half / float(o.size);
+
+                    // An outline edge behind the model is a fold, not the
+                    // outline. Two pixels of slack for the faces the edge
+                    // itself sits on, which graze the ray.
+                    const Vec3  to   = p - o.eye;
+                    const float dist = length(to);
+                    if (low_bvh.occluded(o.eye, to, 1e-4f,
+                                         1.0f - 2.0f * world_per_px / std::max(dist, kEps)))
+                        continue;
+
+                    // Across the outline: the normal with its component along
+                    // the view ray removed.
+                    const Vec3 ray = to / std::max(dist, kEps);
+                    const Vec3 n   = mesh.normals[e.a] * (1.0f - t) + mesh.normals[e.b] * t;
+                    Vec3 out = n - ray * dot(n, ray);
+                    const float out_len = length(out);
+                    if (out_len < 0.2f) continue;   // facing the camera: not on the outline
+                    out = out / out_len;
+
+                    // Which way along it is outward comes from the outline
+                    // itself, not from the winding, so a shell the backend
+                    // left inside out still moves the right way. Where the
+                    // source's distance field has no slope there is no
+                    // outline nearby to move toward.
+                    float qx = 0.0f, qy = 0.0f, qd = 0.0f;
+                    if (!o.project(p + out * world_per_px, qx, qy, qd)) continue;
+                    const float gx = o.sample(px + 1.0f, py) - o.sample(px - 1.0f, py);
+                    const float gy = o.sample(px, py + 1.0f) - o.sample(px, py - 1.0f);
+                    const float along = gx * (qx - px) + gy * (qy - py);
+                    if (std::fabs(along) < 0.25f) continue;
+                    if (along < 0.0f) out = out * -1.0f;
+
+                    // A contour seen against another part of the model - the
+                    // near rim of a ring in front of its far side - is not on
+                    // the outline, and the source's field there says only that
+                    // the far side covers it. Two pixels outward must be clear
+                    // of the low poly for this edge to be on the outline.
+                    const Vec3 beyond = p + out * (2.0f * world_per_px) - o.eye;
+                    if (low_bvh.occluded(o.eye, beyond, 1e-4f, 4.0f)) continue;
+
+                    const float sdf = o.sample(px, py);
+                    // Further than a few pixels off, the nearest source outline
+                    // is likely some other part's.
+                    if (std::fabs(sdf) > 6.0f) continue;
+                    const Vec3 pull = out * (-sdf * world_per_px * o.weight);
+                    push[e.a]   = push[e.a] + pull * (1.0f - t);
+                    push[e.b]   = push[e.b] + pull * t;
+                    weight[e.a] += double(o.weight * (1.0f - t));
+                    weight[e.b] += double(o.weight * t);
                 }
             }
         }
+
+        // Move, damped and capped at a quarter of the shortest edge at the
+        // vertex. The mean edge, which fit_to_surface caps by, let a vertex
+        // with one short edge step onto its neighbour; the validator's weld
+        // then merged the two and left non manifold edges behind.
+        // Copies of one vertex move as one: pulled apart they would open a
+        // crack the validator's weld no longer closes.
+        for (size_t v = 0; v < vcount; ++v) {
+            const uint32_t r = colocated[v];
+            if (r == v) continue;
+            push[r]     = push[r] + push[v];
+            weight[r]   += weight[v];
+            edge_min[r] = std::min(edge_min[r], edge_min[v]);
+            edge_n[r]   += edge_n[v];
+        }
+        std::vector<Vec3> step(vcount);
+        double pass_move   = 0.0;
+        size_t moved_count = 0;
+        for (size_t v = 0; v < vcount; ++v) {
+            if (colocated[v] != v || weight[v] <= 0.0 || edge_n[v] == 0) continue;
+            const float cap = 0.25f * float(edge_min[v]);
+            step[v]         = push[v] * float(0.7 / weight[v]);
+            const float len = length(step[v]);
+            if (len > cap) step[v] = step[v] * (cap / len);
+            pass_move += std::min(len, cap);
+            ++moved_count;
+        }
+        // A step that flips a face, or crushes it toward a sliver, is undone
+        // for every corner of that face; the caps above make it rare, not
+        // impossible. Raw area vectors again, for the small assets.
+        std::vector<uint8_t> hold(vcount, 0);
+        for (int round = 0; round < 3; ++round) {
+            bool held_any = false;
+            for (size_t t = 0; t < tcount; ++t) {
+                const uint32_t i[3] = {mesh.indices[t * 3], mesh.indices[t * 3 + 1],
+                                       mesh.indices[t * 3 + 2]};
+                auto at = [&](uint32_t v) {
+                    return hold[colocated[v]] ? mesh.positions[v] : mesh.positions[v] + step[colocated[v]];
+                };
+                const Vec3  before = face_n[t];
+                const Vec3  after  = cross(at(i[1]) - at(i[0]), at(i[2]) - at(i[0]));
+                const float b2     = length2(before);
+                if (b2 <= 0.0f) continue;
+                if (dot(before, after) > 0.25f * b2) continue;
+                for (uint32_t v : i) {
+                    if (!hold[colocated[v]]) { hold[colocated[v]] = 1; held_any = true; }
+                }
+            }
+            if (!held_any) break;
+        }
+
+        std::vector<Vec3> moved = mesh.positions;
+        for (size_t v = 0; v < vcount; ++v)
+            if (!hold[colocated[v]]) moved[v] = mesh.positions[v] + step[colocated[v]];
+        if (symmetry) apply_mirror(moved, pairs, *symmetry);
         mesh.positions.swap(moved);
-        last_move = float(pass_move / double(std::max<size_t>(1, vcount)));
+        last_move = float(pass_move / double(std::max<size_t>(1, moved_count)));
     }
     mesh.compute_normals(60.0f);
     return last_move;
@@ -1393,6 +1801,21 @@ HardRuleReport apply_hard_rules(Mesh& mesh, const Mesh& source, const Bvh& sourc
         if (moved > 0.0f)
             rep.note(format("fitted the faces to the surface, last pass moved %.3f%% of the "
                             "model's size on average",
+                            100.0f * moved / std::max(analysis.bbox_diagonal, kEps)));
+    }
+
+    // --- 5b. fit the outline the cameras see ---------------------------------
+    // The silhouette score is measured in the profile's cameras, and fitting
+    // the faces to the surface on average leaves the outline wherever the
+    // backend's vertices happened to fall across it.
+    if (opts.fit_silhouette_passes > 0) {
+        const std::vector<ViewCamera> cameras = build_camera_rig(source, profile);
+        const float moved = fit_to_silhouette(mesh, source_bvh, cameras, opts.fit_silhouette_passes,
+                                              opts.fit_silhouette_resolution,
+                                              rep.symmetry_applied ? &symmetry : nullptr, eps);
+        if (moved > 0.0f)
+            rep.note(format("fitted the outline to the source in %zu views, last pass moved "
+                            "%.3f%% of the model's size on average", cameras.size(),
                             100.0f * moved / std::max(analysis.bbox_diagonal, kEps)));
     }
 
