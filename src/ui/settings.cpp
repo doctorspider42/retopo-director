@@ -440,13 +440,8 @@ void draw_checkpoint_download(AppState& app, SegmenterOptions& seg)
     const Palette&      p  = palette();
     CheckpointDownload& dl = app.checkpoint_download;
 
-    // A finished download points the settings at what it just wrote.
-    std::string model_type;
-    if (const std::string done = dl.take_finished(&model_type); !done.empty()) {
-        seg.sam.checkpoint = done;
-        if (!model_type.empty()) seg.sam.model_type = model_type;
-        app.notify("Checkpoint ready: " + fs::path(done).filename().string(), 6.0);
-    }
+    // A finished download is applied by poll_checkpoint_download, every frame,
+    // so it lands whether or not this page is open.
 
     if (dl.running()) {
         const float    fraction = dl.fraction();
@@ -655,6 +650,384 @@ void draw_segmenter_settings(AppState& app)
         }
         card_end();
     }
+}
+
+// ---------------------------------------------------------------------------
+// The regions picker: who draws the regions, chosen from the top bar and the
+// tune tab rather than from the third page of Settings. Picking SAM without a
+// model on disk is one button - download it and switch - instead of a path,
+// a combo, a download and then a separate "use it".
+// ---------------------------------------------------------------------------
+namespace {
+
+float S(float v) { return v * dpi(); }
+
+const SamCheckpoint* checkpoint_for(const std::string& model_type)
+{
+    for (const SamCheckpoint& c : sam_checkpoints())
+        if (model_type == c.model_type) return &c;
+    return nullptr;
+}
+
+// Lets a card's background be drawn after its contents, once their height is
+// known: contents on the top channel, the plate underneath.
+struct CardFrame {
+    ImVec2 a;
+    float  w = 0.0f;
+};
+
+CardFrame card_open(float w)
+{
+    CardFrame f{ImGui::GetCursorScreenPos(), w};
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->ChannelsSplit(2);
+    dl->ChannelsSetCurrent(1);
+    ImGui::SetCursorScreenPos({f.a.x + S(14), f.a.y + S(12)});
+    ImGui::BeginGroup();
+    return f;
+}
+
+void card_close(const CardFrame& f, bool selected, bool hovered)
+{
+    const Palette& p = palette();
+    ImGui::EndGroup();
+    const float bottom = ImGui::GetItemRectMax().y + S(12);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->ChannelsSetCurrent(0);
+    const ImVec2 b{f.a.x + f.w, bottom};
+    dl->AddRectFilled(f.a, b, selected ? col(p.accent, 0.09f)
+                                       : col(hovered ? p.surface_alt : p.surface), S(10));
+    dl->AddRect(f.a, b, selected ? col(p.accent) : col(p.line), S(10));
+    dl->ChannelsMerge();
+    ImGui::SetCursorScreenPos({f.a.x, bottom + S(8)});
+    ImGui::Dummy({f.w, 0.0f});
+}
+
+// A radio, a title, a coloured state and a line of explanation; the whole of
+// it is the button.
+bool card_header(const char* id, const char* title, const char* state, const ImVec4& state_color,
+                 const char* body, bool selected, float inner_w, bool* hovered)
+{
+    const Palette& p = palette();
+    const Fonts&   f = fonts();
+    ImDrawList*    dl = ImGui::GetWindowDrawList();
+    const ImVec2   p0 = ImGui::GetCursorScreenPos();
+    const float    text_x = p0.x + S(28);
+    const float    wrap   = inner_w - S(28);
+
+    ImGui::PushFont(f.medium, f.size_body);
+    const float th = ImGui::GetTextLineHeight();
+    const float tw = ImGui::CalcTextSize(title).x;
+    ImGui::PopFont();
+    ImGui::PushFont(f.regular, f.size_small);
+    const ImVec2 bs = ImGui::CalcTextSize(body, nullptr, false, wrap);
+    const ImVec2 ss = state && *state ? ImGui::CalcTextSize(state) : ImVec2(0, 0);
+    ImGui::PopFont();
+
+    const float h = th + S(3) + bs.y;
+    const bool clicked = ImGui::InvisibleButton(id, {inner_w, h});
+    *hovered = ImGui::IsItemHovered();
+
+    const ImVec2 rc{p0.x + S(8), p0.y + th * 0.5f};
+    if (selected) {
+        dl->AddCircleFilled(rc, S(8), col(p.accent), 24);
+        dl->AddCircleFilled(rc, S(3), col(p.text), 16);
+    } else {
+        dl->AddCircle(rc, S(7.5f), col(*hovered ? p.text_dim : p.text_faint), 24, S(1.5f));
+    }
+
+    ImGui::PushFont(f.medium, f.size_body);
+    dl->AddText({text_x, p0.y}, col(p.text), title);
+    ImGui::PopFont();
+
+    ImGui::PushFont(f.regular, f.size_small);
+    if (ss.x > 0.0f) {
+        const ImVec2 ba{text_x + tw + S(8), p0.y + (th - ss.y) * 0.5f - S(1)};
+        dl->AddRectFilled(ba, {ba.x + ss.x + S(14), ba.y + ss.y + S(2)}, col(state_color, 0.16f),
+                          S(8));
+        dl->AddText({ba.x + S(7), ba.y + S(1)}, col(state_color), state);
+    }
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), {text_x, p0.y + th + S(3)},
+                col(p.text_dim), body, nullptr, wrap);
+    ImGui::PopFont();
+    return clicked;
+}
+
+// One of the three model sizes: its name, and what it costs on disk and in VRAM.
+bool model_pill(const char* id, const SamCheckpoint& c, bool picked, float w)
+{
+    const Palette& p = palette();
+    const Fonts&   f = fonts();
+    const ImVec2   a = ImGui::GetCursorScreenPos();
+    const float    h = S(42);
+    const bool clicked = ImGui::InvisibleButton(id, {w, h});
+    const bool hov     = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(a, {a.x + w, a.y + h}, col(hov ? p.elevated : p.surface_alt), S(8));
+    dl->AddRect(a, {a.x + w, a.y + h}, col(picked ? p.accent : p.overlay), S(8));
+    ImGui::PushFont(picked ? f.medium : f.regular, f.size_small);
+    dl->AddText({a.x + S(10), a.y + S(5)}, col(p.text), c.label);
+    ImGui::PopFont();
+    ImGui::PushFont(f.mono, f.size_small - S(1));
+    std::string vram = c.note;
+    const size_t at = vram.find(" GB");
+    vram = at != std::string::npos && at >= 1 ? vram.substr(at - 1, 4) : std::string();
+    const std::string cost = paths::format_bytes(c.bytes) + (vram.empty() ? "" : " - " + vram);
+    dl->AddText({a.x + S(10), a.y + S(23)}, col(p.text_dim), cost.c_str());
+    ImGui::PopFont();
+    return clicked;
+}
+
+} // namespace
+
+bool sam_ready(const SegmenterOptions& seg, std::string* reason)
+{
+    std::error_code ec;
+    std::string     why;
+    if (seg.sam.checkpoint.empty())
+        why = "needs a model";
+    else if (!std::filesystem::exists(seg.sam.checkpoint, ec))
+        why = "the model file is gone";
+    else if (seg.sam.script.empty() && find_sam_script().empty())
+        why = "tools/sam_server.py not found";
+    if (reason) *reason = why;
+    return why.empty();
+}
+
+std::string planned_split(const AppState& app)
+{
+    const SegmenterOptions& seg = app.settings.segmenter;
+    if (seg.kind == SegmenterKind::Geometric || !sam_ready(seg, nullptr)) return "Geometric";
+    const SamCheckpoint* c = checkpoint_for(seg.sam.model_type);
+    return c ? std::string("SAM ") + c->label : std::string("SAM");
+}
+
+std::string split_chip_note(const AppState& app)
+{
+    const CheckpointDownload& dl = app.checkpoint_download;
+    if (dl.running() && app.sam_switch_pending) {
+        const float fr = dl.fraction();
+        return fr >= 0.0f ? format("SAM - %.0f%%", fr * 100.0f) : std::string("SAM - downloading");
+    }
+    const SegmenterOptions& seg = app.settings.segmenter;
+    if (seg.kind == SegmenterKind::Auto) return "Auto";
+    if (seg.kind == SegmenterKind::Geometric) return "Geometric";
+    const SamCheckpoint* c = checkpoint_for(seg.sam.model_type);
+    return c ? std::string("SAM ") + c->label : std::string("SAM");
+}
+
+void poll_checkpoint_download(AppState& app)
+{
+    CheckpointDownload& dl = app.checkpoint_download;
+    std::string model_type;
+    if (const std::string done = dl.take_finished(&model_type); !done.empty()) {
+        SegmenterOptions& seg = app.settings.segmenter;
+        seg.sam.checkpoint = done;
+        if (!model_type.empty()) seg.sam.model_type = model_type;
+        if (app.sam_switch_pending) {
+            seg.kind = SegmenterKind::Sam;
+            const SamCheckpoint* c = checkpoint_for(seg.sam.model_type);
+            app.notify(format("SAM %s is ready. The next run splits with it.",
+                              c ? c->label : ""), 6.0);
+        } else {
+            app.notify("Checkpoint ready: " + fs::path(done).filename().string(), 6.0);
+        }
+        app.sam_switch_pending = false;
+    } else if (!dl.running() && app.sam_switch_pending) {
+        // Cancelled or failed: the split stays what it was.
+        app.sam_switch_pending = false;
+        if (const std::string err = dl.error(); !err.empty())
+            app.notify("SAM download failed: " + err, 6.0);
+    }
+}
+
+void regions_picker_popup(AppState& app, ImVec2 anchor)
+{
+    const Palette& p = palette();
+    const float    w = S(452);
+    // Only while it is open: a SetNextWindow call that BeginPopup does not
+    // consume lands on whichever window is begun next.
+    if (ImGui::IsPopupOpen("regions_menu")) {
+        ImGui::SetNextWindowSize({w, 0.0f});
+        ImGui::SetNextWindowPos(anchor, ImGuiCond_Appearing);
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(16), S(16)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(S(6), S(6)));
+    if (!ImGui::BeginPopup("regions_menu")) {
+        ImGui::PopStyleVar(2);
+        return;
+    }
+
+    SegmenterOptions&   seg = app.settings.segmenter;
+    CheckpointDownload& dl  = app.checkpoint_download;
+    const bool          downloading = dl.running() && app.sam_switch_pending;
+    const float         cw = ImGui::GetContentRegionAvail().x;
+    const float         inner = cw - S(28);
+
+    {
+        const Fonts& f = fonts();
+        ImGui::PushFont(f.medium, f.size_body);
+        ImGui::TextUnformatted("Who draws the regions");
+        ImGui::PopFont();
+        ImGui::PushFont(f.regular, f.size_small);
+        ImGui::PushStyleColor(ImGuiCol_Text, p.text_dim);
+        ImGui::TextUnformatted("Picked for the next run. Rebuild keeps the regions you have.");
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
+        spacer(4.0f);
+    }
+
+    // --- geometric --------------------------------------------------------------
+    {
+        const bool sel = seg.kind == SegmenterKind::Geometric && !downloading;
+        bool hov = false;
+        const CardFrame fr = card_open(cw);
+        if (card_header("##geo", "Geometric", "ready", p.success,
+                        downloading ? "Still what a run uses until the download finishes."
+                                    : "Splits along creases and joints. Instant, nothing "
+                                      "to install.",
+                        sel, inner, &hov) && !downloading)
+            seg.kind = SegmenterKind::Geometric;
+        card_close(fr, sel, hov);
+    }
+
+    // --- sam ----------------------------------------------------------------------
+    {
+        std::string reason;
+        const bool  ready = sam_ready(seg, &reason);
+        const std::vector<SamCheckpoint>& table = sam_checkpoints();
+        if (app.sam_model_pick < 0 || app.sam_model_pick >= int(table.size())) {
+            app.sam_model_pick = 0;
+            for (size_t i = 0; i < table.size(); ++i)
+                if (seg.sam.model_type == table[i].model_type) app.sam_model_pick = int(i);
+        }
+        const SamCheckpoint& pick = table[size_t(app.sam_model_pick)];
+        std::error_code ec;
+        const fs::path pick_path = sam_checkpoint_path(pick);
+        const bool     pick_here = fs::exists(pick_path, ec);
+
+        const bool sel = seg.kind == SegmenterKind::Sam || downloading;
+        // A model already downloaded counts as ready to pick, even before the
+        // settings point at it.
+        const bool on_disk = !ready && pick_here &&
+                             (seg.sam.checkpoint.empty() || reason == "the model file is gone");
+        const std::string state = downloading ? format("downloading %s", dl.label().c_str())
+                                : ready       ? std::string("ready")
+                                : on_disk     ? format("%s downloaded", pick.label)
+                                              : reason;
+        const ImVec4 state_col = downloading ? p.accent_hot
+                               : ready || on_disk ? p.success : p.warning;
+        bool hov = false;
+        const CardFrame fr = card_open(cw);
+        const bool clicked = card_header(
+            "##sam", "SAM", state.c_str(), state_col,
+            downloading ? "Switches over by itself when the model is in place. You can close "
+                          "this and keep working."
+                        : "Reads the reference renders the way a person would. Best where "
+                          "clothes, straps and armour sit on the body.",
+            sel, inner, &hov);
+        // Picking SAM is choosing it when the model is there; when it is not,
+        // the button below says what it will cost first.
+        if (clicked && !downloading && (ready || pick_here)) {
+            if (pick_here) {
+                seg.sam.checkpoint = pick_path.string();
+                seg.sam.model_type = pick.model_type;
+            }
+            seg.kind = SegmenterKind::Sam;
+        }
+
+        const float indent = S(28);
+        if (downloading) {
+            spacer(2.0f);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + indent);
+            const float frac = dl.fraction();
+            const uint64_t got = dl.received(), total = dl.total();
+            const std::string overlay =
+                total ? format("%s of %s", paths::format_bytes(got).c_str(),
+                               paths::format_bytes(total).c_str())
+                      : paths::format_bytes(got);
+            ImGui::BeginGroup();
+            progress_bar(frac < 0.0f ? 0.0f : frac, overlay.c_str(), S(16), inner - indent);
+            spacer(4.0f);
+            if (secondary_button("Cancel")) dl.cancel();
+            ImGui::SameLine(0.0f, S(10));
+            ImGui::AlignTextToFramePadding();
+            faint("Cancelling goes back to Geometric");
+            ImGui::EndGroup();
+        } else {
+            spacer(4.0f);
+            const float gap  = S(6);
+            const float pw   = (inner - indent - gap * 2.0f) / 3.0f;
+            const float row  = ImGui::GetCursorPosX() + indent;
+            for (size_t i = 0; i < table.size(); ++i) {
+                ImGui::SetCursorPosX(row + float(i) * (pw + gap));
+                ImGui::PushID(int(i));
+                if (model_pill("##pill", table[i], int(i) == app.sam_model_pick, pw)) {
+                    app.sam_model_pick = int(i);
+                    // A model already on disk is chosen by being picked.
+                    if (fs::exists(sam_checkpoint_path(table[i]), ec) &&
+                        seg.kind == SegmenterKind::Sam) {
+                        seg.sam.checkpoint = sam_checkpoint_path(table[i]).string();
+                        seg.sam.model_type = table[i].model_type;
+                    }
+                }
+                ImGui::PopID();
+                if (i + 1 < table.size()) ImGui::SameLine(0.0f, gap);
+            }
+            const bool in_use = seg.kind == SegmenterKind::Sam && ready &&
+                                seg.sam.model_type == pick.model_type;
+            if (!pick_here) {
+                spacer(4.0f);
+                ImGui::SetCursorPosX(row);
+                std::string offline;
+                const bool  online = http_available(&offline);
+                ImGui::BeginDisabled(!online || dl.running());
+                if (icon_label_button(format("Download %s and use it", pick.label).c_str(),
+                                      Icon::Export, ButtonKind::Primary)) {
+                    if (dl.start(pick)) app.sam_switch_pending = true;
+                }
+                ImGui::EndDisabled();
+                if (!online && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", offline.c_str());
+                ImGui::SameLine(0.0f, S(10));
+                ImGui::AlignTextToFramePadding();
+                faint("Apache-2.0, from Meta");
+            } else if (!in_use) {
+                spacer(4.0f);
+                ImGui::SetCursorPosX(row);
+                if (icon_label_button(format("Use %s", pick.label).c_str(), Icon::Check,
+                                      ButtonKind::Primary)) {
+                    seg.sam.checkpoint = pick_path.string();
+                    seg.sam.model_type = pick.model_type;
+                    seg.kind           = SegmenterKind::Sam;
+                }
+            }
+        }
+        card_close(fr, sel, hov);
+    }
+
+    // --- auto ---------------------------------------------------------------------
+    {
+        const bool sel = seg.kind == SegmenterKind::Auto && !downloading;
+        bool hov = false;
+        const CardFrame fr = card_open(cw);
+        if (card_header("##auto", "Auto", nullptr, p.text, "SAM once a model is in place, "
+                        "Geometric until then.", sel, inner, &hov) && !downloading)
+            seg.kind = SegmenterKind::Auto;
+        card_close(fr, sel, hov);
+    }
+
+    ImGui::AlignTextToFramePadding();
+    faint("Device, Python and sampling stay in Settings");
+    ImGui::SameLine(0.0f, S(12));
+    if (ghost_button("Open Settings")) {
+        app.options_page = 2;
+        app.show_options = true;
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+    ImGui::PopStyleVar(2);
 }
 
 // ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@ void print_usage()
         "  --tab <name>              Inspector tab: tune, report, director, renders\n"
         "  --view <name>             Viewport: low, source, compare\n"
         "  --camera <name>           A profile camera, once a run has built them\n"
-        "  --show <what>             Open a sheet: settings, log, shortcuts, about\n"
+        "  --show <what>             Open a sheet: settings, log, shortcuts, about, regions\n"
         "  --help            This text\n",
         RD_VERSION_STRING);
 }

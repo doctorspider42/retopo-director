@@ -208,10 +208,12 @@ void tab_tune(AppState& app)
     Segmentation     seg;
     std::vector<int> actual;
     KnobPanel        built;
+    std::string      drawn_by;
     app.pipeline.with_results([&](const PipelineResults& r) {
-        seg    = r.segmentation;
-        actual = r.retopo.region_triangles;
-        built  = r.panel;
+        seg      = r.segmentation;
+        actual   = r.retopo.region_triangles;
+        built    = r.panel;
+        drawn_by = r.split_by;
     });
 
     if (app.panel.regions.empty()) {
@@ -292,7 +294,51 @@ void tab_tune(AppState& app)
             app.mode        = shown ? RenderMode::Shaded : RenderMode::Regions;
             app.gpu_version = 0;
         }
+        // Who drew these regions, next to them; the same picker as the top bar.
+        if (!drawn_by.empty()) {
+            const float dw = ImGui::CalcTextSize(drawn_by.c_str()).x + S(40);
+            ImGui::SetCursorPos({ImGui::GetCursorStartPos().x + ImGui::GetContentRegionAvail().x -
+                                     tw - S(6) - dw, y});
+            ImGui::BeginDisabled(app.pipeline.running());
+            if (icon_label_button(format("%s##split", drawn_by.c_str()).c_str(), Icon::Cube,
+                                  ButtonKind::Ghost, {dw, S(26)}))
+                ImGui::OpenPopup("regions_menu");
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip("Who drew these regions. Click to choose for the next run.");
+            regions_picker_popup(app, {ImGui::GetItemRectMax().x - S(452),
+                                       ImGui::GetItemRectMax().y + S(6)});
+        }
         ImGui::SetCursorPosY(y + S(32));
+
+        // The regions on screen came from one segmenter and the next run is
+        // set to use another: say so where the regions are, with the way to
+        // act on it, rather than leaving it to be found after the next run.
+        const std::string next = planned_split(app);
+        if (!drawn_by.empty() && next != drawn_by && !app.pipeline.running()) {
+            const ImVec2 a  = ImGui::GetCursorScreenPos();
+            const float  w  = ImGui::GetContentRegionAvail().x;
+            const float  bw = ImGui::CalcTextSize("Re-split").x + S(24);
+            const float  h  = S(40);
+            ImDrawList*  dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(a, {a.x + w, a.y + h}, col(p.accent, 0.09f), S(10));
+            dl->AddRect(a, {a.x + w, a.y + h}, col(p.accent, 0.35f), S(10));
+            const std::string msg = format("Drawn by %s. Next run: %s.", drawn_by.c_str(),
+                                           next.c_str());
+            ImGui::PushFont(fonts().regular, fonts().size_small);
+            dl->PushClipRect({a.x + S(12), a.y}, {a.x + w - bw - S(16), a.y + h}, true);
+            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                        {a.x + S(12), a.y + (h - ImGui::GetTextLineHeight()) * 0.5f},
+                        col(p.text_dim), msg.c_str(), nullptr, w - bw - S(28));
+            dl->PopClipRect();
+            ImGui::PopFont();
+            ImGui::SetCursorScreenPos({a.x + w - bw - S(8), a.y + (h - S(28)) * 0.5f});
+            if (primary_button("Re-split", {bw, S(28)})) action_run(app);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip("Runs again from the split, with %s.", next.c_str());
+            ImGui::SetCursorScreenPos({a.x, a.y + h + S(8)});
+            ImGui::Dummy({w, 0.0f});
+        }
     }
     // Rows sit close; the spacing between them is in the row height.
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(S(8), S(2)));

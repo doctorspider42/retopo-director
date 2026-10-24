@@ -39,6 +39,18 @@ void draw_director_settings(AppState& app);
 void draw_segmenter_settings(AppState& app);
 void draw_run_settings(AppState& app);
 
+// The regions picker, opened from the top bar and the tune tab: callers
+// OpenPopup("regions_menu") and call this every frame in the same ID scope.
+void        regions_picker_popup(AppState& app, ImVec2 anchor);
+// Applies a finished SAM download, and switches the split when the picker
+// asked for it. Every frame, so it lands whether or not anything is open.
+void        poll_checkpoint_download(AppState& app);
+bool        sam_ready(const SegmenterOptions& seg, std::string* reason);
+// What the next run will split with, as the results name it ("Geometric",
+// "SAM ViT-B"), and what the top bar chip says.
+std::string planned_split(const AppState& app);
+std::string split_chip_note(const AppState& app);
+
 // The director arguing with the brief. Shown on the target page and on the
 // Director tab; returns true when a proposal was applied.
 bool   draw_profile_advice(AppState& app, TargetProfile& profile);

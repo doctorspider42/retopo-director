@@ -126,6 +126,13 @@ struct AppState {
     Aabb        scene_bounds;
     ImageCache  images;
     CheckpointDownload checkpoint_download;
+    // A download started from the regions picker switches the split to SAM
+    // when it lands; one started from Settings only fetches the file.
+    bool        sam_switch_pending = false;
+    // Which SAM model the picker has highlighted; -1 follows the settings.
+    int         sam_model_pick = -1;
+    // Opens the picker from outside the top bar (--show regions).
+    bool        open_regions_picker = false;
     Updater     updater;
     // Asked once at start, quietly. Off for anyone who would rather not have
     // the application talk to GitHub on its own.

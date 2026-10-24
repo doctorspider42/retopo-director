@@ -442,6 +442,7 @@ int run_application(const AppOptions& opts)
         // name waits until they do.
         app->pending_camera = opts.ui_camera;
         if (iequals(opts.ui_show, "settings"))  app->show_options   = true;
+        if (iequals(opts.ui_show, "regions"))   app->open_regions_picker = true;
         if (iequals(opts.ui_show, "log"))       app->show_log       = true;
         if (iequals(opts.ui_show, "shortcuts")) app->show_shortcuts = true;
         if (iequals(opts.ui_show, "about"))     app->show_about     = true;

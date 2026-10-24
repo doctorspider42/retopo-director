@@ -216,6 +216,7 @@ void draw_topbar(AppState& app, const ImVec2& pos, const ImVec2& size, bool& wan
                  bool& want_screenshot)
 {
     const Palette& p = palette();
+    poll_checkpoint_download(app);
     const bool open = begin_surface("##topbar", pos, size, p.surface, ImVec2(S(16), 0));
     if (open) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -309,6 +310,32 @@ void draw_topbar(AppState& app, const ImVec2& pos, const ImVec2& size, bool& wan
             ImGui::EndPopup();
         }
         ImGui::PopStyleVar();
+
+        // --- who draws the regions -------------------------------------------
+        // Next to the target because it is the same kind of choice: made
+        // before a run, read by every part of it. It lived on the third page
+        // of Settings, where nobody found it.
+        ImGui::SameLine(0.0f, S(6));
+        ImGui::SetCursorPosY(cy - S(17));
+        {
+            const std::string note = split_chip_note(app);
+            ImGui::BeginDisabled(running);
+            if (chip_button("##regions", Icon::Cube, "Regions", note.c_str(), true) ||
+                (app.open_regions_picker && !running && !app.panel.regions.empty())) {
+                ImGui::OpenPopup("regions_menu");
+                app.open_regions_picker = false;
+            }
+            ImGui::EndDisabled();
+            if (app.checkpoint_download.running() && app.sam_switch_pending) {
+                // The download's progress along the chip's bottom edge.
+                const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                const float  fr = std::clamp(app.checkpoint_download.fraction(), 0.0f, 1.0f);
+                dl->AddRectFilled({a.x + S(4), b.y - S(2)}, {a.x + S(4) + (b.x - a.x - S(8)) * fr, b.y},
+                                  col(p.accent), S(1));
+            }
+            regions_picker_popup(app, {ImGui::GetItemRectMin().x,
+                                       ImGui::GetItemRectMax().y + S(6)});
+        }
 
         // --- right hand side ---------------------------------------------------
         static const char* const kModes[] = {"Director", "Manual"};

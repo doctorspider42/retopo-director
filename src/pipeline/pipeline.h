@@ -113,6 +113,10 @@ struct PipelineResults {
     Mesh             lowpoly;
     MeshAnalysis     analysis;
     Segmentation     segmentation;
+    // Who drew it: "Geometric", or "SAM" and the model. Asking for SAM is not
+    // the same as getting it - a missing checkpoint falls back - and the tune
+    // tab offers a re-split when this and the settings disagree.
+    std::string      split_by;
     KnobPanel        panel;
     // The director's standing objection to the brief, latest wins. Advisory:
     // the pipeline reads it only to write it down.

@@ -3,6 +3,7 @@
 #include "core/log.h"
 #include "core/paths.h"
 #include "core/util.h"
+#include "segment/sam.h"
 
 #include <algorithm>
 #include <limits>
@@ -463,7 +464,12 @@ bool Pipeline::stage_segment(const PipelineSettings& s)
         if (!done && asked_for) RD_WARN("falling back to the geometric split");
     }
 
-    if (!done) {
+    std::string split_by = "Geometric";
+    if (done) {
+        split_by = "SAM";
+        for (const SamCheckpoint& c : sam_checkpoints())
+            if (s.segmenter.sam.model_type == c.model_type) split_by = std::string("SAM ") + c.label;
+    } else {
         segment_mesh(copy, analysis_copy, seg, s.segmentation, progress);
         if (cancelled()) return false;
     }
@@ -477,6 +483,7 @@ bool Pipeline::stage_segment(const PipelineSettings& s)
     {
         std::lock_guard lock(results_mutex_);
         results_.segmentation = std::move(seg);
+        results_.split_by     = split_by;
         results_.highpoly     = std::move(copy);
         results_.analysis     = std::move(analysis_copy);
     }
@@ -663,13 +670,6 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         return sil.mean <= than.silhouette.mean;
     };
 
-    for (int iteration = 1; iteration <= max_iterations; ++iteration) {
-        if (cancelled()) return false;
-        iteration_.store(iteration);
-        Stopwatch iteration_watch;
-
-        // --- snapshot the inputs -------------------------------------------
-        Mesh         source;
     // A rebuild runs the loop again on top of the run's passes, and numbered
     // them from one again: two passes called 1, both marked kept in the
     // report, and the rebuild's renders written over the first pass's.
@@ -681,10 +681,17 @@ bool Pipeline::stage_iterate(const PipelineSettings& s)
         if (!results_.iterations.empty()) first_pass = results_.iterations.back().index;
     }
 
+    for (int iteration = 1; iteration <= max_iterations; ++iteration) {
+        if (cancelled()) return false;
+        iteration_.store(iteration);
+        const int pass = first_pass + iteration;
+        Stopwatch iteration_watch;
+
+        // --- snapshot the inputs -------------------------------------------
+        Mesh         source;
         MeshAnalysis analysis;
         Segmentation seg;
         KnobPanel    panel;
-        const int pass = first_pass + iteration;
         {
             std::lock_guard lock(results_mutex_);
             source   = results_.highpoly;
