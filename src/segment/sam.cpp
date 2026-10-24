@@ -78,27 +78,39 @@ std::string resolve_python(const std::string& configured)
 // Splits every label into its connected components over the dual graph. A mask
 // that wraps a limb can cover triangles on two different parts of the surface
 // that share nothing but a colour, and those must not become one region.
+//
+// Only pieces of some size become regions of their own. Strided voting leaves
+// specks of a label all over the surface, and on a dense mesh that SAM mostly
+// failed to claim - an untextured figure, 12% claimed - giving each speck a
+// region made over five thousand, more than the reduction could merge back.
+// Specks go back to unassigned, and the region fill hands them to whatever
+// surrounds them.
 void split_disconnected(const MeshTopology& topo, std::vector<uint16_t>& tri_region,
                         uint32_t& next_label)
 {
     const size_t tcount = tri_region.size();
     if (topo.triangle_count() != tcount) return;
 
-    std::vector<uint8_t>           seen(tcount, 0);
-    std::vector<uint32_t>          stack, component;
-    std::unordered_map<uint16_t, int> components_of;
+    struct Component {
+        uint16_t              label;
+        std::vector<uint32_t> tris;
+    };
+    std::vector<Component>              components;
+    std::unordered_map<uint16_t, size_t> largest_of;   // label -> triangles
+    std::vector<uint8_t>                seen(tcount, 0);
+    std::vector<uint32_t>               stack;
 
     for (size_t t = 0; t < tcount; ++t) {
         if (seen[t] || tri_region[t] == kNoRegion) continue;
         const uint16_t label = tri_region[t];
 
-        component.clear();
+        Component comp{label, {}};
         stack.assign(1, static_cast<uint32_t>(t));
         seen[t] = 1;
         while (!stack.empty()) {
             const uint32_t cur = stack.back();
             stack.pop_back();
-            component.push_back(cur);
+            comp.tris.push_back(cur);
             for (int c = 0; c < 3; ++c) {
                 const uint32_t n = topo.neighbour(cur, c);
                 if (n == kInvalidIndex || n >= tcount) continue;
@@ -107,13 +119,25 @@ void split_disconnected(const MeshTopology& topo, std::vector<uint16_t>& tri_reg
                 stack.push_back(n);
             }
         }
+        size_t& largest = largest_of[label];
+        largest = std::max(largest, comp.tris.size());
+        components.push_back(std::move(comp));
+    }
 
-        // The first component of a label keeps it; every later one is a
-        // separate patch that happened to share a mask, and gets a fresh id.
-        if (++components_of[label] == 1) continue;
-        if (next_label >= kNoRegion) continue;   // out of ids: leave it merged
-        const uint16_t fresh = static_cast<uint16_t>(next_label++);
-        for (uint32_t tri : component) tri_region[tri] = fresh;
+    // The largest piece of a label keeps it. Another piece at least a sixth
+    // its size is a second part under the same mask - two boots - and gets a
+    // fresh id; anything smaller is a speck.
+    std::unordered_map<uint16_t, bool> kept;
+    for (const Component& comp : components) {
+        const size_t largest = largest_of[comp.label];
+        if (comp.tris.size() == largest && !kept[comp.label]) {
+            kept[comp.label] = true;
+            continue;
+        }
+        const bool part = comp.tris.size() >= 16 && comp.tris.size() * 6 >= largest;
+        uint16_t   to   = kNoRegion;
+        if (part && next_label < kNoRegion) to = static_cast<uint16_t>(next_label++);
+        for (uint32_t tri : comp.tris) tri_region[tri] = to;
     }
 }
 
@@ -503,12 +527,19 @@ private:
         const size_t target = size_t(std::clamp(opts.target_regions, 2, 512));
         int guard = 0;
         while (seg.regions.size() > target && guard++ < 4096) {
-            size_t smallest = 0;
-            for (size_t i = 1; i < seg.regions.size(); ++i)
-                if (seg.regions[i].area_share < seg.regions[smallest].area_share) smallest = i;
+            // A region with no neighbours is a whole loose shell - an eye, a
+            // button - and has nowhere to go. Stopping at the first one left a
+            // character with a thousand regions, so it is passed over instead.
+            size_t smallest = SIZE_MAX;
+            for (size_t i = 0; i < seg.regions.size(); ++i) {
+                if (seg.regions[i].neighbours.empty()) continue;
+                if (smallest == SIZE_MAX ||
+                    seg.regions[i].area_share < seg.regions[smallest].area_share)
+                    smallest = i;
+            }
+            if (smallest == SIZE_MAX) break;
 
             const Region& r = seg.regions[smallest];
-            if (r.neighbours.empty()) break;
 
             uint16_t best       = r.neighbours.front();
             float    best_score = -2.0f;

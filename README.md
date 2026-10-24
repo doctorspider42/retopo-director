@@ -202,7 +202,9 @@ The API key comes from settings or `OPENAI_API_KEY` and is never written to disk
 <summary><b>Setting up SAM</b></summary>
 
 ```bash
-pip install torch torchvision segment-anything pillow numpy
+# the CUDA build of torch; the default PyPI wheel on Windows is CPU only, minutes a mesh
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+pip install segment-anything opencv-python-headless pillow numpy
 retopo-director.exe --sam-download vit_b
 retopo-director.exe --mesh high.obj --segmenter sam
 ```
