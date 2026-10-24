@@ -186,8 +186,17 @@ void apply_palette(Texture& tex, const CoverageMask& mask, const Palette& palett
                 float(tex.channels > 2 ? p[2] : p[0]) / 255.0f};
         }
 
+    // Damped and serpentine. Full strength Floyd-Steinberg carried every
+    // rounding error on to the neighbours and covered a face's skin in a
+    // checker grain at 256 colours, louder than the banding it was there to
+    // hide; three fifths of the error still breaks the bands up. Running every
+    // other row backwards keeps the error from piling up toward one side.
+    constexpr float kDitherStrength = 0.6f;
     for (int y = 0; y < tex.height; ++y) {
-        for (int x = 0; x < tex.width; ++x) {
+        const bool backwards = (y & 1) != 0;
+        const int  dx        = backwards ? -1 : 1;
+        for (int k = 0; k < tex.width; ++k) {
+            const int    x = backwards ? tex.width - 1 - k : k;
             const size_t i = size_t(y) * tex.width + x;
             const Vec3 old = buffer[i];
             const size_t entry = nearest_entry(palette, old);
@@ -199,7 +208,7 @@ void apply_palette(Texture& tex, const CoverageMask& mask, const Palette& palett
             if (tex.channels > 2) p[2] = uint8_t(clampf(chosen.z * 255.0f + 0.5f, 0.0f, 255.0f));
 
             if (!dither) continue;
-            const Vec3 err = old - chosen;
+            const Vec3 err = (old - chosen) * kDitherStrength;
             auto spread = [&](int nx, int ny, float w) {
                 if (nx < 0 || nx >= tex.width || ny < 0 || ny >= tex.height) return;
                 if (!mask.covered.empty() && !mask.at(nx, ny)) return;
@@ -207,10 +216,10 @@ void apply_palette(Texture& tex, const CoverageMask& mask, const Palette& palett
                 target += err * w;
                 target = {saturate(target.x), saturate(target.y), saturate(target.z)};
             };
-            spread(x + 1, y,     7.0f / 16.0f);
-            spread(x - 1, y + 1, 3.0f / 16.0f);
-            spread(x,     y + 1, 5.0f / 16.0f);
-            spread(x + 1, y + 1, 1.0f / 16.0f);
+            spread(x + dx, y,     7.0f / 16.0f);
+            spread(x - dx, y + 1, 3.0f / 16.0f);
+            spread(x,      y + 1, 5.0f / 16.0f);
+            spread(x + dx, y + 1, 1.0f / 16.0f);
         }
     }
 }
