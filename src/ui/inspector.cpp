@@ -378,10 +378,36 @@ void tab_tune(AppState& app)
             spacer(4.0f);
 
             begin_form("region_form", 118.0f);
-            changed |= slider_float("Share", &k.share, 0.0f, 20.0f, 1.0f,
-                                    "Relative slice of the triangle budget. Doubling this "
-                                    "doubles the region's share of what is left after every "
-                                    "other region is weighed.");
+            {
+                // Shown as the region's percentage of the budget, not as the raw
+                // weight. The weights add up to about one, so a weight slider
+                // running to twenty handed half the budget to one region within
+                // a few pixels of the left end. The others keep their
+                // proportions and make room.
+                double others = 0.0, built_others = 0.0;
+                float  built_share = k.share;
+                for (const RegionKnobs& o : app.panel.regions)
+                    if (o.id != k.id) others += std::max(0.0f, o.share);
+                for (const RegionKnobs& o : built.regions) {
+                    if (o.id == k.id) built_share = o.share;
+                    else              built_others += std::max(0.0f, o.share);
+                }
+                auto percent = [](double mine, double rest) {
+                    return mine + rest > 1e-9 ? float(100.0 * mine / (mine + rest)) : 0.0f;
+                };
+                float pct = percent(std::max(0.0f, k.share), others);
+                const float built_pct =
+                    percent(std::max(0.0f, built_share), was ? built_others : others);
+                if (slider_float("Budget", &pct, 0.0f, 60.0f, built_pct,
+                                 "This region's slice of the triangle budget. The other "
+                                 "regions keep their proportions and share what is left. "
+                                 "Right click goes back to what was built.",
+                                 "%.1f%%")) {
+                    const double p = std::clamp(double(pct), 0.0, 95.0) / 100.0;
+                    k.share = others > 1e-9 ? float(p * others / (1.0 - p)) : 1.0f;
+                    changed = true;
+                }
+            }
             changed |= slider_float("Detail priority", &k.detail_priority, 0.0f, 1.0f, 0.5f,
                                     "Breaks ties when the budget runs short.");
             {
