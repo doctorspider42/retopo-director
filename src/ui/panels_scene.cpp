@@ -138,7 +138,12 @@ void dashed_rect(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 color, float rounding
     ImVector<ImVec2> pts = dl->_Path;
     dl->PathClear();
     if (pts.Size < 2) return;
-    pts.push_back(pts[0]);
+    // A copy, not pts[0] itself: ImVector::push_back frees the old buffer
+    // before it reads the argument, so a reference into the vector reads freed
+    // memory whenever it grows. That drew a dash to a garbage corner, and now
+    // and then one a billion pixels long, which never finished.
+    const ImVec2 first = pts[0];
+    pts.push_back(first);
     float carried = 0.0f;
     bool  on      = true;
     for (int i = 0; i + 1 < pts.Size; ++i) {
